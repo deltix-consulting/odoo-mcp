@@ -10,6 +10,8 @@ from odoo_mcp.security.fields import (
     is_default_hidden,
     redact_fields_get,
     redact_response,
+    validate_aggregate_fields,
+    validate_groupby,
     validate_requested_fields,
     validate_write_values,
 )
@@ -213,3 +215,177 @@ def test_redact_fields_get_filters_always_redacted() -> None:
     assert "password" not in out
     assert "vat" in out
     assert out["vat"].get("_sensitive") is True
+
+
+# --- validate_aggregate_fields (read_group fields arg) -----------------------
+
+
+LEAD_FIELDS = frozenset(
+    {"id", "name", "stage_id", "user_id", "expected_revenue", "create_date", "api_key"}
+)
+
+
+def test_validate_aggregate_fields_accepts_plain_and_typed() -> None:
+    out = validate_aggregate_fields(
+        "crm.lead",
+        ["expected_revenue:sum", "id:count", "stage_id"],
+        LEAD_FIELDS,
+        allow_sensitive=frozenset(),
+    )
+    assert out == ["expected_revenue:sum", "id:count", "stage_id"]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "expected_revenue:median",   # not in agg whitelist
+        "expected_revenue:SUM",      # case-sensitive
+        "expected_revenue:sum:extra",  # too many colons
+        "alias:sum(expected_revenue)",  # alias syntax blocked
+        ":sum",                      # empty field
+        "",
+    ],
+)
+def test_validate_aggregate_fields_rejects_bad_syntax(spec: str) -> None:
+    with pytest.raises(FieldPolicyError):
+        validate_aggregate_fields(
+            "crm.lead", [spec], LEAD_FIELDS, allow_sensitive=frozenset()
+        )
+
+
+def test_validate_aggregate_fields_rejects_dotted() -> None:
+    with pytest.raises(FieldPolicyError):
+        validate_aggregate_fields(
+            "crm.lead",
+            ["user_id.login:count"],
+            LEAD_FIELDS,
+            allow_sensitive=frozenset(),
+        )
+
+
+def test_validate_aggregate_fields_rejects_unknown_field() -> None:
+    with pytest.raises(FieldPolicyError):
+        validate_aggregate_fields(
+            "crm.lead",
+            ["bogus_field:sum"],
+            LEAD_FIELDS,
+            allow_sensitive=frozenset(),
+        )
+
+
+def test_validate_aggregate_fields_rejects_always_redacted() -> None:
+    with pytest.raises(FieldPolicyError):
+        validate_aggregate_fields(
+            "crm.lead",
+            ["api_key:count"],
+            LEAD_FIELDS,
+            allow_sensitive=frozenset({"api_key"}),  # even with opt-in
+        )
+
+
+def test_validate_aggregate_fields_requires_optin_for_sensitive() -> None:
+    partner_fields = frozenset({"id", "name", "vat"})
+    with pytest.raises(FieldPolicyError):
+        validate_aggregate_fields(
+            "res.partner", ["vat:count"], partner_fields, allow_sensitive=frozenset()
+        )
+    # With opt-in: accepted.
+    out = validate_aggregate_fields(
+        "res.partner",
+        ["vat:count"],
+        partner_fields,
+        allow_sensitive=frozenset({"vat"}),
+    )
+    assert out == ["vat:count"]
+
+
+def test_validate_aggregate_fields_rejects_empty_list() -> None:
+    with pytest.raises(FieldPolicyError):
+        validate_aggregate_fields(
+            "crm.lead", [], LEAD_FIELDS, allow_sensitive=frozenset()
+        )
+
+
+# --- validate_groupby (read_group groupby arg) -------------------------------
+
+
+def test_validate_groupby_accepts_plain_and_time_bucket() -> None:
+    out = validate_groupby(
+        "crm.lead",
+        ["stage_id", "create_date:month"],
+        LEAD_FIELDS,
+        allow_sensitive=frozenset(),
+    )
+    assert out == ["stage_id", "create_date:month"]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "create_date:decade",    # not in granularity whitelist
+        "create_date:DAY",       # case-sensitive
+        "create_date:day:extra",  # too many colons
+        ":month",                # empty field
+        "",
+    ],
+)
+def test_validate_groupby_rejects_bad_syntax(spec: str) -> None:
+    with pytest.raises(FieldPolicyError):
+        validate_groupby(
+            "crm.lead", [spec], LEAD_FIELDS, allow_sensitive=frozenset()
+        )
+
+
+def test_validate_groupby_rejects_dotted() -> None:
+    with pytest.raises(FieldPolicyError):
+        validate_groupby(
+            "crm.lead",
+            ["user_id.login"],
+            LEAD_FIELDS,
+            allow_sensitive=frozenset(),
+        )
+
+
+def test_validate_groupby_rejects_unknown_field() -> None:
+    with pytest.raises(FieldPolicyError):
+        validate_groupby(
+            "crm.lead", ["bogus"], LEAD_FIELDS, allow_sensitive=frozenset()
+        )
+
+
+def test_validate_groupby_rejects_always_redacted() -> None:
+    with pytest.raises(FieldPolicyError):
+        validate_groupby(
+            "crm.lead",
+            ["api_key"],
+            LEAD_FIELDS,
+            allow_sensitive=frozenset({"api_key"}),  # even with opt-in
+        )
+
+
+def test_validate_groupby_requires_optin_for_sensitive() -> None:
+    partner_fields = frozenset({"id", "name", "vat"})
+    with pytest.raises(FieldPolicyError):
+        validate_groupby(
+            "res.partner", ["vat"], partner_fields, allow_sensitive=frozenset()
+        )
+    out = validate_groupby(
+        "res.partner", ["vat"], partner_fields, allow_sensitive=frozenset({"vat"})
+    )
+    assert out == ["vat"]
+
+
+def test_validate_groupby_rejects_empty_list() -> None:
+    with pytest.raises(FieldPolicyError):
+        validate_groupby("crm.lead", [], LEAD_FIELDS, allow_sensitive=frozenset())
+
+
+def test_validate_groupby_caps_dimensions() -> None:
+    # 5 dimensions is over the cap of 4.
+    with pytest.raises(FieldPolicyError):
+        validate_groupby(
+            "crm.lead",
+            ["id", "name", "stage_id", "user_id", "create_date:day"],
+            LEAD_FIELDS,
+            allow_sensitive=frozenset(),
+        )

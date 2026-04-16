@@ -65,6 +65,21 @@ _DEFAULT_HIDDEN: Final[dict[str, frozenset[str]]] = {
 
 _BINARY_PLACEHOLDER_PREFIX: Final[str] = "<binary:"
 
+# Whitelisted aggregation functions for read_group `fields` entries.
+# Anything outside this set is rejected — no SQL-ish tricks via alias syntax.
+_AGG_FUNCS: Final[frozenset[str]] = frozenset(
+    {"sum", "avg", "count", "count_distinct", "max", "min"}
+)
+
+# Whitelisted date/datetime bucketing suffixes for read_group `groupby` entries.
+_GROUPBY_TIME_SUFFIXES: Final[frozenset[str]] = frozenset(
+    {"hour", "day", "week", "month", "quarter", "year"}
+)
+
+# Hard cap on groupby dimensions. More than this is almost always a mistake
+# and risks combinatorial explosion on the Odoo side.
+_GROUPBY_MAX_DIMS: Final[int] = 4
+
 
 def is_always_redacted(field_name: str) -> bool:
     """True if ``field_name`` matches an always-redacted pattern."""
@@ -154,6 +169,132 @@ def validate_write_values(
             )
         out[name] = value
     return out
+
+
+def validate_aggregate_fields(
+    model: str,
+    fields: list[str],
+    known_fields: frozenset[str],
+    *,
+    allow_sensitive: frozenset[str],
+) -> list[str]:
+    """Validate the ``fields`` list for ``read_group``.
+
+    Each entry is either ``"<field>"`` (Odoo uses a default aggregation) or
+    ``"<field>:<agg>"`` where ``<agg>`` is one of ``sum``, ``avg``, ``count``,
+    ``count_distinct``, ``max``, ``min``. Anything else — alias syntax, SQL
+    fragments, nested parens — is rejected.
+
+    Same redaction policy as :func:`validate_requested_fields`:
+    always-redacted fields are banned unconditionally, default-hidden fields
+    require opt-in via ``allow_sensitive``.
+    """
+    if not isinstance(fields, list) or not fields:
+        raise FieldPolicyError(
+            "Aggregate field list is required — pass at least one 'field' or 'field:agg'."
+        )
+    for spec in fields:
+        if not isinstance(spec, str) or not spec:
+            raise FieldPolicyError(
+                f"Aggregate field spec must be a non-empty string, got {spec!r}."
+            )
+        parts = spec.split(":")
+        if len(parts) == 1:
+            name = parts[0]
+        elif len(parts) == 2:
+            name, agg = parts
+            if agg not in _AGG_FUNCS:
+                raise FieldPolicyError(
+                    f"Aggregation {agg!r} not allowed. Use one of {sorted(_AGG_FUNCS)}."
+                )
+        else:
+            raise FieldPolicyError(
+                f"Aggregate field spec {spec!r} not supported — use 'field' or 'field:agg'."
+            )
+        if not name:
+            raise FieldPolicyError(f"Aggregate field spec {spec!r} has empty field name.")
+        if "." in name:
+            raise FieldPolicyError(
+                f"Dotted aggregate field {name!r} not allowed."
+            )
+        if name not in known_fields:
+            raise FieldPolicyError(
+                f"Aggregate field {name!r} does not exist on model {model!r}."
+            )
+        if is_always_redacted(name):
+            raise FieldPolicyError(
+                f"Aggregate field {name!r} is permanently redacted."
+            )
+        if is_default_hidden(model, name) and name not in allow_sensitive:
+            raise FieldPolicyError(
+                f"Aggregate field {name!r} on {model!r} is sensitive and must be "
+                f"explicitly unlocked via allow_sensitive_fields=[{name!r}, ...]."
+            )
+    return list(fields)
+
+
+def validate_groupby(
+    model: str,
+    groupby: list[str],
+    known_fields: frozenset[str],
+    *,
+    allow_sensitive: frozenset[str],
+) -> list[str]:
+    """Validate the ``groupby`` list for ``read_group``.
+
+    Each entry is either ``"<field>"`` or ``"<date_field>:<granularity>"``
+    where ``<granularity>`` is one of ``hour``, ``day``, ``week``, ``month``,
+    ``quarter``, ``year``. At most :data:`_GROUPBY_MAX_DIMS` dimensions.
+
+    Default-hidden fields are rejected here even with opt-in is required,
+    because grouping echoes the distinct field values in the result — which
+    is effectively a read of those values.
+    """
+    if not isinstance(groupby, list) or not groupby:
+        raise FieldPolicyError(
+            "groupby is required for read_group — pass at least one dimension."
+        )
+    if len(groupby) > _GROUPBY_MAX_DIMS:
+        raise FieldPolicyError(
+            f"groupby supports at most {_GROUPBY_MAX_DIMS} dimensions, got {len(groupby)}."
+        )
+    for spec in groupby:
+        if not isinstance(spec, str) or not spec:
+            raise FieldPolicyError(
+                f"groupby entry must be a non-empty string, got {spec!r}."
+            )
+        parts = spec.split(":")
+        if len(parts) == 1:
+            name = parts[0]
+        elif len(parts) == 2:
+            name, gran = parts
+            if gran not in _GROUPBY_TIME_SUFFIXES:
+                raise FieldPolicyError(
+                    f"groupby granularity {gran!r} not allowed. "
+                    f"Use one of {sorted(_GROUPBY_TIME_SUFFIXES)}."
+                )
+        else:
+            raise FieldPolicyError(
+                f"groupby spec {spec!r} not supported — use 'field' or 'date_field:granularity'."
+            )
+        if not name:
+            raise FieldPolicyError(f"groupby spec {spec!r} has empty field name.")
+        if "." in name:
+            raise FieldPolicyError(f"Dotted groupby field {name!r} not allowed.")
+        if name not in known_fields:
+            raise FieldPolicyError(
+                f"groupby field {name!r} does not exist on model {model!r}."
+            )
+        if is_always_redacted(name):
+            raise FieldPolicyError(
+                f"groupby field {name!r} is permanently redacted."
+            )
+        if is_default_hidden(model, name) and name not in allow_sensitive:
+            raise FieldPolicyError(
+                f"groupby field {name!r} on {model!r} is sensitive — grouping by it "
+                f"reveals its distinct values. Opt in via allow_sensitive_fields=[{name!r}, ...]."
+            )
+    return list(groupby)
 
 
 def redact_response(

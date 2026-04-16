@@ -21,14 +21,22 @@ class Operation(StrEnum):
     """The only operations the MCP is allowed to execute against Odoo."""
 
     SEARCH_READ = "search_read"
+    SEARCH_COUNT = "search_count"
     READ = "read"
+    READ_GROUP = "read_group"
     CREATE = "create"
     WRITE = "write"
     FIELDS_GET = "fields_get"  # used only by odoo_describe_model
 
 
 _READ_OPS: Final[frozenset[Operation]] = frozenset(
-    {Operation.SEARCH_READ, Operation.READ, Operation.FIELDS_GET}
+    {
+        Operation.SEARCH_READ,
+        Operation.SEARCH_COUNT,
+        Operation.READ,
+        Operation.READ_GROUP,
+        Operation.FIELDS_GET,
+    }
 )
 _WRITE_OPS: Final[frozenset[Operation]] = frozenset({Operation.CREATE, Operation.WRITE})
 

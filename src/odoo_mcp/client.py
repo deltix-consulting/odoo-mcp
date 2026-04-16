@@ -250,6 +250,39 @@ class OdooClient:
             )
         return result
 
+    def search_count(self, model: str, domain: list[Any]) -> int:
+        result = self._execute(model, "search_count", [domain], {})
+        if isinstance(result, bool) or not isinstance(result, int):
+            raise OdooRemoteError(
+                f"search_count({model!r}) returned unexpected type {type(result).__name__}"
+            )
+        int_result: int = result
+        return int_result
+
+    def read_group(
+        self,
+        model: str,
+        domain: list[Any],
+        fields: list[str],
+        groupby: list[str],
+        *,
+        limit: int | None,
+        offset: int,
+        orderby: str | None,
+        lazy: bool,
+    ) -> list[dict[str, Any]]:
+        kwargs: dict[str, Any] = {"offset": offset, "lazy": lazy}
+        if limit is not None:
+            kwargs["limit"] = limit
+        if orderby:
+            kwargs["orderby"] = orderby
+        result = self._execute(model, "read_group", [domain, fields, groupby], kwargs)
+        if not isinstance(result, list):
+            raise OdooRemoteError(
+                f"read_group({model!r}) returned unexpected type {type(result).__name__}"
+            )
+        return result
+
     def read(
         self, model: str, ids: list[int], fields: list[str]
     ) -> list[dict[str, Any]]:

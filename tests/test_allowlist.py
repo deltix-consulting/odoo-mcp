@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from odoo_mcp.errors import ModelNotAllowedError, OperationNotAllowedError
-from odoo_mcp.security.allowlist import Operation, check_model, check_operation, is_write
+from odoo_mcp.security.allowlist import Operation, check_model, check_operation, is_read, is_write
 
 
 def test_check_model_accepts_exact_match() -> None:
@@ -59,5 +59,22 @@ def test_is_write_classification() -> None:
     assert is_write(Operation.CREATE)
     assert is_write(Operation.WRITE)
     assert not is_write(Operation.SEARCH_READ)
+    assert not is_write(Operation.SEARCH_COUNT)
     assert not is_write(Operation.READ)
+    assert not is_write(Operation.READ_GROUP)
     assert not is_write(Operation.FIELDS_GET)
+
+
+def test_is_read_classification() -> None:
+    assert is_read(Operation.SEARCH_READ)
+    assert is_read(Operation.SEARCH_COUNT)
+    assert is_read(Operation.READ)
+    assert is_read(Operation.READ_GROUP)
+    assert is_read(Operation.FIELDS_GET)
+    assert not is_read(Operation.CREATE)
+    assert not is_read(Operation.WRITE)
+
+
+def test_check_operation_accepts_new_aggregate_ops() -> None:
+    assert check_operation("search_count") is Operation.SEARCH_COUNT
+    assert check_operation("read_group") is Operation.READ_GROUP

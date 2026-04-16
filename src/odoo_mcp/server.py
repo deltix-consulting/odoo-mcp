@@ -48,6 +48,8 @@ from .security.domain import sandbox_domain
 from .security.fields import (
     redact_fields_get,
     redact_response,
+    validate_aggregate_fields,
+    validate_groupby,
     validate_requested_fields,
     validate_write_values,
 )
@@ -199,6 +201,88 @@ def _build_tools() -> list[Tool]:
                         "default": [],
                     },
                     "include_binary": {"type": "boolean", "default": False},
+                },
+            },
+        ),
+        Tool(
+            name="odoo_search_count",
+            description=(
+                "Count records matching a domain on an allowlisted model. Returns a "
+                "single integer — much cheaper than fetching records just to count them. "
+                "Same domain sandbox as odoo_search_read: dotted fields and unknown "
+                "operators are rejected. Read-only."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["instance", "model"],
+                "additionalProperties": False,
+                "properties": {
+                    "instance": {"type": "string"},
+                    "model": {"type": "string"},
+                    "domain": {
+                        "type": "array",
+                        "description": "Odoo domain; same rules as odoo_search_read.",
+                        "default": [],
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="odoo_read_group",
+            description=(
+                "Aggregate records via Odoo's read_group. Use this for dashboards and "
+                "summaries instead of fetching records to count / sum them yourself. "
+                "Aggregate `fields` syntax: 'field' (default agg) or 'field:AGG' where "
+                "AGG is sum|avg|count|count_distinct|max|min. `groupby` syntax: 'field' "
+                "or 'date_field:GRAN' where GRAN is day|week|month|quarter|year|hour. "
+                "At most 4 groupby dimensions. Sensitive fields require "
+                "allow_sensitive_fields opt-in; always-redacted fields are blocked."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["instance", "model", "fields", "groupby"],
+                "additionalProperties": False,
+                "properties": {
+                    "instance": {"type": "string"},
+                    "model": {"type": "string"},
+                    "domain": {"type": "array", "default": []},
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": "Aggregate specs, e.g. ['amount_total:sum', 'id:count'].",
+                    },
+                    "groupby": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "description": "Dimensions, e.g. ['stage_id'] or ['date_order:month', 'user_id'].",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Max groups to return. Clamped to the instance hard cap.",
+                    },
+                    "offset": {"type": "integer", "minimum": 0, "default": 0},
+                    "orderby": {
+                        "type": "string",
+                        "description": "Order string, e.g. 'amount_total desc'.",
+                    },
+                    "lazy": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "Odoo lazy flag: if true, only the first groupby dimension is "
+                            "aggregated and child groups are returned as drill-down specs. "
+                            "Set to false to compute all dimensions eagerly."
+                        ),
+                    },
+                    "allow_sensitive_fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "default": [],
+                    },
                 },
             },
         ),
@@ -362,6 +446,10 @@ class Dispatcher:
             return self._describe_model(arguments)
         if name == "odoo_search_read":
             return self._search_read(arguments)
+        if name == "odoo_search_count":
+            return self._search_count(arguments)
+        if name == "odoo_read_group":
+            return self._read_group(arguments)
         if name == "odoo_read":
             return self._read(arguments)
         if name == "odoo_create":
@@ -484,6 +572,113 @@ class Dispatcher:
             "model": model,
             "records": redacted,
             "count": len(redacted),
+        }
+
+    def _search_count(self, args: dict[str, Any]) -> dict[str, Any]:
+        instance_name = _require_str(args, "instance")
+        model = _require_str(args, "model")
+        domain = args.get("domain") or []
+
+        rt = self.app.instance(instance_name)
+        started = time.monotonic()
+        self.app.rate_limiter.take(instance_name)
+        op = check_operation(Operation.SEARCH_COUNT)
+        check_model(model, rt.config.allowed_models)
+
+        fields_meta = rt.client.fields_get(model)
+        known = frozenset(fields_meta.keys())
+        validated_domain = sandbox_domain(domain, known)
+
+        count = rt.client.search_count(model, validated_domain)
+        duration = int((time.monotonic() - started) * 1000)
+        self._audit_success(
+            "odoo_search_count",
+            op,
+            instance_name,
+            model,
+            duration,
+            False,
+            {
+                "record_count": count,
+                "domain_leaves": sum(
+                    1 for e in validated_domain if not isinstance(e, str)
+                ),
+            },
+        )
+        return {"instance": instance_name, "model": model, "count": count}
+
+    def _read_group(self, args: dict[str, Any]) -> dict[str, Any]:
+        instance_name = _require_str(args, "instance")
+        model = _require_str(args, "model")
+        fields = _require_list_of_str(args, "fields")
+        groupby = _require_list_of_str(args, "groupby")
+        domain = args.get("domain") or []
+        limit = args.get("limit")
+        offset = int(args.get("offset") or 0)
+        if offset < 0:
+            raise OdooMcpError("offset must be >= 0")
+        orderby = args.get("orderby")
+        if orderby is not None and not isinstance(orderby, str):
+            raise OdooMcpError("orderby must be a string")
+        lazy = bool(args.get("lazy", True))
+        allow_sensitive = frozenset(args.get("allow_sensitive_fields") or [])
+
+        rt = self.app.instance(instance_name)
+        started = time.monotonic()
+        self.app.rate_limiter.take(instance_name)
+        op = check_operation(Operation.READ_GROUP)
+        check_model(model, rt.config.allowed_models)
+
+        fields_meta = rt.client.fields_get(model)
+        known = frozenset(fields_meta.keys())
+        validated_fields = validate_aggregate_fields(
+            model, fields, known, allow_sensitive=allow_sensitive
+        )
+        validated_groupby = validate_groupby(
+            model, groupby, known, allow_sensitive=allow_sensitive
+        )
+        validated_domain = sandbox_domain(domain, known)
+        # Clamp group count to the hard cap regardless of caller input.
+        effective_limit = clamp_limit(
+            limit, rt.config.max_records_hard_cap, rt.config.max_records_hard_cap
+        )
+
+        rows = rt.client.read_group(
+            model,
+            validated_domain,
+            validated_fields,
+            validated_groupby,
+            limit=effective_limit,
+            offset=offset,
+            orderby=orderby,
+            lazy=lazy,
+        )
+
+        duration = int((time.monotonic() - started) * 1000)
+        self._audit_success(
+            "odoo_read_group",
+            op,
+            instance_name,
+            model,
+            duration,
+            False,
+            {
+                "record_count": len(rows),
+                "limit": effective_limit,
+                "offset": offset,
+                "field_count": len(validated_fields),
+                "groupby_count": len(validated_groupby),
+                "domain_leaves": sum(
+                    1 for e in validated_domain if not isinstance(e, str)
+                ),
+                "lazy": lazy,
+            },
+        )
+        return {
+            "instance": instance_name,
+            "model": model,
+            "groups": rows,
+            "count": len(rows),
         }
 
     def _read(self, args: dict[str, Any]) -> dict[str, Any]:
