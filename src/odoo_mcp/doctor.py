@@ -1,0 +1,133 @@
+"""Pre-flight health check for the Odoo MCP.
+
+Invoked via ``python -m odoo_mcp doctor``. Walks the startup sequence without
+launching the MCP server, so the user can verify their setup is correct before
+wiring it into Claude Code. Reports green/yellow/red for each step and exits
+non-zero if anything failed.
+
+Specifically checks:
+
+1. Config file exists, is a regular file, and has ``chmod 600``.
+2. Config TOML parses and conforms to the schema.
+3. Audit log directory is writable.
+4. For each instance:
+   a. Credential env vars are present.
+   b. TLS connects and the remote cert is valid (unless ``allow_self_signed``).
+   c. Odoo ``authenticate`` succeeds.
+   d. A smoke-test ``fields_get`` on one allowed model succeeds.
+"""
+
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .audit import AuditLog
+from .client import OdooClient
+from .config import DEFAULT_CONFIG_PATH, load_config
+from .credentials import load_credentials
+from .errors import CredentialsError, OdooMcpError
+
+
+@dataclass(slots=True)
+class _Step:
+    name: str
+    ok: bool
+    detail: str
+
+
+@dataclass(slots=True)
+class _Report:
+    steps: list[_Step] = field(default_factory=list)
+
+    def add(self, name: str, ok: bool, detail: str = "") -> None:
+        self.steps.append(_Step(name=name, ok=ok, detail=detail))
+
+    @property
+    def ok(self) -> bool:
+        return all(step.ok for step in self.steps)
+
+    def print(self) -> None:
+        for step in self.steps:
+            mark = "✓" if step.ok else "✗"
+            line = f"  {mark} {step.name}"
+            if step.detail:
+                line += f" — {step.detail}"
+            print(line)
+        print()
+        print("OK" if self.ok else "FAILED")
+
+
+def run_doctor(config_path: Path | None = None) -> int:
+    """Run the doctor checks and return a process exit code."""
+    report = _Report()
+
+    # --- Config -----------------------------------------------------------
+    cfg_path = config_path or DEFAULT_CONFIG_PATH
+    try:
+        cfg = load_config(cfg_path)
+    except OdooMcpError as exc:
+        report.add("Load config", False, exc.user_message)
+        report.print()
+        return 1
+    report.add("Load config", True, f"from {cfg.path}")
+
+    # --- Audit log --------------------------------------------------------
+    try:
+        AuditLog(cfg.audit_log_path)
+    except OdooMcpError as exc:
+        report.add("Audit log writable", False, exc.user_message)
+    else:
+        report.add("Audit log writable", True, str(cfg.audit_log_path))
+
+    # --- Per-instance checks ---------------------------------------------
+    for name, inst_cfg in cfg.instances.items():
+        section = f"[{name}]"
+        # Credentials
+        try:
+            creds = load_credentials(name, inst_cfg.credentials_env_prefix)
+        except CredentialsError as exc:
+            report.add(f"{section} credentials", False, exc.user_message)
+            continue
+        report.add(f"{section} credentials", True, f"user {creds.username}")
+
+        # Authenticate
+        try:
+            client = OdooClient(inst_cfg, creds)
+            client.authenticate()
+        except OdooMcpError as exc:
+            report.add(f"{section} authenticate", False, exc.user_message)
+            continue
+        report.add(f"{section} authenticate", True, f"uid={client.uid}")
+
+        # Smoke test: fields_get on one allowed model
+        probe_model = next(iter(inst_cfg.allowed_models))
+        try:
+            fg = client.fields_get(probe_model)
+        except OdooMcpError as exc:
+            report.add(f"{section} fields_get({probe_model})", False, exc.user_message)
+            continue
+        report.add(
+            f"{section} fields_get({probe_model})",
+            True,
+            f"{len(fg)} fields",
+        )
+
+    report.print()
+    return 0 if report.ok else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(argv if argv is not None else sys.argv[1:])
+    override = None
+    if args and args[0] == "--config":
+        if len(args) < 2:
+            print("Usage: odoo-mcp doctor [--config PATH]", file=sys.stderr)
+            return 2
+        override = Path(args[1]).expanduser()
+    return run_doctor(override)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets — never commit these
+.env
+.env.local
+*.env
+config.toml
+audit.jsonl
+audit-*.jsonl
+
+# OS
+.DS_Store

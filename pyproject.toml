@@ -1,0 +1,69 @@
+[project]
+name = "odoo-mcp"
+version = "0.1.0"
+description = "Security-first MCP server for Odoo (XML-RPC, local stdio, multi-instance)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Pieter-Jan Luyssen" }]
+dependencies = [
+    "mcp>=1.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+odoo-mcp = "odoo_mcp.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/odoo_mcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",      # pycodestyle / pyflakes
+    "I",                # isort
+    "B",                # bugbear
+    "UP",               # pyupgrade
+    "S",                # bandit
+    "ANN",              # flake8-annotations
+    "RET",              # flake8-return
+    "SIM",              # flake8-simplify
+]
+ignore = [
+    "S101",              # asserts are fine in tests
+    "ANN401",            # Any is appropriate at the XML-RPC / JSON boundary
+    "E501",              # line length is enforced by ruff format, not check
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "S"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: tests that require a live Odoo instance (set ODOO_MCP_TEST_INSTANCE)",
+]
