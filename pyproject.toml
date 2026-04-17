@@ -17,6 +17,7 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
     "python-dotenv>=1.0",
+    "pre-commit>=3.7",
 ]
 
 [project.scripts]

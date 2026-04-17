@@ -20,6 +20,7 @@ The class exposes only the primitives the dispatcher actually needs:
 from __future__ import annotations
 
 import http.client
+import logging
 import socket
 import ssl
 import threading
@@ -31,6 +32,8 @@ from urllib.parse import urlparse
 from .config import InstanceConfig
 from .credentials import Credentials
 from .errors import OdooAuthError, OdooRemoteError, OdooTransportError
+
+logger = logging.getLogger(__name__)
 
 # The one and only context we ever pass to Odoo. Deliberately minimal — no
 # active_test override, no tracking_disable, no mail.create_nolog, no company
@@ -212,6 +215,7 @@ class OdooClient:
         :class:`OdooTransportError` on network / TLS / timeout errors.
         """
         creds = self._get_credentials()
+        logger.debug("authenticate start: instance=%s", self._instance.name)
         try:
             uid = self._common.authenticate(
                 self._instance.database,
@@ -237,6 +241,7 @@ class OdooClient:
         if not isinstance(uid, int):
             raise OdooAuthError(f"Unexpected authenticate() return type: {type(uid).__name__}")
         self._uid = uid
+        logger.debug("authenticate ok: instance=%s uid=%d", self._instance.name, uid)
         return uid
 
     def ensure_authenticated(self) -> None:

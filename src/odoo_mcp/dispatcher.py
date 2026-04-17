@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -50,6 +51,8 @@ from .security.fields import (
 )
 from .security.limits import RateLimiter, clamp_limit
 from .security.prod_guard import ProdGuard
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Shared application state
@@ -120,9 +123,16 @@ class Dispatcher:
 
     async def call(self, name: str, arguments: dict[str, Any]) -> list[TextContent]:
         started = time.monotonic()
+        instance = arguments.get("instance") if isinstance(arguments, dict) else None
+        logger.info(
+            "tool call: %s instance=%s",
+            name,
+            instance if isinstance(instance, str) else "-",
+        )
         try:
             result = self._dispatch(name, arguments)
         except OdooMcpError as exc:
+            logger.warning("tool %s failed: %s (%s)", name, exc.code, exc.user_message)
             self._audit_failure(name, arguments, exc, _elapsed_ms(started))
             payload: dict[str, Any] = {
                 "ok": False,
@@ -185,6 +195,29 @@ class Dispatcher:
         )
 
     # ---- Handlers ---------------------------------------------------------
+
+    def _help(self, _args: dict[str, Any]) -> dict[str, Any]:
+        """Return a capability overview. Never authenticates, never contacts Odoo."""
+        instances = [
+            {
+                "name": name,
+                "url": rt.config.url,
+                "database": rt.config.database,
+                "production": rt.config.production,
+                "writes_unlocked": self.app.prod_guard.is_unlocked(name),
+                "allowed_models": sorted(rt.config.allowed_models),
+            }
+            for name, rt in self.app.instances.items()
+        ]
+        payload: dict[str, Any] = {
+            "version": __version__,
+            "summary": _HELP_SUMMARY,
+            "common_patterns": _HELP_COMMON_PATTERNS,
+            "gotchas": _HELP_GOTCHAS,
+            "instances": instances,
+        }
+        self._audit("odoo_help", Operation.FIELDS_GET, None, None, 0, False, {})
+        return payload
 
     def _list_instances(self, _args: dict[str, Any]) -> dict[str, Any]:
         out = [
@@ -553,6 +586,7 @@ class Dispatcher:
 
 # Name -> handler dispatch table. Bound methods resolve via the instance arg.
 _HANDLERS: dict[str, Callable[[Dispatcher, dict[str, Any]], dict[str, Any]]] = {
+    "odoo_help": Dispatcher._help,
     "odoo_list_instances": Dispatcher._list_instances,
     "odoo_describe_model": Dispatcher._describe_model,
     "odoo_search_read": Dispatcher._search_read,
@@ -585,6 +619,82 @@ _DRY_RUN_NOTE = (
     "This was a dry run. To commit, call {tool} again with "
     "dry_run=false and confirmation_token set to the token above."
 )
+
+
+# ---------------------------------------------------------------------------
+# odoo_help content — hardcoded knowledge, no Odoo calls
+# ---------------------------------------------------------------------------
+
+
+_HELP_SUMMARY = (
+    "This MCP exposes an allowlisted, security-gated slice of Odoo over XML-RPC. "
+    "Every call targets a named instance, hits a model allowlist, goes through a "
+    "domain sandbox and a field-redaction policy, and is audit-logged. Production "
+    "writes are blocked by default and require an explicit unlock plus a dry-run "
+    "confirmation token before committing."
+)
+
+
+_HELP_COMMON_PATTERNS: list[dict[str, Any]] = [
+    {
+        "goal": "Count records matching criteria",
+        "use": "odoo_search_count",
+        "example": {
+            "instance": "prod",
+            "model": "crm.lead",
+            "domain": [
+                ["type", "=", "opportunity"],
+                ["stage_id.name", "!=", "Won"],
+            ],
+        },
+    },
+    {
+        "goal": "Dashboard-style aggregation (leads per stage, revenue per month)",
+        "use": "odoo_read_group",
+        "example": {
+            "instance": "prod",
+            "model": "crm.lead",
+            "fields": ["id:count", "expected_revenue:sum"],
+            "groupby": ["stage_id"],
+        },
+    },
+    {
+        "goal": "Read records with specific fields",
+        "use": "odoo_search_read",
+        "example": {
+            "instance": "prod",
+            "model": "res.partner",
+            "domain": [["is_company", "=", True]],
+            "fields": ["id", "name", "email"],
+            "limit": 20,
+        },
+    },
+    {
+        "goal": "Update a record on production",
+        "use": "odoo_enable_prod_writes then odoo_write",
+        "example": (
+            "1) odoo_enable_prod_writes(instance='prod'). "
+            "2) odoo_write(dry_run=true) — returns preview + token. "
+            "3) odoo_write(dry_run=false, confirmation_token=TOKEN)."
+        ),
+    },
+    {
+        "goal": "See what fields exist on a model",
+        "use": "odoo_describe_model",
+    },
+]
+
+
+_HELP_GOTCHAS: list[str] = [
+    "Dotted-field traversal in domains is rejected (no 'create_uid.login'). "
+    "Filter by relation value instead.",
+    "Sensitive fields (vat, ssnid, bank_ids, private_email, ...) require "
+    "allow_sensitive_fields=['NAME', ...] per-call.",
+    "Password/api_key/token fields are ALWAYS redacted. Opting in does not unlock them.",
+    "Every Odoo call must target an allowlisted model — use odoo_list_instances to see which.",
+    "On production, writes default to dry_run=true. Pass dry_run=false AND a "
+    "confirmation_token from a prior dry run to commit.",
+]
 
 
 # ---------------------------------------------------------------------------

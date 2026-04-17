@@ -13,6 +13,8 @@ Usage::
     python -m odoo_mcp setup --list             # list configured instances
     python -m odoo_mcp setup --rotate-key NAME  # rotate API key
     python -m odoo_mcp setup --regenerate-launcher  # rewrite launch.sh
+    python -m odoo_mcp config show              # dump the effective config (sanitized)
+    python -m odoo_mcp config validate [PATH]   # validate a config file
     python -m odoo_mcp launch-env               # print export lines for launch.sh
     python -m odoo_mcp update                   # self-update from git + uv sync
     python -m odoo_mcp update --check           # check for a newer release only
@@ -25,6 +27,12 @@ import sys
 
 
 def main() -> int:
+    # Configure stderr logging before any other import that might log.
+    # Off by default; opt in with ODOO_MCP_LOG_LEVEL=DEBUG/INFO/WARNING/ERROR.
+    from .logging_setup import configure_logging
+
+    configure_logging()
+
     argv = sys.argv[1:]
     if argv and argv[0] == "doctor":
         from . import doctor
@@ -45,6 +53,11 @@ def main() -> int:
         from . import setup_wizard
 
         return setup_wizard.main(argv[1:])
+
+    if argv and argv[0] == "config":
+        from . import config_cli
+
+        return config_cli.main(argv[1:])
 
     if argv and argv[0] == "update":
         from . import update_cli

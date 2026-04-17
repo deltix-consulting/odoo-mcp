@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import logging
 import os
 import re
 import subprocess
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import _DEFAULT_ALLOWED_MODELS, DEFAULT_CONFIG_PATH
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants

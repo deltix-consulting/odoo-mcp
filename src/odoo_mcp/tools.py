@@ -15,7 +15,8 @@ _TOOL_LIST_INSTANCES = Tool(
     description=(
         "List the configured Odoo instances the MCP can talk to. Returns for each "
         "instance: name, production flag, whether prod writes are currently unlocked, "
-        "and the allowed-models set. Safe, read-only."
+        "and the allowed-models set. Safe, read-only. "
+        "Example: use this first if you don't know the instance names."
     ),
     inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
 )
@@ -26,7 +27,8 @@ _TOOL_DESCRIBE_MODEL = Tool(
         "Return the field metadata (fields_get) for one allowlisted Odoo model. "
         "Permanently-redacted fields (passwords, tokens) are omitted entirely; "
         "default-hidden sensitive fields (VAT, IBAN, employee PII) are marked "
-        "with `_sensitive: true` so you know they require explicit unlock."
+        "with `_sensitive: true` so you know they require explicit unlock. "
+        'Example: model="res.partner" returns fields like id, name, email, vat (marked sensitive).'
     ),
     inputSchema={
         "type": "object",
@@ -49,7 +51,9 @@ _TOOL_SEARCH_READ = Tool(
         "`fields` list — no wildcard reads. Domain filters are sandboxed: dotted field "
         "traversal (e.g. 'create_uid.login') is rejected. Results have default-hidden "
         "fields stripped unless you pass `allow_sensitive_fields`. Binary fields are "
-        "replaced with a size placeholder unless you pass `include_binary=true`."
+        "replaced with a size placeholder unless you pass `include_binary=true`. "
+        'Example: find active companies: domain=[["is_company","=",true],["active","=",true]], '
+        'fields=["id","name","email"], limit=20.'
     ),
     inputSchema={
         "type": "object",
@@ -99,7 +103,9 @@ _TOOL_SEARCH_COUNT = Tool(
         "Count records matching a domain on an allowlisted model. Returns a "
         "single integer — much cheaper than fetching records just to count them. "
         "Same domain sandbox as odoo_search_read: dotted fields and unknown "
-        "operators are rejected. Read-only."
+        "operators are rejected. Read-only. "
+        'Example: count open opportunities: domain=[["type","=","opportunity"]]. '
+        'Returns {"count": N}.'
     ),
     inputSchema={
         "type": "object",
@@ -126,7 +132,9 @@ _TOOL_READ_GROUP = Tool(
         "AGG is sum|avg|count|count_distinct|max|min. `groupby` syntax: 'field' "
         "or 'date_field:GRAN' where GRAN is day|week|month|quarter|year|hour. "
         "At most 4 groupby dimensions. Sensitive fields require "
-        "allow_sensitive_fields opt-in; always-redacted fields are blocked."
+        "allow_sensitive_fields opt-in; always-redacted fields are blocked. "
+        'Example: leads per stage: fields=["id:count"], groupby=["stage_id"]. '
+        'Revenue per month: fields=["expected_revenue:sum"], groupby=["create_date:month"].'
     ),
     inputSchema={
         "type": "object",
@@ -182,7 +190,8 @@ _TOOL_READ = Tool(
     description=(
         "Fetch specific records by ID from an allowlisted model. Same field-level "
         "policies as odoo_search_read: explicit fields required, sensitive fields "
-        "gated, binary fields stripped by default."
+        "gated, binary fields stripped by default. "
+        'Example: ids=[42, 47], fields=["name","email"] fetches two partners.'
     ),
     inputSchema={
         "type": "object",
@@ -219,7 +228,9 @@ _TOOL_CREATE = Tool(
         "are blocked unless odoo_enable_prod_writes has been called first, AND the "
         "call defaults to dry_run=true on prod so you MUST pass dry_run=false AND a "
         "confirmation_token from a prior dry-run call to actually commit. Protected "
-        "fields (passwords, tokens) cannot be written."
+        "fields (passwords, tokens) cannot be written. "
+        'Example: create a lead: model="crm.lead", values={"name":"Acme opportunity",'
+        '"contact_name":"Jane"}. On prod: dry_run first to get a token.'
     ),
     inputSchema={
         "type": "object",
@@ -249,7 +260,9 @@ _TOOL_WRITE = Tool(
     description=(
         "Update existing records on an allowlisted model. Same prod guardrails as "
         "odoo_create: blocked on prod without unlock, dry_run default on prod, "
-        "confirmation_token required for real commit."
+        "confirmation_token required for real commit. "
+        'Example: update a lead stage: ids=[42], values={"stage_id": 3}. '
+        "On prod: dry_run first to get a token."
     ),
     inputSchema={
         "type": "object",
@@ -276,7 +289,9 @@ _TOOL_ENABLE_PROD_WRITES = Tool(
         "Unlock writes to a production instance for the next 15 minutes. Every "
         "subsequent write still defaults to dry_run=true on prod and requires a "
         "confirmation_token to commit. This tool is the explicit step that moves "
-        "the session from 'prod is read-only' to 'prod writes allowed'."
+        "the session from 'prod is read-only' to 'prod writes allowed'. "
+        'Example: instance="prod". Unlocks writes for 15 minutes; each write still '
+        "needs dry-run + token."
     ),
     inputSchema={
         "type": "object",
@@ -287,9 +302,22 @@ _TOOL_ENABLE_PROD_WRITES = Tool(
 )
 
 
+_TOOL_HELP = Tool(
+    name="odoo_help",
+    description=(
+        "Returns a capability overview of this Odoo MCP: available tools, "
+        "common patterns with examples, gotchas, and the list of configured "
+        "instances. Call this at the start of a session to orient quickly. "
+        "Never contacts Odoo."
+    ),
+    inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+)
+
+
 def build_tools() -> list[Tool]:
     """Return the static list of tool schemas in the order Claude sees them."""
     return [
+        _TOOL_HELP,
         _TOOL_LIST_INSTANCES,
         _TOOL_DESCRIBE_MODEL,
         _TOOL_SEARCH_READ,

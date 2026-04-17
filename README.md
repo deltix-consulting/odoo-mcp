@@ -342,6 +342,26 @@ uv run pytest -m integration
 
 CI runs ruff, ruff format, mypy strict, and pytest on every push.
 
+To run the same lint/format/type checks automatically before each commit,
+install the pre-commit hooks once:
+
+```bash
+uv sync --extra dev
+uv run pre-commit install
+```
+
+The hooks run `ruff check --fix`, `ruff format`, `mypy --strict`, plus a few
+standard whitespace/yaml sanity checks. Pytest is intentionally left out —
+too slow for a pre-commit hook, and CI runs it anyway.
+
+### Debug logging
+
+The MCP stdio channel carries protocol traffic, so the server is silent by
+default. To stream structured diagnostics to stderr, export
+`ODOO_MCP_LOG_LEVEL=DEBUG` (or `INFO` / `WARNING` / `ERROR`) before starting
+the process. Registered credentials are automatically scrubbed from log
+output. Unset or `OFF` disables logging entirely.
+
 ## Security reporting
 
 See [`SECURITY.md`](SECURITY.md) for the threat model and the

@@ -16,6 +16,7 @@ is designed to be safe to keep around:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from pathlib import Path
 from threading import Lock
 
 from .errors import AuditLogError
+
+logger = logging.getLogger(__name__)
 
 _RETENTION_DAYS = 30
 _ROTATED_PATTERN = re.compile(r"audit-(\d{4}-\d{2}-\d{2})\.jsonl$")
@@ -154,6 +157,7 @@ class AuditLog:
                 f.write(line)
                 f.flush()
         except OSError as exc:
+            logger.error("audit log write failed: %s: %s", self._path, exc)
             raise AuditLogError(f"Failed to write audit entry to {self._path}: {exc}") from exc
 
 
