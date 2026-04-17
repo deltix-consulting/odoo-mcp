@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Ruff check
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Mypy
+        run: uv run mypy src/odoo_mcp
+
+      - name: Pytest
+        run: uv run pytest -q
+
+      - name: Build package
+        run: uv build
+
+      - name: Extract changelog section
+        id: changelog
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: uv run python scripts/extract_changelog.py "$GITHUB_REF_NAME" CHANGELOG.md release_notes.md
+
+      - name: Detect prerelease
+        id: prerelease
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: release_notes.md
+          prerelease: ${{ steps.prerelease.outputs.prerelease }}
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

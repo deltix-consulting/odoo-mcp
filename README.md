@@ -47,25 +47,35 @@ side-channel attacks. See `SECURITY.md` for the full threat model.
 
 ## Quick install
 
-### 1. Prerequisites
+Prerequisites on the target machine:
 
 - macOS (Keychain integration is macOS-specific)
-- [`uv`](https://github.com/astral-sh/uv)
 - Claude Desktop or Claude Code
-- An Odoo user with an API key (Settings → Users → API Keys — do not use
-  your password)
+- [`gh` CLI](https://cli.github.com) authenticated against GitHub
+  (`brew install gh && gh auth login`) — required because this repo is
+  private
+- An Odoo user with an API key (Settings → Users → API Keys — do not
+  use your password)
 
-### 2. Clone and sync
+### Via installer (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/deltix-consulting/odoo-mcp/main/scripts/install.sh | bash
+```
+
+The installer checks for `uv` (and installs it via the official
+installer if missing), confirms `gh` is authenticated, downloads the
+latest release tarball into `~/odoo-mcp`, runs `uv sync`, and hands off
+to `odoo-mcp setup`. Set `ODOO_MCP_HOME` to override the install
+directory, or pass `--git` to clone `main` instead of using a tagged
+release.
+
+### Via git clone (manual)
 
 ```bash
 git clone https://github.com/deltix-consulting/odoo-mcp.git
 cd odoo-mcp
 uv sync
-```
-
-### 3. Run the setup wizard
-
-```bash
 uv run odoo-mcp setup
 ```
 
@@ -74,6 +84,18 @@ production status; stores credentials in the Keychain; generates
 `~/.odoo-mcp/config.toml` (chmod 600) and `~/.odoo-mcp/launch.sh`;
 registers the MCP in Claude Desktop; and runs `doctor` to confirm
 everything works. Restart Claude Desktop and you're done.
+
+## Updating
+
+Once installed, pull the latest version and re-sync dependencies with:
+
+```bash
+uv run odoo-mcp update
+```
+
+This runs `git pull` against the install directory followed by
+`uv sync`. It does not touch your `~/.odoo-mcp/config.toml`,
+Keychain entries, or Claude Desktop registration.
 
 ## Configuration
 

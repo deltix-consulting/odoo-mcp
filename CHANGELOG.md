@@ -10,6 +10,10 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+<!-- Add new entries here. -->
+
+## [0.2.0] - 2026-04-17
+
 First tracked release. This entry captures the full set of features
 present in `0.1.0`, since prior changes were not logged.
 
