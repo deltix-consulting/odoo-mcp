@@ -78,6 +78,11 @@ class OdooMcpError(Exception):
         return self.__str__()
 
     @property
+    def hint(self) -> str | None:
+        """Optional actionable hint for the MCP client. Override in subclasses."""
+        return None
+
+    @property
     def cause_message(self) -> str | None:
         """Redaction-scrubbed string form of :attr:`__cause__`, if any."""
         cause = self.__cause__
@@ -115,11 +120,19 @@ class InstanceNotFoundError(OdooMcpError):
 
     code = "instance_not_found"
 
+    @property
+    def hint(self) -> str:
+        return "Use odoo_list_instances to see configured instances."
+
 
 class ModelNotAllowedError(OdooMcpError):
     """Tool call referenced a model that is not on the allowlist."""
 
     code = "model_not_allowed"
+
+    @property
+    def hint(self) -> str:
+        return "Use odoo_list_instances to see which models are available, or ask your administrator to add this model to the config."
 
 
 class OperationNotAllowedError(OdooMcpError):
@@ -127,11 +140,19 @@ class OperationNotAllowedError(OdooMcpError):
 
     code = "operation_not_allowed"
 
+    @property
+    def hint(self) -> str:
+        return "This MCP only supports: search_read, search_count, read, read_group, create, write."
+
 
 class ProdGuardError(OdooMcpError):
     """Blocked by the production guard (writes not unlocked, etc.)."""
 
     code = "prod_guard"
+
+    @property
+    def hint(self) -> str:
+        return "Call odoo_enable_prod_writes first to unlock writes for 15 minutes."
 
 
 class DomainSandboxError(OdooMcpError):
@@ -161,11 +182,19 @@ class OdooTransportError(OdooMcpError):
 
     code = "odoo_transport"
 
+    @property
+    def hint(self) -> str:
+        return "Check that the Odoo URL is reachable. Run 'odoo-mcp doctor' to diagnose."
+
 
 class OdooAuthError(OdooMcpError):
     """Odoo rejected the credentials at ``authenticate`` time."""
 
     code = "odoo_auth"
+
+    @property
+    def hint(self) -> str:
+        return "Check your API key and username. Run 'odoo-mcp doctor' to diagnose."
 
 
 class OdooRemoteError(OdooMcpError):

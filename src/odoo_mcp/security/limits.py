@@ -59,14 +59,10 @@ class RateLimiter:
         with self._lock:
             bucket = self._buckets.get(instance)
             if bucket is None:
-                raise LimitExceededError(
-                    f"No rate limiter configured for instance {instance!r}."
-                )
+                raise LimitExceededError(f"No rate limiter configured for instance {instance!r}.")
             current = now if now is not None else time.monotonic()
             elapsed = max(0.0, current - bucket.last_refill)
-            bucket.tokens = min(
-                bucket.capacity, bucket.tokens + elapsed * bucket.refill_per_second
-            )
+            bucket.tokens = min(bucket.capacity, bucket.tokens + elapsed * bucket.refill_per_second)
             bucket.last_refill = current
 
             if bucket.tokens < 1.0:
@@ -78,6 +74,31 @@ class RateLimiter:
                     f"({int(bucket.capacity)} calls/min)."
                 )
             bucket.tokens -= 1.0
+
+    def peek(self, instance: str, now: float | None = None) -> float:
+        """Return the current token count without consuming one.
+
+        Refills the bucket based on elapsed time (so callers see the
+        up-to-date token count), but does not take a token. Intended for
+        status / diagnostics output.
+        """
+        with self._lock:
+            bucket = self._buckets.get(instance)
+            if bucket is None:
+                raise LimitExceededError(f"No rate limiter configured for instance {instance!r}.")
+            current = now if now is not None else time.monotonic()
+            elapsed = max(0.0, current - bucket.last_refill)
+            bucket.tokens = min(bucket.capacity, bucket.tokens + elapsed * bucket.refill_per_second)
+            bucket.last_refill = current
+            return bucket.tokens
+
+    def capacity(self, instance: str) -> float:
+        """Return the configured capacity for an instance."""
+        with self._lock:
+            bucket = self._buckets.get(instance)
+            if bucket is None:
+                raise LimitExceededError(f"No rate limiter configured for instance {instance!r}.")
+            return bucket.capacity
 
 
 def clamp_limit(

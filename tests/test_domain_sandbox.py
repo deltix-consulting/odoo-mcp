@@ -62,8 +62,8 @@ def test_unknown_field_is_rejected() -> None:
 @pytest.mark.parametrize(
     "bad_op",
     [
-        "is",           # not in whitelist
-        "IS",           # case must match
+        "is",  # not in whitelist
+        "IS",  # case must match
         "=raw",
         "SELECT",
         "",

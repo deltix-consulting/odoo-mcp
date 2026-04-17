@@ -35,8 +35,8 @@ def test_load_credentials_purges_environ(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "ODOO_MCP_TEST_API_KEY" not in os.environ
 
 
-def test_load_credentials_fails_closed_on_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Neither variable set.
+def test_load_credentials_fails_closed_on_missing() -> None:
+    # Neither variable set — the autouse _clean_env fixture strips any stray state.
     with pytest.raises(CredentialsError, match="Missing required"):
         load_credentials("testinst", "ODOO_MCP_TEST")
 
@@ -64,9 +64,7 @@ def test_error_redaction_scrubs_registered_secret(monkeypatch: pytest.MonkeyPatc
 
     # An error that accidentally embeds the secret should still be scrubbed
     # when stringified.
-    err = OdooAuthError(
-        "Auth failed with body 'bad key hunter2-very-long-key-0987654321 oops'"
-    )
+    err = OdooAuthError("Auth failed with body 'bad key hunter2-very-long-key-0987654321 oops'")
     s = str(err)
     assert "hunter2-very-long-key-0987654321" not in s
     assert "<redacted>" in s

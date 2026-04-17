@@ -62,9 +62,7 @@ def check_model(model: str, allowed: frozenset[str]) -> None:
     # lowercase, dotted identifiers. Don't accept slashes, quotes, whitespace.
     for ch in model:
         if not (ch.isalnum() or ch in "._"):
-            raise ModelNotAllowedError(
-                f"Model name {model!r} contains invalid characters."
-            )
+            raise ModelNotAllowedError(f"Model name {model!r} contains invalid characters.")
     if model not in allowed:
         raise ModelNotAllowedError(
             f"Model {model!r} is not on the allowlist for this instance. "
@@ -80,6 +78,5 @@ def check_operation(op: Operation | str) -> Operation:
         return Operation(op)
     except ValueError as exc:
         raise OperationNotAllowedError(
-            f"Operation {op!r} is not exposed by this MCP. "
-            f"Allowed: {[o.value for o in Operation]}"
+            f"Operation {op!r} is not exposed by this MCP. Allowed: {[o.value for o in Operation]}"
         ) from exc

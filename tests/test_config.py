@@ -67,7 +67,10 @@ def test_malformed_toml(tmp_path: Path) -> None:
 
 
 def test_unknown_top_level_key_rejected(tmp_path: Path) -> None:
-    body = _VALID_CONFIG + '\n[instances.staging]\nurl="https://s"\ndatabase="s"\ncredentials_env_prefix="X"\nweird_key=true\n'
+    body = (
+        _VALID_CONFIG
+        + '\n[instances.staging]\nurl="https://s"\ndatabase="s"\ncredentials_env_prefix="X"\nweird_key=true\n'
+    )
     cfg_file = _write_cfg(tmp_path / "config.toml", body)
     with pytest.raises(ConfigError, match="Unknown keys"):
         load_config(cfg_file)
@@ -114,4 +117,71 @@ credentials_env_prefix = "X"
 def test_no_instances_refused(tmp_path: Path) -> None:
     cfg_file = _write_cfg(tmp_path / "config.toml", "[defaults]\ntimeout_seconds = 30\n")
     with pytest.raises(ConfigError, match="No \\[instances"):
+        load_config(cfg_file)
+
+
+def test_sensitive_fields_override_parsed(tmp_path: Path) -> None:
+    body = (
+        _VALID_CONFIG
+        + '\n[instances.dev.sensitive_fields]\n"res.partner" = ["vat", "ref"]\n'
+        + '"hr.employee" = []\n'
+    )
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    cfg = load_config(cfg_file)
+    dev = cfg.instances["dev"]
+    assert dev.sensitive_fields["res.partner"] == frozenset({"vat", "ref"})
+    # Explicit empty list: model present with an empty override set.
+    assert dev.sensitive_fields["hr.employee"] == frozenset()
+    # Omitted instance has an empty map — falls back to global default.
+    assert cfg.instances["prod"].sensitive_fields == {}
+
+
+def test_sensitive_fields_rejects_non_table(tmp_path: Path) -> None:
+    body = _VALID_CONFIG + '\n[instances.dev]\nsensitive_fields = "nope"\n'
+    # TOML disallows redeclaring the table — use an inline form instead.
+    body = _VALID_CONFIG.replace(
+        "[instances.dev]",
+        '[instances.dev]\nsensitive_fields = "nope"',
+    )
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    with pytest.raises(ConfigError, match="sensitive_fields"):
+        load_config(cfg_file)
+
+
+def test_sensitive_fields_rejects_bad_value_type(tmp_path: Path) -> None:
+    body = _VALID_CONFIG.replace(
+        "[instances.dev]",
+        '[instances.dev]\nsensitive_fields = { "res.partner" = "vat" }',
+    )
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    with pytest.raises(ConfigError, match="must be a list"):
+        load_config(cfg_file)
+
+
+def test_sensitive_fields_rejects_non_string_entries(tmp_path: Path) -> None:
+    body = _VALID_CONFIG.replace(
+        "[instances.dev]",
+        '[instances.dev]\nsensitive_fields = { "res.partner" = [42] }',
+    )
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    with pytest.raises(ConfigError, match="non-empty strings"):
+        load_config(cfg_file)
+
+
+def test_duplicate_env_prefix_rejected(tmp_path: Path) -> None:
+    body = """
+[instances.dev]
+url = "https://dev.example.com"
+database = "dev_db"
+credentials_env_prefix = "ODOO_MCP_SHARED"
+production = false
+
+[instances.staging]
+url = "https://stg.example.com"
+database = "stg_db"
+credentials_env_prefix = "ODOO_MCP_SHARED"
+production = false
+"""
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    with pytest.raises(ConfigError, match="ODOO_MCP_SHARED"):
         load_config(cfg_file)

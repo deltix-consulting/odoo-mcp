@@ -76,9 +76,39 @@ def test_log_never_contains_field_values(tmp_path: Path) -> None:
         assert forbidden not in raw
 
 
-@pytest.mark.skipif(
-    os.name != "posix", reason="Permission test relies on POSIX chmod semantics"
-)
+def test_log_preserves_nested_args_dict(tmp_path: Path) -> None:
+    """The ``args`` sub-dict (from server._args_shape) must round-trip."""
+    log_path = tmp_path / "audit.jsonl"
+    audit = AuditLog(log_path)
+    audit.log(
+        AuditEvent(
+            instance="dev",
+            tool="odoo_search_read",
+            op="search_read",
+            model="res.partner",
+            result="ok",
+            record_count=5,
+            duration_ms=4,
+            dry_run=False,
+            details={
+                "record_count": 5,
+                "args": {
+                    "model": "res.partner",
+                    "field_count": 2,
+                    "field_names": ["id", "name"],
+                    "domain_leaves": 1,
+                },
+            },
+        )
+    )
+    lines = _read_lines(log_path)
+    details = lines[-1]["details"]
+    assert details["args"]["model"] == "res.partner"
+    assert details["args"]["field_count"] == 2
+    assert details["args"]["field_names"] == ["id", "name"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Permission test relies on POSIX chmod semantics")
 def test_open_fails_closed_when_unwritable(tmp_path: Path) -> None:
     # Create a read-only directory; AuditLog._open must refuse.
     ro_dir = tmp_path / "readonly"

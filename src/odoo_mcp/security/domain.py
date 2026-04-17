@@ -67,9 +67,7 @@ def sandbox_domain(domain: Any, known_fields: frozenset[str]) -> list[Any]:
     returned list is a fresh copy — the caller's input is never mutated.
     """
     if not isinstance(domain, list):
-        raise DomainSandboxError(
-            f"Domain must be a list, got {type(domain).__name__}."
-        )
+        raise DomainSandboxError(f"Domain must be a list, got {type(domain).__name__}.")
     if len(domain) == 0:
         return []
 
@@ -79,8 +77,7 @@ def sandbox_domain(domain: Any, known_fields: frozenset[str]) -> list[Any]:
         if isinstance(element, str):
             if element not in _LOGICAL_OPS:
                 raise DomainSandboxError(
-                    f"Logical operator {element!r} not allowed. "
-                    f"Use one of: {sorted(_LOGICAL_OPS)}"
+                    f"Logical operator {element!r} not allowed. Use one of: {sorted(_LOGICAL_OPS)}"
                 )
             normalized.append(element)
             continue
@@ -88,9 +85,7 @@ def sandbox_domain(domain: Any, known_fields: frozenset[str]) -> list[Any]:
         if isinstance(element, (list, tuple)):
             leaf_count += 1
             if leaf_count > _MAX_LEAVES:
-                raise DomainSandboxError(
-                    f"Domain has more than {_MAX_LEAVES} leaves — refusing."
-                )
+                raise DomainSandboxError(f"Domain has more than {_MAX_LEAVES} leaves — refusing.")
             normalized.append(_validate_leaf(element, known_fields))
             continue
 

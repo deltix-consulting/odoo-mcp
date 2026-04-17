@@ -61,6 +61,60 @@ def test_default_hidden_by_model() -> None:
     assert not is_default_hidden("crm.lead", "vat")
 
 
+def test_default_hidden_respects_instance_overrides() -> None:
+    # Override: add 'ref' as hidden on res.partner AND drop 'vat' for this instance.
+    overrides = {"res.partner": frozenset({"ref"})}
+    assert is_default_hidden("res.partner", "ref", instance_overrides=overrides)
+    assert not is_default_hidden("res.partner", "vat", instance_overrides=overrides)
+    # hr.employee not in the overrides map -> global default still applies.
+    assert is_default_hidden("hr.employee", "ssnid", instance_overrides=overrides)
+
+
+def test_default_hidden_empty_override_unhides_everything_for_model() -> None:
+    overrides: dict[str, frozenset[str]] = {"res.partner": frozenset()}
+    assert not is_default_hidden("res.partner", "vat", instance_overrides=overrides)
+
+
+def test_validate_requested_fields_uses_instance_overrides() -> None:
+    overrides = {"res.partner": frozenset()}
+    # Without opt-in, 'vat' would normally be blocked — but this instance
+    # declared no hidden fields on res.partner, so the read is allowed.
+    out = validate_requested_fields(
+        "res.partner",
+        ["name", "vat"],
+        PARTNER_FIELDS,
+        allow_sensitive=frozenset(),
+        instance_overrides=overrides,
+    )
+    assert out == ["name", "vat"]
+
+
+def test_redact_response_respects_instance_override() -> None:
+    overrides = {"res.partner": frozenset()}
+    records = [{"id": 1, "name": "Acme", "vat": "BE1234"}]
+    out = redact_response(
+        "res.partner",
+        records,
+        field_types={"id": "integer", "name": "char", "vat": "char"},
+        allow_sensitive=frozenset(),
+        include_binary=False,
+        instance_overrides=overrides,
+    )
+    assert out == [{"id": 1, "name": "Acme", "vat": "BE1234"}]
+
+
+def test_redact_fields_get_respects_instance_override() -> None:
+    fg = {
+        "name": {"type": "char"},
+        "vat": {"type": "char"},
+        "ref": {"type": "char"},
+    }
+    overrides = {"res.partner": frozenset({"ref"})}
+    out = redact_fields_get("res.partner", fg, instance_overrides=overrides)
+    assert "_sensitive" not in out["vat"]
+    assert out["ref"].get("_sensitive") is True
+
+
 # --- validate_requested_fields ---------------------------------------------
 
 
@@ -125,9 +179,7 @@ def test_write_rejects_unknown_field() -> None:
 
 def test_write_rejects_always_redacted() -> None:
     with pytest.raises(FieldPolicyError, match="protected"):
-        validate_write_values(
-            "hr.employee", {"name": "x", "api_key": "zzzz"}, EMPLOYEE_FIELDS
-        )
+        validate_write_values("hr.employee", {"name": "x", "api_key": "zzzz"}, EMPLOYEE_FIELDS)
 
 
 def test_write_allows_default_hidden_fields() -> None:
@@ -238,19 +290,17 @@ def test_validate_aggregate_fields_accepts_plain_and_typed() -> None:
 @pytest.mark.parametrize(
     "spec",
     [
-        "expected_revenue:median",   # not in agg whitelist
-        "expected_revenue:SUM",      # case-sensitive
+        "expected_revenue:median",  # not in agg whitelist
+        "expected_revenue:SUM",  # case-sensitive
         "expected_revenue:sum:extra",  # too many colons
         "alias:sum(expected_revenue)",  # alias syntax blocked
-        ":sum",                      # empty field
+        ":sum",  # empty field
         "",
     ],
 )
 def test_validate_aggregate_fields_rejects_bad_syntax(spec: str) -> None:
     with pytest.raises(FieldPolicyError):
-        validate_aggregate_fields(
-            "crm.lead", [spec], LEAD_FIELDS, allow_sensitive=frozenset()
-        )
+        validate_aggregate_fields("crm.lead", [spec], LEAD_FIELDS, allow_sensitive=frozenset())
 
 
 def test_validate_aggregate_fields_rejects_dotted() -> None:
@@ -301,9 +351,7 @@ def test_validate_aggregate_fields_requires_optin_for_sensitive() -> None:
 
 def test_validate_aggregate_fields_rejects_empty_list() -> None:
     with pytest.raises(FieldPolicyError):
-        validate_aggregate_fields(
-            "crm.lead", [], LEAD_FIELDS, allow_sensitive=frozenset()
-        )
+        validate_aggregate_fields("crm.lead", [], LEAD_FIELDS, allow_sensitive=frozenset())
 
 
 # --- validate_groupby (read_group groupby arg) -------------------------------
@@ -322,18 +370,16 @@ def test_validate_groupby_accepts_plain_and_time_bucket() -> None:
 @pytest.mark.parametrize(
     "spec",
     [
-        "create_date:decade",    # not in granularity whitelist
-        "create_date:DAY",       # case-sensitive
+        "create_date:decade",  # not in granularity whitelist
+        "create_date:DAY",  # case-sensitive
         "create_date:day:extra",  # too many colons
-        ":month",                # empty field
+        ":month",  # empty field
         "",
     ],
 )
 def test_validate_groupby_rejects_bad_syntax(spec: str) -> None:
     with pytest.raises(FieldPolicyError):
-        validate_groupby(
-            "crm.lead", [spec], LEAD_FIELDS, allow_sensitive=frozenset()
-        )
+        validate_groupby("crm.lead", [spec], LEAD_FIELDS, allow_sensitive=frozenset())
 
 
 def test_validate_groupby_rejects_dotted() -> None:
@@ -348,9 +394,7 @@ def test_validate_groupby_rejects_dotted() -> None:
 
 def test_validate_groupby_rejects_unknown_field() -> None:
     with pytest.raises(FieldPolicyError):
-        validate_groupby(
-            "crm.lead", ["bogus"], LEAD_FIELDS, allow_sensitive=frozenset()
-        )
+        validate_groupby("crm.lead", ["bogus"], LEAD_FIELDS, allow_sensitive=frozenset())
 
 
 def test_validate_groupby_rejects_always_redacted() -> None:
@@ -366,9 +410,7 @@ def test_validate_groupby_rejects_always_redacted() -> None:
 def test_validate_groupby_requires_optin_for_sensitive() -> None:
     partner_fields = frozenset({"id", "name", "vat"})
     with pytest.raises(FieldPolicyError):
-        validate_groupby(
-            "res.partner", ["vat"], partner_fields, allow_sensitive=frozenset()
-        )
+        validate_groupby("res.partner", ["vat"], partner_fields, allow_sensitive=frozenset())
     out = validate_groupby(
         "res.partner", ["vat"], partner_fields, allow_sensitive=frozenset({"vat"})
     )

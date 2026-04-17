@@ -22,6 +22,7 @@ guarantees here are:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -46,7 +47,9 @@ class Credentials:
     _api_key: str = field(repr=False)
 
     def __str__(self) -> str:
-        return f"<credentials instance={self.instance_name} user={self.username} api_key=<redacted>>"
+        return (
+            f"<credentials instance={self.instance_name} user={self.username} api_key=<redacted>>"
+        )
 
     def __repr__(self) -> str:
         return self.__str__()
@@ -99,3 +102,18 @@ def load_credentials(instance_name: str, env_prefix: str) -> Credentials:
             del os.environ[key]
 
     return creds
+
+
+def make_credential_loader(instance_name: str, env_prefix: str) -> Callable[[], Credentials]:
+    """Return a zero-arg closure that calls :func:`load_credentials` on demand.
+
+    Used by :mod:`odoo_mcp.server` to defer env-reading and secret-registration
+    until the first time a given instance is actually used. A broken credential
+    config for one instance then fails only on first use of that instance,
+    rather than blocking all of startup.
+    """
+
+    def _loader() -> Credentials:
+        return load_credentials(instance_name, env_prefix)
+
+    return _loader

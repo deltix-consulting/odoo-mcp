@@ -13,8 +13,8 @@ place to enforce:
   round-trip on every call.
 
 The class exposes only the primitives the dispatcher actually needs:
-``authenticate`` (on construct), ``search_read``, ``read``, ``create``,
-``write``, and ``fields_get``.
+``authenticate`` / ``ensure_authenticated``, ``search_read``, ``read``,
+``create``, ``write``, and ``fields_get``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,9 @@ from __future__ import annotations
 import http.client
 import socket
 import ssl
+import threading
 import xmlrpc.client
+from collections.abc import Callable
 from typing import Any, Final
 from urllib.parse import urlparse
 
@@ -80,9 +82,7 @@ class _TimeoutTransport(xmlrpc.client.Transport):
         super().__init__()
         self._timeout = timeout
 
-    def make_connection(
-        self, host: tuple[str, dict[str, str]] | str
-    ) -> http.client.HTTPConnection:
+    def make_connection(self, host: tuple[str, dict[str, str]] | str) -> http.client.HTTPConnection:
         if self._connection and host == self._connection[0]:
             cached = self._connection[1]
             assert cached is not None  # noqa: S101 — invariant of the cache
@@ -112,9 +112,7 @@ class _TimeoutSafeTransport(xmlrpc.client.SafeTransport):
             assert isinstance(cached, http.client.HTTPSConnection)  # noqa: S101
             return cached
         chost, self._extra_headers, _ = self.get_host_info(host)
-        conn = _TimeoutHTTPSConnection(
-            chost, timeout=self._timeout, context=self._ssl_context
-        )
+        conn = _TimeoutHTTPSConnection(chost, timeout=self._timeout, context=self._ssl_context)
         self._connection = host, conn
         return conn
 
@@ -135,17 +133,27 @@ class OdooClient:
     """Thin wrapper around ``xmlrpc.client`` for one Odoo instance.
 
     Instances are constructed by :mod:`odoo_mcp.server` at startup, one per
-    configured instance. Construction performs a real ``authenticate`` call
-    so misconfiguration fails loudly before the MCP accepts any tool calls.
+    configured instance. Authentication is deferred to the first tool call
+    via :meth:`ensure_authenticated` so that one unreachable instance does
+    not block the entire MCP process from starting.
     """
 
     def __init__(
         self,
         instance: InstanceConfig,
-        credentials: Credentials,
+        credentials: Credentials | None = None,
+        *,
+        credential_loader: Callable[[], Credentials] | None = None,
     ) -> None:
+        if credentials is None and credential_loader is None:
+            raise OdooAuthError(
+                f"OdooClient for {instance.name!r} requires either credentials "
+                f"or credential_loader."
+            )
         self._instance = instance
-        self._credentials = credentials
+        self._credentials: Credentials | None = credentials
+        self._credential_loader = credential_loader
+        self._credential_lock = threading.Lock()
         self._ssl_context = _build_ssl_context(instance.allow_self_signed)
         self._fields_cache: dict[str, dict[str, dict[str, Any]]] = {}
 
@@ -156,8 +164,35 @@ class OdooClient:
         self._common = self._make_proxy(f"{instance.url}/xmlrpc/2/common")
         self._object = self._make_proxy(f"{instance.url}/xmlrpc/2/object")
         self._uid: int | None = None
+        self._auth_lock = threading.Lock()
 
     # --- Construction / auth ------------------------------------------------
+
+    def _get_credentials(self) -> Credentials:
+        """Return the cached :class:`Credentials`, loading them lazily on first use.
+
+        Thread-safe. If construction was given a ``credential_loader`` closure
+        rather than a concrete :class:`Credentials`, the loader is invoked here
+        and its result cached for the lifetime of the client. Any exception
+        raised by the loader propagates to the caller — a broken credential
+        config for one instance then only fails when that instance is actually
+        touched, not at process startup.
+        """
+        cached = self._credentials
+        if cached is not None:
+            return cached
+        with self._credential_lock:
+            cached = self._credentials
+            if cached is not None:
+                return cached
+            if self._credential_loader is None:
+                raise OdooAuthError(
+                    f"OdooClient for {self._instance.name!r} has no credentials "
+                    f"and no loader configured."
+                )
+            loaded = self._credential_loader()
+            self._credentials = loaded
+            return loaded
 
     def _make_proxy(self, url: str) -> xmlrpc.client.ServerProxy:
         parsed = urlparse(url)
@@ -176,11 +211,12 @@ class OdooClient:
         Raises :class:`OdooAuthError` on bad credentials and
         :class:`OdooTransportError` on network / TLS / timeout errors.
         """
+        creds = self._get_credentials()
         try:
             uid = self._common.authenticate(
                 self._instance.database,
-                self._credentials.username,
-                self._credentials.reveal_for_rpc(),
+                creds.username,
+                creds.reveal_for_rpc(),
                 {},
             )
         except xmlrpc.client.Fault as exc:
@@ -199,11 +235,29 @@ class OdooClient:
                 f"Check the username, API key, and database name."
             )
         if not isinstance(uid, int):
-            raise OdooAuthError(
-                f"Unexpected authenticate() return type: {type(uid).__name__}"
-            )
+            raise OdooAuthError(f"Unexpected authenticate() return type: {type(uid).__name__}")
         self._uid = uid
         return uid
+
+    def ensure_authenticated(self) -> None:
+        """Authenticate lazily on first use. Thread-safe and idempotent.
+
+        If already authenticated (uid is set), returns immediately.
+        Otherwise calls :meth:`authenticate` once, guarded by a lock.
+
+        Raises :class:`OdooAuthError` or :class:`OdooTransportError` if
+        authentication fails.
+        """
+        if self._uid is not None:
+            return
+        self._do_lazy_auth()
+
+    def _do_lazy_auth(self) -> None:
+        """Lock-guarded authenticate with double-check for thread safety."""
+        with self._auth_lock:
+            if self._uid is not None:
+                return
+            self.authenticate()
 
     @property
     def uid(self) -> int:
@@ -223,7 +277,12 @@ class OdooClient:
         """
         if use_cache and model in self._fields_cache:
             return self._fields_cache[model]
-        result = self._execute(model, "fields_get", [], {"attributes": ["type", "string", "required", "readonly", "help", "relation"]})
+        result = self._execute(
+            model,
+            "fields_get",
+            [],
+            {"attributes": ["type", "string", "required", "readonly", "help", "relation"]},
+        )
         if not isinstance(result, dict):
             raise OdooRemoteError(
                 f"fields_get for {model!r} returned unexpected type {type(result).__name__}"
@@ -283,9 +342,7 @@ class OdooClient:
             )
         return result
 
-    def read(
-        self, model: str, ids: list[int], fields: list[str]
-    ) -> list[dict[str, Any]]:
+    def read(self, model: str, ids: list[int], fields: list[str]) -> list[dict[str, Any]]:
         result = self._execute(model, "read", [ids], {"fields": fields})
         if not isinstance(result, list):
             raise OdooRemoteError(
@@ -324,20 +381,19 @@ class OdooClient:
         """
         merged_kwargs = dict(kwargs)
         merged_kwargs["context"] = dict(_FROZEN_CONTEXT)
+        creds = self._get_credentials()
         try:
             return self._object.execute_kw(
                 self._instance.database,
                 self.uid,
-                self._credentials.reveal_for_rpc(),
+                creds.reveal_for_rpc(),
                 model,
                 method,
                 args,
                 merged_kwargs,
             )
         except xmlrpc.client.Fault as exc:
-            raise OdooRemoteError(
-                f"Odoo fault on {model}.{method}: {exc.faultString}"
-            ) from exc
+            raise OdooRemoteError(f"Odoo fault on {model}.{method}: {exc.faultString}") from exc
         except TimeoutError as exc:
             raise OdooTransportError(
                 f"Timeout calling {model}.{method} on {self._instance.name!r} "

@@ -86,8 +86,21 @@ def is_always_redacted(field_name: str) -> bool:
     return any(p.fullmatch(field_name) for p in _ALWAYS_REDACTED_PATTERNS)
 
 
-def is_default_hidden(model: str, field_name: str) -> bool:
-    """True if ``field_name`` is default-hidden on ``model``."""
+def is_default_hidden(
+    model: str,
+    field_name: str,
+    *,
+    instance_overrides: dict[str, frozenset[str]] | None = None,
+) -> bool:
+    """True if ``field_name`` is default-hidden on ``model``.
+
+    If ``instance_overrides`` is provided AND contains ``model`` as a key, that
+    set is used (even if it's empty — an empty set means "no fields hidden for
+    this model on this instance"). Otherwise we fall back to
+    :data:`_DEFAULT_HIDDEN`.
+    """
+    if instance_overrides is not None and model in instance_overrides:
+        return field_name in instance_overrides[model]
     return field_name in _DEFAULT_HIDDEN.get(model, frozenset())
 
 
@@ -97,6 +110,7 @@ def validate_requested_fields(
     known_fields: frozenset[str],
     *,
     allow_sensitive: frozenset[str],
+    instance_overrides: dict[str, frozenset[str]] | None = None,
 ) -> list[str]:
     """Validate the caller's ``fields`` list against all policies.
 
@@ -123,14 +137,13 @@ def validate_requested_fields(
                 f"Dotted field {name!r} not allowed — request the relation directly."
             )
         if name not in known_fields:
-            raise FieldPolicyError(
-                f"Field {name!r} does not exist on model {model!r}."
-            )
+            raise FieldPolicyError(f"Field {name!r} does not exist on model {model!r}.")
         if is_always_redacted(name):
-            raise FieldPolicyError(
-                f"Field {name!r} is permanently redacted and cannot be read."
-            )
-        if is_default_hidden(model, name) and name not in allow_sensitive:
+            raise FieldPolicyError(f"Field {name!r} is permanently redacted and cannot be read.")
+        if (
+            is_default_hidden(model, name, instance_overrides=instance_overrides)
+            and name not in allow_sensitive
+        ):
             raise FieldPolicyError(
                 f"Field {name!r} on {model!r} is sensitive and must be explicitly unlocked "
                 f"via allow_sensitive_fields=[{name!r}, ...]."
@@ -160,9 +173,7 @@ def validate_write_values(
         if "." in name:
             raise FieldPolicyError(f"Dotted field {name!r} not allowed in write values.")
         if name not in known_fields:
-            raise FieldPolicyError(
-                f"Field {name!r} does not exist on model {model!r}."
-            )
+            raise FieldPolicyError(f"Field {name!r} does not exist on model {model!r}.")
         if is_always_redacted(name):
             raise FieldPolicyError(
                 f"Field {name!r} is protected and cannot be written via the MCP."
@@ -177,6 +188,7 @@ def validate_aggregate_fields(
     known_fields: frozenset[str],
     *,
     allow_sensitive: frozenset[str],
+    instance_overrides: dict[str, frozenset[str]] | None = None,
 ) -> list[str]:
     """Validate the ``fields`` list for ``read_group``.
 
@@ -214,18 +226,15 @@ def validate_aggregate_fields(
         if not name:
             raise FieldPolicyError(f"Aggregate field spec {spec!r} has empty field name.")
         if "." in name:
-            raise FieldPolicyError(
-                f"Dotted aggregate field {name!r} not allowed."
-            )
+            raise FieldPolicyError(f"Dotted aggregate field {name!r} not allowed.")
         if name not in known_fields:
-            raise FieldPolicyError(
-                f"Aggregate field {name!r} does not exist on model {model!r}."
-            )
+            raise FieldPolicyError(f"Aggregate field {name!r} does not exist on model {model!r}.")
         if is_always_redacted(name):
-            raise FieldPolicyError(
-                f"Aggregate field {name!r} is permanently redacted."
-            )
-        if is_default_hidden(model, name) and name not in allow_sensitive:
+            raise FieldPolicyError(f"Aggregate field {name!r} is permanently redacted.")
+        if (
+            is_default_hidden(model, name, instance_overrides=instance_overrides)
+            and name not in allow_sensitive
+        ):
             raise FieldPolicyError(
                 f"Aggregate field {name!r} on {model!r} is sensitive and must be "
                 f"explicitly unlocked via allow_sensitive_fields=[{name!r}, ...]."
@@ -239,6 +248,7 @@ def validate_groupby(
     known_fields: frozenset[str],
     *,
     allow_sensitive: frozenset[str],
+    instance_overrides: dict[str, frozenset[str]] | None = None,
 ) -> list[str]:
     """Validate the ``groupby`` list for ``read_group``.
 
@@ -251,18 +261,14 @@ def validate_groupby(
     is effectively a read of those values.
     """
     if not isinstance(groupby, list) or not groupby:
-        raise FieldPolicyError(
-            "groupby is required for read_group — pass at least one dimension."
-        )
+        raise FieldPolicyError("groupby is required for read_group — pass at least one dimension.")
     if len(groupby) > _GROUPBY_MAX_DIMS:
         raise FieldPolicyError(
             f"groupby supports at most {_GROUPBY_MAX_DIMS} dimensions, got {len(groupby)}."
         )
     for spec in groupby:
         if not isinstance(spec, str) or not spec:
-            raise FieldPolicyError(
-                f"groupby entry must be a non-empty string, got {spec!r}."
-            )
+            raise FieldPolicyError(f"groupby entry must be a non-empty string, got {spec!r}.")
         parts = spec.split(":")
         if len(parts) == 1:
             name = parts[0]
@@ -282,14 +288,13 @@ def validate_groupby(
         if "." in name:
             raise FieldPolicyError(f"Dotted groupby field {name!r} not allowed.")
         if name not in known_fields:
-            raise FieldPolicyError(
-                f"groupby field {name!r} does not exist on model {model!r}."
-            )
+            raise FieldPolicyError(f"groupby field {name!r} does not exist on model {model!r}.")
         if is_always_redacted(name):
-            raise FieldPolicyError(
-                f"groupby field {name!r} is permanently redacted."
-            )
-        if is_default_hidden(model, name) and name not in allow_sensitive:
+            raise FieldPolicyError(f"groupby field {name!r} is permanently redacted.")
+        if (
+            is_default_hidden(model, name, instance_overrides=instance_overrides)
+            and name not in allow_sensitive
+        ):
             raise FieldPolicyError(
                 f"groupby field {name!r} on {model!r} is sensitive — grouping by it "
                 f"reveals its distinct values. Opt in via allow_sensitive_fields=[{name!r}, ...]."
@@ -304,6 +309,7 @@ def redact_response(
     *,
     allow_sensitive: frozenset[str],
     include_binary: bool,
+    instance_overrides: dict[str, frozenset[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Apply redaction and binary stripping to a batch of records.
 
@@ -319,7 +325,10 @@ def redact_response(
         for name, value in rec.items():
             if is_always_redacted(name):
                 continue  # drop entirely
-            if is_default_hidden(model, name) and name not in allow_sensitive:
+            if (
+                is_default_hidden(model, name, instance_overrides=instance_overrides)
+                and name not in allow_sensitive
+            ):
                 continue  # drop entirely
             if not include_binary and field_types.get(name) == "binary" and value:
                 size = _binary_size_hint(value)
@@ -331,7 +340,10 @@ def redact_response(
 
 
 def redact_fields_get(
-    model: str, fields_get: dict[str, dict[str, Any]]
+    model: str,
+    fields_get: dict[str, dict[str, Any]],
+    *,
+    instance_overrides: dict[str, frozenset[str]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Filter an ``fields_get`` response by the same policy used at read time.
 
@@ -344,7 +356,7 @@ def redact_fields_get(
         if is_always_redacted(name):
             continue
         meta_copy = dict(meta)
-        if is_default_hidden(model, name):
+        if is_default_hidden(model, name, instance_overrides=instance_overrides):
             meta_copy["_sensitive"] = True
             meta_copy["_note"] = (
                 "Default-hidden. Pass allow_sensitive_fields=[...] to unlock per-call."

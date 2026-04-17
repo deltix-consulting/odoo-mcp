@@ -69,6 +69,7 @@ _VALID_INSTANCE_KEYS: Final[frozenset[str]] = frozenset(
         "max_records_default",
         "max_records_hard_cap",
         "allowed_models",
+        "sensitive_fields",
     }
 )
 
@@ -95,6 +96,7 @@ class InstanceConfig:
     rate_limit_per_minute: int
     allow_self_signed: bool
     allowed_models: frozenset[str]
+    sensitive_fields: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,9 +165,7 @@ def _parse_defaults(raw: dict[str, Any]) -> Defaults:
     _reject_unknown_keys(raw, _VALID_DEFAULT_KEYS, "defaults")
     return Defaults(
         timeout_seconds=_require_int(raw, "timeout_seconds", 30, minimum=1, maximum=120),
-        max_records_default=_require_int(
-            raw, "max_records_default", 50, minimum=1, maximum=1000
-        ),
+        max_records_default=_require_int(raw, "max_records_default", 50, minimum=1, maximum=1000),
         max_records_hard_cap=_require_int(
             raw, "max_records_hard_cap", 500, minimum=1, maximum=10_000
         ),
@@ -174,109 +174,155 @@ def _parse_defaults(raw: dict[str, Any]) -> Defaults:
     )
 
 
-def _parse_instances(
-    raw: dict[str, Any], defaults: Defaults
-) -> dict[str, InstanceConfig]:
+def _parse_instances(raw: dict[str, Any], defaults: Defaults) -> dict[str, InstanceConfig]:
     out: dict[str, InstanceConfig] = {}
     for name, entry in raw.items():
         if not isinstance(entry, dict):
             raise ConfigError(f"[instances.{name}] must be a table, got {type(entry).__name__}")
-        _reject_unknown_keys(entry, _VALID_INSTANCE_KEYS, f"instances.{name}")
+        out[name] = _parse_one_instance(name, entry, defaults)
 
-        if "url" not in entry or not isinstance(entry["url"], str):
-            raise ConfigError(f"[instances.{name}].url is required and must be a string")
-        url = entry["url"]
-        if not url.startswith("https://") and not url.startswith("http://"):
+    # Enforce env-prefix uniqueness: two instances sharing a prefix would
+    # read each other's credentials from the environment. That's a silent
+    # footgun, so fail loudly at config-load time.
+    seen: dict[str, str] = {}
+    for name, inst in out.items():
+        prev = seen.get(inst.credentials_env_prefix)
+        if prev is not None:
             raise ConfigError(
-                f"[instances.{name}].url must start with http:// or https:// (got {url!r})"
+                f"Instances {prev!r} and {name!r} share the same "
+                f"credentials_env_prefix {inst.credentials_env_prefix!r}. "
+                f"Each instance must have its own unique prefix."
             )
-
-        production = bool(entry.get("production", False))
-        if production and not url.startswith("https://"):
-            raise ConfigError(
-                f"[instances.{name}] is marked production but url is not HTTPS. Refusing."
-            )
-
-        if "database" not in entry or not isinstance(entry["database"], str):
-            raise ConfigError(f"[instances.{name}].database is required and must be a string")
-        database = entry["database"]
-
-        if "credentials_env_prefix" not in entry or not isinstance(
-            entry["credentials_env_prefix"], str
-        ):
-            raise ConfigError(
-                f"[instances.{name}].credentials_env_prefix is required and must be a string"
-            )
-        env_prefix = entry["credentials_env_prefix"]
-        if not env_prefix.replace("_", "").isalnum():
-            raise ConfigError(
-                f"[instances.{name}].credentials_env_prefix must be alphanumeric + underscore"
-            )
-
-        allow_self_signed = bool(entry.get("allow_self_signed", False))
-        if production and allow_self_signed:
-            raise ConfigError(
-                f"[instances.{name}] cannot set allow_self_signed on a production instance"
-            )
-
-        default_rate = 60 if production else 300
-        rate_limit = _require_int(
-            entry, "rate_limit_per_minute", default_rate, minimum=1, maximum=10_000
-        )
-
-        timeout = _require_int(
-            entry,
-            "timeout_seconds",
-            defaults.timeout_seconds,
-            minimum=1,
-            maximum=120,
-        )
-        max_def = _require_int(
-            entry,
-            "max_records_default",
-            defaults.max_records_default,
-            minimum=1,
-            maximum=defaults.max_records_hard_cap,
-        )
-        max_cap = _require_int(
-            entry,
-            "max_records_hard_cap",
-            defaults.max_records_hard_cap,
-            minimum=max_def,
-            maximum=10_000,
-        )
-
-        models = frozenset(
-            _require_str_list(entry, "allowed_models", list(defaults.allowed_models))
-        )
-        if not models:
-            raise ConfigError(f"[instances.{name}].allowed_models cannot be empty")
-
-        out[name] = InstanceConfig(
-            name=name,
-            url=url.rstrip("/"),
-            database=database,
-            credentials_env_prefix=env_prefix,
-            production=production,
-            timeout_seconds=timeout,
-            max_records_default=max_def,
-            max_records_hard_cap=max_cap,
-            rate_limit_per_minute=rate_limit,
-            allow_self_signed=allow_self_signed,
-            allowed_models=models,
-        )
+        seen[inst.credentials_env_prefix] = name
     return out
 
 
-def _reject_unknown_keys(
-    raw: dict[str, Any], valid: frozenset[str], section: str
-) -> None:
+def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) -> InstanceConfig:
+    _reject_unknown_keys(entry, _VALID_INSTANCE_KEYS, f"instances.{name}")
+
+    # URL + production coherence.
+    url = _require_str(entry, "url", f"instances.{name}")
+    if not url.startswith(("https://", "http://")):
+        raise ConfigError(
+            f"[instances.{name}].url must start with http:// or https:// (got {url!r})"
+        )
+    production = bool(entry.get("production", False))
+    if production and not url.startswith("https://"):
+        raise ConfigError(
+            f"[instances.{name}] is marked production but url is not HTTPS. Refusing."
+        )
+
+    # Credentials: database + env prefix.
+    database = _require_str(entry, "database", f"instances.{name}")
+    env_prefix = _require_str(entry, "credentials_env_prefix", f"instances.{name}")
+    if not env_prefix.replace("_", "").isalnum():
+        raise ConfigError(
+            f"[instances.{name}].credentials_env_prefix must be alphanumeric + underscore"
+        )
+
+    # TLS-strictness policy: no self-signed certs in production.
+    allow_self_signed = bool(entry.get("allow_self_signed", False))
+    if production and allow_self_signed:
+        raise ConfigError(
+            f"[instances.{name}] cannot set allow_self_signed on a production instance"
+        )
+
+    # Rate limits and record caps.
+    default_rate = 60 if production else 300
+    rate_limit = _require_int(
+        entry, "rate_limit_per_minute", default_rate, minimum=1, maximum=10_000
+    )
+    timeout = _require_int(
+        entry, "timeout_seconds", defaults.timeout_seconds, minimum=1, maximum=120
+    )
+    max_def = _require_int(
+        entry,
+        "max_records_default",
+        defaults.max_records_default,
+        minimum=1,
+        maximum=defaults.max_records_hard_cap,
+    )
+    max_cap = _require_int(
+        entry,
+        "max_records_hard_cap",
+        defaults.max_records_hard_cap,
+        minimum=max_def,
+        maximum=10_000,
+    )
+
+    # Allowlists.
+    models = frozenset(_require_str_list(entry, "allowed_models", list(defaults.allowed_models)))
+    if not models:
+        raise ConfigError(f"[instances.{name}].allowed_models cannot be empty")
+    sensitive_fields = _parse_sensitive_fields(entry.get("sensitive_fields"), name)
+
+    return InstanceConfig(
+        name=name,
+        url=url.rstrip("/"),
+        database=database,
+        credentials_env_prefix=env_prefix,
+        production=production,
+        timeout_seconds=timeout,
+        max_records_default=max_def,
+        max_records_hard_cap=max_cap,
+        rate_limit_per_minute=rate_limit,
+        allow_self_signed=allow_self_signed,
+        allowed_models=models,
+        sensitive_fields=sensitive_fields,
+    )
+
+
+def _parse_sensitive_fields(raw: Any, instance_name: str) -> dict[str, frozenset[str]]:
+    """Parse ``[instances.NAME.sensitive_fields]`` into a model -> frozenset map.
+
+    Keys are model strings, values are lists of field names. An explicit empty
+    list means "hide no fields for this model" — it overrides the global default
+    to the empty set. Absent models fall back to the hardcoded global default
+    in :mod:`odoo_mcp.security.fields`.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"[instances.{instance_name}.sensitive_fields] must be a table, "
+            f"got {type(raw).__name__}"
+        )
+    out: dict[str, frozenset[str]] = {}
+    for model, fields_list in raw.items():
+        if not isinstance(model, str) or not model:
+            raise ConfigError(
+                f"[instances.{instance_name}.sensitive_fields] keys must be non-empty "
+                f"model strings, got {model!r}"
+            )
+        if not isinstance(fields_list, list):
+            raise ConfigError(
+                f"[instances.{instance_name}.sensitive_fields.{model}] must be a list "
+                f"of field names, got {type(fields_list).__name__}"
+            )
+        for fname in fields_list:
+            if not isinstance(fname, str) or not fname:
+                raise ConfigError(
+                    f"[instances.{instance_name}.sensitive_fields.{model}] entries must "
+                    f"be non-empty strings, got {fname!r}"
+                )
+        out[model] = frozenset(fields_list)
+    return out
+
+
+def _reject_unknown_keys(raw: dict[str, Any], valid: frozenset[str], section: str) -> None:
     unknown = set(raw.keys()) - valid
     if unknown:
         raise ConfigError(
-            f"Unknown keys in [{section}]: {sorted(unknown)}. "
-            f"Valid keys: {sorted(valid)}"
+            f"Unknown keys in [{section}]: {sorted(unknown)}. Valid keys: {sorted(valid)}"
         )
+
+
+def _require_str(raw: dict[str, Any], key: str, section: str) -> str:
+    """Return ``raw[key]`` if present and a string; raise ConfigError otherwise."""
+    if key not in raw or not isinstance(raw[key], str):
+        raise ConfigError(f"[{section}].{key} is required and must be a string")
+    value: str = raw[key]
+    return value
 
 
 def _require_int(

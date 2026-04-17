@@ -71,3 +71,32 @@ def test_rate_limiter_unknown_instance_rejected() -> None:
     rl = RateLimiter()
     with pytest.raises(LimitExceededError, match="No rate limiter"):
         rl.take("ghost")
+
+
+def test_peek_does_not_consume() -> None:
+    rl = RateLimiter()
+    rl.configure("dev", rate_per_minute=60)
+    # Peek multiple times — bucket stays full.
+    assert rl.peek("dev", now=0.0) == 60.0
+    assert rl.peek("dev", now=0.0) == 60.0
+    # Consume one, peek reflects it.
+    rl.take("dev", now=0.0)
+    assert rl.peek("dev", now=0.0) == 59.0
+
+
+def test_peek_reflects_refill_without_consuming() -> None:
+    rl = RateLimiter()
+    rl.configure("dev", rate_per_minute=60)
+    for _ in range(60):
+        rl.take("dev", now=0.0)
+    # 10s later, 10 tokens should have refilled (60/min = 1/s).
+    assert rl.peek("dev", now=10.0) == pytest.approx(10.0)
+    # A second peek at the same timestamp returns the same number
+    # (no consumption).
+    assert rl.peek("dev", now=10.0) == pytest.approx(10.0)
+
+
+def test_peek_unknown_instance() -> None:
+    rl = RateLimiter()
+    with pytest.raises(LimitExceededError, match="No rate limiter"):
+        rl.peek("ghost")

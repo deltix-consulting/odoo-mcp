@@ -28,6 +28,14 @@ from .errors import AuditLogError
 _RETENTION_DAYS = 30
 _ROTATED_PATTERN = re.compile(r"audit-(\d{4}-\d{2}-\d{2})\.jsonl$")
 
+# Audit detail leaves: only primitives or lists of primitives. NO arbitrary
+# objects, NO nested-nested dicts — exactly one level of nesting is allowed
+# (the top-level dict can contain a dict value, but those inner dicts must
+# bottom out at primitives). This is enforced by the dispatcher sanitizer;
+# the type alias here is the documented contract.
+AuditLeaf = str | int | bool | None | list[str]
+AuditDetails = dict[str, AuditLeaf | dict[str, AuditLeaf]]
+
 
 @dataclass(slots=True)
 class AuditEvent:
@@ -39,7 +47,7 @@ class AuditEvent:
     record_count: int | None
     duration_ms: int
     dry_run: bool
-    details: dict[str, str | int | bool | None]  # ONLY metadata, no user data
+    details: AuditDetails  # ONLY metadata + shape info, never field values
 
 
 class AuditLog:
@@ -67,9 +75,7 @@ class AuditLog:
             with self._path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(marker, separators=(",", ":")) + "\n")
         except OSError as exc:
-            raise AuditLogError(
-                f"Cannot write to audit log at {self._path}: {exc}"
-            ) from exc
+            raise AuditLogError(f"Cannot write to audit log at {self._path}: {exc}") from exc
         self._rotate_if_needed()
         self._trim_retention()
 
@@ -148,9 +154,7 @@ class AuditLog:
                 f.write(line)
                 f.flush()
         except OSError as exc:
-            raise AuditLogError(
-                f"Failed to write audit entry to {self._path}: {exc}"
-            ) from exc
+            raise AuditLogError(f"Failed to write audit entry to {self._path}: {exc}") from exc
 
 
 def _now_iso() -> str:

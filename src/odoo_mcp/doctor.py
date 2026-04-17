@@ -23,11 +23,13 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import __version__
 from .audit import AuditLog
 from .client import OdooClient
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .credentials import load_credentials
 from .errors import CredentialsError, OdooMcpError
+from .update_check import check_for_update
 
 
 @dataclass(slots=True)
@@ -115,7 +117,37 @@ def run_doctor(config_path: Path | None = None) -> int:
         )
 
     report.print()
+    _print_update_check()
     return 0 if report.ok else 1
+
+
+_YELLOW = "\033[33m"
+_DIM = "\033[2m"
+_RESET = "\033[0m"
+
+
+def _print_update_check() -> None:
+    """Emit a one-line update notice. Never raises, never fails doctor."""
+    from .update_check import fetch_latest_tag
+
+    try:
+        tag = fetch_latest_tag()
+    except Exception:  # noqa: BLE001 — informational only, must not fail doctor
+        tag = None
+    if tag is None:
+        print(f"{_DIM}~ update check: skipped (network){_RESET}")
+        return
+    try:
+        result = check_for_update(__version__)
+    except Exception:  # noqa: BLE001 — informational only, must not fail doctor
+        return
+    if result is None:
+        return
+    current, latest = result
+    print(
+        f"{_YELLOW}! Update available: {latest} (you have {current}). "
+        f"Run 'odoo-mcp update' or see CHANGELOG.{_RESET}"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

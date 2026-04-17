@@ -68,8 +68,7 @@ class ProdGuard:
         """
         if not production:
             raise ProdGuardError(
-                f"Instance {instance!r} is not flagged as production — "
-                f"no unlock needed."
+                f"Instance {instance!r} is not flagged as production — no unlock needed."
             )
         current = now if now is not None else time.monotonic()
         expiry = current + _UNLOCK_TTL_SECONDS
@@ -98,9 +97,7 @@ class ProdGuard:
 
     # --- Write gate ---------------------------------------------------------
 
-    def check_write(
-        self, instance: str, production: bool, *, now: float | None = None
-    ) -> None:
+    def check_write(self, instance: str, production: bool, *, now: float | None = None) -> None:
         """Raise :class:`ProdGuardError` if a write against prod is not allowed.
 
         No-op for non-production instances. ``now`` is injectable for tests.
