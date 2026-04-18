@@ -2,13 +2,16 @@
 
 ## What it does
 
-odoo-mcp is a local Model Context Protocol server that exposes a tightly
-scoped slice of [Odoo](https://www.odoo.com) to Claude Desktop or Claude
-Code over stdio. It lets Claude search partners, read invoices, update
-leads, and aggregate pipeline data through nine well-defined tools — and
-nothing else. Writes to production are off by default, every call is
-rate-limited and audited, and no operation ever touches `res.users`,
-`ir.*`, or any model outside an explicit allowlist.
+odoo-mcp is a local Model Context Protocol server that exposes a
+security-gated slice of [Odoo](https://www.odoo.com) to Claude Desktop
+or Claude Code over stdio. It lets Claude search partners, read
+invoices, update leads, aggregate pipeline data, and archive or delete
+records through ten well-defined tools — and nothing else. Writes to
+production are off by default, every call is rate-limited and audited,
+and a hardcoded denylist blocks calls to `res.users`, `ir.*` internals,
+stored code (`ir.actions.server`, `mail.template`, `ir.ui.view`),
+system configuration (`ir.config_parameter`), raw attachments, and a
+handful of other sensitive models — regardless of config.
 
 ## Why this exists
 
@@ -107,14 +110,10 @@ The wizard generates a config that looks like this at
 timeout_seconds = 30
 max_records_default = 50
 max_records_hard_cap = 500
-allowed_models = [
-    "res.partner", "crm.lead", "crm.team",
-    "sale.order", "sale.order.line",
-    "product.product", "product.template",
-    "account.move", "account.move.line", "account.payment",
-    "project.project", "project.task",
-    "hr.employee", "hr.leave",
-]
+# Default since v0.4.0: open mode. Every non-denylisted Odoo model is
+# reachable. Replace with an explicit list to switch to strict mode
+# (globally here, or per instance under [instances.NAME]).
+allowed_models = ["*"]
 
 [instances.prod]
 url = "https://your-odoo.com"
@@ -129,9 +128,18 @@ Fields:
 - `max_records_default` — default cap when a tool call omits `limit`.
 - `max_records_hard_cap` — absolute ceiling; `limit` is always clamped
   to this regardless of what the caller asks for.
-- `allowed_models` — the only models any tool call is allowed to touch.
+- `allowed_models` — controls which models tool calls may target.
+  Two modes:
+  - **Open mode** (default): `allowed_models = ["*"]`. Every Odoo
+    model is reachable except those on the hardcoded denylist
+    (see "Allowed models" below). This is the mode a fresh install
+    ships with.
+  - **Strict mode**: `allowed_models = ["res.partner", "crm.lead", ...]`.
+    Only the enumerated models are reachable. The denylist still
+    applies.
   Per-instance overrides are supported under
-  `[instances.NAME]` with an `allowed_models = [...]` key.
+  `[instances.NAME]` with an `allowed_models = [...]` key —
+  e.g. prod in strict mode, dev in open mode.
 - `url` — must be HTTPS on any instance marked `production = true`.
 - `database` — the Odoo database name.
 - `credentials_env_prefix` — prefix under which the launcher exports
@@ -173,10 +181,13 @@ leaves everything else untouched.
 | `odoo_read` | Read specific records by ID | no | — |
 | `odoo_create` | Create a record | yes | yes |
 | `odoo_write` | Update records | yes | yes |
+| `odoo_archive_or_delete` | Archive (`active=False`) or permanently `unlink` records | yes | yes |
 | `odoo_enable_prod_writes` | Unlock prod writes for 15 minutes | — | yes |
 
-No `unlink`. No `execute_kw`. No workflow buttons. No `copy`,
-`name_search`, `fields_view_get`.
+No direct `execute_kw`. No workflow buttons. No `copy`, `name_search`,
+`fields_view_get`. `unlink` is only reachable through
+`odoo_archive_or_delete`, which forces an explicit `mode` choice and
+goes through the full prod-guard + dry-run + confirmation-token flow.
 
 ## CLI commands
 
@@ -266,34 +277,51 @@ the distinct values.
 
 ## Allowed models
 
-By default, the allowlist covers the common deltix consulting surface:
+Since v0.4.0, the default is **open mode**: every Odoo model is
+reachable through the tools, *except* those on the hardcoded
+`MODEL_DENYLIST`. The denylist cannot be disabled through config —
+it is a safety invariant — and covers:
 
+- Auth / user / group tables: `res.users`, `res.users.apikeys`,
+  `res.groups`, `auth_totp.device`, `auth_oauth.provider`,
+  `auth_signup.reset.password`, plus related log / identity-check /
+  description tables.
+- ACL and rule definitions: `ir.model.access`, `ir.rule`.
+- Stored executable content (code and template injection vectors):
+  `ir.actions.server`, `ir.actions.client`, `ir.ui.view`,
+  `mail.template`.
+- System configuration: `ir.config_parameter` (often holds external
+  integration secrets).
+- Scheduler / module / logging internals: `ir.cron`,
+  `ir.module.module`, `ir.logging`, `ir.sequence`.
+- Model metadata: `ir.model`, `ir.model.fields`, `ir.model.data`.
+- Raw attachments: `ir.attachment` (references any `res_model`;
+  opt in per-instance via a strict allowlist if you specifically
+  need it).
+- Import/export infrastructure: `base_import.import`,
+  `base_import.mapping`.
+
+Calls to any denylisted model are rejected with `model_not_allowed`
+before any XML-RPC happens.
+
+To switch an instance into **strict mode**, put an explicit list in
+the config — either globally under `[defaults]` or per-instance:
+
+```toml
+[instances.prod]
+# ...
+allowed_models = [
+    "res.partner", "crm.lead", "sale.order", "account.move",
+]
 ```
-res.partner
-crm.lead
-crm.team
-sale.order
-sale.order.line
-product.product
-product.template
-account.move
-account.move.line
-account.payment
-project.project
-project.task
-hr.employee
-hr.leave
-```
 
-Any call referencing a model outside this list is rejected with
-`model_not_allowed` before any XML-RPC happens. To extend the list for
-one instance, add an `allowed_models = [...]` key under
-`[instances.NAME]` in the config — this overrides the default, so
-include the full set you want, not just additions.
+Strict mode is a complete override: the list replaces the default,
+include the full set you want. The denylist still applies on top of
+a strict list, so you cannot re-enable `res.users` or friends by
+putting them on it.
 
-`res.users`, `ir.model`, `ir.config_parameter`, `ir.module.module`,
-and similar are intentionally not on the default list and should stay
-that way.
+Use `odoo_list_instances` to see the `allowlist_mode` (`"open"` or
+`"strict"`) per instance at runtime.
 
 ## Audit log
 

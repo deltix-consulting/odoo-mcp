@@ -9,6 +9,7 @@ import pytest
 
 from odoo_mcp.config import load_config
 from odoo_mcp.errors import ConfigError
+from odoo_mcp.security.allowlist import ALLOWLIST_WILDCARD
 
 
 def _write_cfg(path: Path, body: str, mode: int = 0o600) -> Path:
@@ -166,6 +167,55 @@ def test_sensitive_fields_rejects_non_string_entries(tmp_path: Path) -> None:
     cfg_file = _write_cfg(tmp_path / "config.toml", body)
     with pytest.raises(ConfigError, match="non-empty strings"):
         load_config(cfg_file)
+
+
+def test_default_is_open_mode(tmp_path: Path) -> None:
+    """A minimal config with no allowed_models override gets open mode."""
+    cfg_file = _write_cfg(tmp_path / "config.toml", _VALID_CONFIG)
+    cfg = load_config(cfg_file)
+    # Default defaults.allowed_models is now the wildcard tuple.
+    assert cfg.defaults.allowed_models == (ALLOWLIST_WILDCARD,)
+    # Each instance inherits it unless overridden.
+    for inst in cfg.instances.values():
+        assert ALLOWLIST_WILDCARD in inst.allowed_models
+
+
+def test_explicit_wildcard_allowed(tmp_path: Path) -> None:
+    """Users can spell out allowed_models = ['*'] in TOML."""
+    body = """
+[defaults]
+allowed_models = ["*"]
+
+[instances.dev]
+url = "https://dev.example.odoo.com"
+database = "dev_db"
+credentials_env_prefix = "ODOO_MCP_DEV"
+production = false
+"""
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    cfg = load_config(cfg_file)
+    assert cfg.defaults.allowed_models == (ALLOWLIST_WILDCARD,)
+    assert ALLOWLIST_WILDCARD in cfg.instances["dev"].allowed_models
+
+
+def test_strict_list_still_works(tmp_path: Path) -> None:
+    """Pre-v0.4 behavior: a concrete strict list stays strict."""
+    body = """
+[defaults]
+allowed_models = ["res.partner", "crm.lead"]
+
+[instances.dev]
+url = "https://dev.example.odoo.com"
+database = "dev_db"
+credentials_env_prefix = "ODOO_MCP_DEV"
+production = false
+"""
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    cfg = load_config(cfg_file)
+    assert cfg.defaults.allowed_models == ("res.partner", "crm.lead")
+    dev_models = cfg.instances["dev"].allowed_models
+    assert dev_models == frozenset({"res.partner", "crm.lead"})
+    assert ALLOWLIST_WILDCARD not in dev_models
 
 
 def test_duplicate_env_prefix_rejected(tmp_path: Path) -> None:

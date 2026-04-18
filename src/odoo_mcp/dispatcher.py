@@ -38,8 +38,14 @@ from . import __version__
 from .audit import AuditEvent, AuditLog
 from .client import OdooClient
 from .config import AppConfig, InstanceConfig
-from .errors import InstanceNotFoundError, OdooMcpError, ProdGuardError
-from .security.allowlist import Operation, check_model, check_operation
+from .errors import FieldPolicyError, InstanceNotFoundError, OdooMcpError, ProdGuardError
+from .security.allowlist import (
+    ALLOWLIST_WILDCARD,
+    MODEL_DENYLIST,
+    Operation,
+    check_model,
+    check_operation,
+)
 from .security.domain import sandbox_domain
 from .security.fields import (
     redact_fields_get,
@@ -199,14 +205,7 @@ class Dispatcher:
     def _help(self, _args: dict[str, Any]) -> dict[str, Any]:
         """Return a capability overview. Never authenticates, never contacts Odoo."""
         instances = [
-            {
-                "name": name,
-                "url": rt.config.url,
-                "database": rt.config.database,
-                "production": rt.config.production,
-                "writes_unlocked": self.app.prod_guard.is_unlocked(name),
-                "allowed_models": sorted(rt.config.allowed_models),
-            }
+            _instance_summary(name, rt, self.app.prod_guard.is_unlocked(name))
             for name, rt in self.app.instances.items()
         ]
         payload: dict[str, Any] = {
@@ -214,6 +213,7 @@ class Dispatcher:
             "summary": _HELP_SUMMARY,
             "common_patterns": _HELP_COMMON_PATTERNS,
             "gotchas": _HELP_GOTCHAS,
+            "denylist_size": len(MODEL_DENYLIST),
             "instances": instances,
         }
         self._audit("odoo_help", Operation.FIELDS_GET, None, None, 0, False, {})
@@ -222,12 +222,7 @@ class Dispatcher:
     def _list_instances(self, _args: dict[str, Any]) -> dict[str, Any]:
         out = [
             {
-                "name": name,
-                "url": rt.config.url,
-                "database": rt.config.database,
-                "production": rt.config.production,
-                "writes_unlocked": self.app.prod_guard.is_unlocked(name),
-                "allowed_models": sorted(rt.config.allowed_models),
+                **_instance_summary(name, rt, self.app.prod_guard.is_unlocked(name)),
                 "max_records_default": rt.config.max_records_default,
                 "max_records_hard_cap": rt.config.max_records_hard_cap,
                 "rate_limit_per_minute": rt.config.rate_limit_per_minute,
@@ -235,7 +230,11 @@ class Dispatcher:
             for name, rt in self.app.instances.items()
         ]
         self._audit("odoo_list_instances", Operation.FIELDS_GET, None, None, 0, False, {})
-        return {"mcp_version": __version__, "instances": out}
+        return {
+            "mcp_version": __version__,
+            "denylist_size": len(MODEL_DENYLIST),
+            "instances": out,
+        }
 
     def _describe_model(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_describe_model", args, Operation.FIELDS_GET)
@@ -485,6 +484,82 @@ class Dispatcher:
         self._audit_ok(ctx, {"id_count": len(ids), "field_count": n}, args)
         return {"instance": ctx.instance, "model": model, "ids": ids, "committed": ok}
 
+    def _archive_or_delete(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Archive (active=False) or permanently unlink records.
+
+        Claude must ask the user which path they want. Archive is reversible
+        and preserves history; delete is permanent. Same prod-guard +
+        dry-run + confirmation-token flow as odoo_write / odoo_create.
+        """
+        mode = args.get("mode")
+        if mode not in ("archive", "delete"):
+            raise OdooMcpError("mode must be 'archive' or 'delete'.")
+        op = Operation.ARCHIVE if mode == "archive" else Operation.UNLINK
+        ctx = self._begin("odoo_archive_or_delete", args, op)
+        assert ctx.model is not None
+        rt, model = ctx.rt, ctx.model
+        ids = _require_list_of_int(args, "ids")
+
+        cap = rt.config.max_records_hard_cap
+        if len(ids) > cap:
+            raise OdooMcpError(f"Cannot {mode} more than {cap} ids at once.")
+
+        # Archive needs an 'active' field on the model; delete is unconditional.
+        if mode == "archive":
+            fields_meta = rt.client.fields_get(model)
+            if "active" not in fields_meta:
+                raise FieldPolicyError(
+                    f"Model {model!r} has no 'active' field — cannot archive. "
+                    f"If deletion is intended, call with mode='delete' (permanent)."
+                )
+
+        self.app.prod_guard.check_write(ctx.instance, rt.config.production)
+        dry_run = self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production)
+
+        if dry_run:
+            summary = f"{mode} {len(ids)} record(s) of {model}"
+            token = self.app.prod_guard.create_pending(
+                ctx.instance, ctx.op.value, model, summary=summary
+            )
+            reminder = (
+                "Archiving is reversible — to restore, odoo_write values={'active': true}."
+                if mode == "archive"
+                else (
+                    "Deletion is PERMANENT and cannot be undone. "
+                    "Archiving (mode='archive') is usually safer. Are you sure?"
+                )
+            )
+            self._audit_ok(
+                ctx,
+                {"mode": mode, "id_count": len(ids)},
+                args,
+                dry_run=True,
+            )
+            return {
+                "preview": True,
+                "instance": ctx.instance,
+                "model": model,
+                "mode": mode,
+                "id_count": len(ids),
+                "confirmation_token": token,
+                "reminder": reminder,
+                "note": _DRY_RUN_NOTE.format(tool="odoo_archive_or_delete"),
+            }
+
+        self._consume_token_on_prod(ctx, args)
+        if mode == "archive":
+            ok = rt.client.write(model, ids, {"active": False})
+        else:
+            ok = rt.client.unlink(model, ids)
+        self._audit_ok(ctx, {"mode": mode, "id_count": len(ids)}, args)
+        return {
+            "instance": ctx.instance,
+            "model": model,
+            "mode": mode,
+            "ids": ids,
+            "committed": ok,
+        }
+
     def _consume_token_on_prod(self, ctx: _Ctx, args: dict[str, Any]) -> None:
         """On prod, a valid confirmation token from a prior dry run is required."""
         if not ctx.rt.config.production:
@@ -595,6 +670,7 @@ _HANDLERS: dict[str, Callable[[Dispatcher, dict[str, Any]], dict[str, Any]]] = {
     "odoo_read": Dispatcher._read,
     "odoo_create": Dispatcher._create,
     "odoo_write": Dispatcher._write,
+    "odoo_archive_or_delete": Dispatcher._archive_or_delete,
     "odoo_enable_prod_writes": Dispatcher._enable_prod_writes,
 }
 
@@ -602,6 +678,33 @@ _HANDLERS: dict[str, Callable[[Dispatcher, dict[str, Any]], dict[str, Any]]] = {
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+
+
+def _instance_summary(name: str, rt: InstanceRuntime, writes_unlocked: bool) -> dict[str, Any]:
+    """Render an instance's metadata including allowlist mode.
+
+    In open mode (``"*"`` in ``allowed_models``), we return ``allowlist_mode``:
+    ``"open"`` and omit the allowlist enumeration — it would be misleading to
+    list ``["*"]`` as if it were a concrete set of allowed models. In strict
+    mode we enumerate the concrete set.
+    """
+    open_mode = ALLOWLIST_WILDCARD in rt.config.allowed_models
+    summary: dict[str, Any] = {
+        "name": name,
+        "url": rt.config.url,
+        "database": rt.config.database,
+        "production": rt.config.production,
+        "writes_unlocked": writes_unlocked,
+        "allowlist_mode": "open" if open_mode else "strict",
+    }
+    if open_mode:
+        summary["allowed_models_note"] = (
+            f"Open mode: any non-denylisted model is reachable "
+            f"({len(MODEL_DENYLIST)} models blocked by denylist)."
+        )
+    else:
+        summary["allowed_models"] = sorted(rt.config.allowed_models)
+    return summary
 
 
 def _text(payload: dict[str, Any], *, default: Callable[[Any], Any] | None = None) -> TextContent:
@@ -627,11 +730,14 @@ _DRY_RUN_NOTE = (
 
 
 _HELP_SUMMARY = (
-    "This MCP exposes an allowlisted, security-gated slice of Odoo over XML-RPC. "
-    "Every call targets a named instance, hits a model allowlist, goes through a "
-    "domain sandbox and a field-redaction policy, and is audit-logged. Production "
-    "writes are blocked by default and require an explicit unlock plus a dry-run "
-    "confirmation token before committing."
+    "This MCP exposes a security-gated slice of Odoo over XML-RPC. Every call "
+    "targets a named instance, goes through model validation (a small hardcoded "
+    "denylist of auth / ACL / code / config models is always blocked; each "
+    "instance then runs in open mode — every other model allowed — or strict "
+    "mode with an explicit allowlist), then through a domain sandbox and a "
+    "field-redaction policy, and is audit-logged. Production writes are blocked "
+    "by default and require an explicit unlock plus a dry-run confirmation "
+    "token before committing."
 )
 
 
@@ -691,9 +797,15 @@ _HELP_GOTCHAS: list[str] = [
     "Sensitive fields (vat, ssnid, bank_ids, private_email, ...) require "
     "allow_sensitive_fields=['NAME', ...] per-call.",
     "Password/api_key/token fields are ALWAYS redacted. Opting in does not unlock them.",
-    "Every Odoo call must target an allowlisted model — use odoo_list_instances to see which.",
+    "Model access: each instance is either in 'open' mode (any model allowed "
+    "except a hardcoded denylist of ~25 auth / ACL / code / config models "
+    "like res.users, ir.config_parameter, ir.actions.server, mail.template, "
+    "ir.attachment) or 'strict' mode (enumerated allowlist). Check "
+    "odoo_list_instances for the mode per instance.",
     "On production, writes default to dry_run=true. Pass dry_run=false AND a "
     "confirmation_token from a prior dry run to commit.",
+    "To remove records, use odoo_archive_or_delete. Always offer archive "
+    "(reversible: active=False) before permanent delete (unlink).",
 ]
 
 
@@ -763,7 +875,7 @@ def _offset(args: dict[str, Any]) -> int:
 # ---------------------------------------------------------------------------
 
 
-_IDENTIFIER_KEYS = frozenset({"instance", "model", "tool", "order", "orderby"})
+_IDENTIFIER_KEYS = frozenset({"instance", "model", "tool", "order", "orderby", "mode"})
 _SCALAR_KEYS = frozenset({"limit", "offset", "dry_run", "include_binary", "lazy"})
 
 

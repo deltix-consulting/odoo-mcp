@@ -367,6 +367,11 @@ class OdooClient:
         result = self._execute(model, "write", [ids, values], {})
         return bool(result)
 
+    def unlink(self, model: str, ids: list[int]) -> bool:
+        """Permanently delete records. Exposed only via ``odoo_archive_or_delete``."""
+        result = self._execute(model, "unlink", [ids], {})
+        return bool(result)
+
     # --- Internal ----------------------------------------------------------
 
     def _execute(

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .config import DEFAULT_CONFIG_PATH, AppConfig, InstanceConfig, load_config
 from .errors import ConfigError
+from .security.allowlist import ALLOWLIST_WILDCARD, MODEL_DENYLIST
 from .setup_wizard import _keychain_get
 
 
@@ -71,7 +72,8 @@ def _render_show(cfg: AppConfig, *, check_keychain: bool) -> list[str]:
     lines.append(f"timeout_seconds:       {d.timeout_seconds}")
     lines.append(f"max_records_default:   {d.max_records_default}")
     lines.append(f"max_records_hard_cap:  {d.max_records_hard_cap}")
-    lines.append(f"allowed_models:        {_format_models_short(list(d.allowed_models))}")
+    lines.append(f"allowed_models:        {_format_allowlist(list(d.allowed_models))}")
+    lines.append(f"denylist:              {len(MODEL_DENYLIST)} models (always blocked)")
 
     global_models = frozenset(d.allowed_models)
     for name, inst in cfg.instances.items():
@@ -98,8 +100,13 @@ def _render_instance(
     lines.append(f"rate_limit_per_minute:   {inst.rate_limit_per_minute}")
     lines.append(f"allow_self_signed:       {_bool(inst.allow_self_signed)}")
 
-    # allowed_models: show full list only when overridden.
-    if inst.allowed_models == global_models:
+    # allowed_models: show full list only when overridden. Open mode gets a
+    # one-line summary that includes the denylist size.
+    if ALLOWLIST_WILDCARD in inst.allowed_models:
+        lines.append(
+            f"allowed_models:          open mode ({len(MODEL_DENYLIST)} models in denylist)"
+        )
+    elif inst.allowed_models == global_models:
         lines.append(
             f"allowed_models:          ({len(inst.allowed_models)} total, using global defaults)"
         )
@@ -119,6 +126,13 @@ def _render_instance(
 
 def _bool(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _format_allowlist(models: list[str]) -> str:
+    """Render the ``[defaults].allowed_models`` value, handling open mode."""
+    if ALLOWLIST_WILDCARD in models:
+        return f"open mode ({len(MODEL_DENYLIST)} models in denylist)"
+    return _format_models_short(models)
 
 
 def _format_models_short(models: list[str]) -> str:

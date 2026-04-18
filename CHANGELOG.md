@@ -12,6 +12,52 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.4.0] - 2026-04-18
+
+### Changed
+
+- **BREAKING**: the default model allowlist is now **open mode**. A fresh
+  install (or any config without an explicit `allowed_models`) grants
+  access to every Odoo model *except* those on the hardcoded
+  `MODEL_DENYLIST`. The wildcard sentinel `"*"` is accepted in TOML
+  (`allowed_models = ["*"]`) as the explicit spelling of this mode.
+  Users who had an explicit `allowed_models = [...]` list in their
+  TOML are unaffected — strict mode continues to work unchanged and
+  remains available per-instance for teams that want an enumerated
+  allowlist.
+- `odoo_list_instances` / `odoo_help` now expose an `allowlist_mode`
+  field (`"open"` or `"strict"`) per instance and a top-level
+  `denylist_size`. In open mode the response no longer enumerates
+  models (it would be misleading to report `["*"]` as if it were a
+  concrete set); in strict mode the enumerated list is still returned.
+
+### Added
+
+- `MODEL_DENYLIST` — a hardcoded, non-overrideable set of ~25 models
+  that are always blocked, even in open mode. Covers auth / user /
+  group tables (`res.users`, `res.groups`, `res.users.apikeys`,
+  `auth_totp.device`, ...), ACL / rule definitions (`ir.model.access`,
+  `ir.rule`), stored executable content (`ir.actions.server`,
+  `ir.actions.client`, `ir.ui.view`, `mail.template`), system
+  configuration (`ir.config_parameter`), scheduler / module internals
+  (`ir.cron`, `ir.module.module`, `ir.logging`, `ir.sequence`), model
+  metadata (`ir.model`, `ir.model.fields`, `ir.model.data`), raw
+  attachments (`ir.attachment`), and import/export infrastructure
+  (`base_import.import`, `base_import.mapping`). The denylist cannot
+  be disabled via config — it is a safety invariant.
+- `odoo_archive_or_delete` tool for removing records. Accepts
+  `mode="archive"` (sets `active=False`, reversible) or
+  `mode="delete"` (calls `unlink`, permanent). The tool description
+  instructs Claude to always offer archive first. Full prod-guard /
+  dry-run / confirmation-token flow, same as `odoo_create` and
+  `odoo_write`. Archive mode refuses to run on a model without an
+  `active` field with a clear error pointing at `mode='delete'`.
+- New `Operation.ARCHIVE` and `Operation.UNLINK` enum members,
+  classified as write ops.
+- `odoo-mcp config show` now prints a `denylist:` line and a
+  `allowed_models: open mode (...)` summary for instances in open
+  mode.
+
 ## [0.3.0] - 2026-04-17
 
 ### Added

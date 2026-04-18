@@ -15,7 +15,8 @@ _TOOL_LIST_INSTANCES = Tool(
     description=(
         "List the configured Odoo instances the MCP can talk to. Returns for each "
         "instance: name, production flag, whether prod writes are currently unlocked, "
-        "and the allowed-models set. Safe, read-only. "
+        "and the allowlist mode ('open' = any non-denylisted model is reachable, "
+        "'strict' = explicit enumerated list). Safe, read-only. "
         "Example: use this first if you don't know the instance names."
     ),
     inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
@@ -283,6 +284,51 @@ _TOOL_WRITE = Tool(
     },
 )
 
+_TOOL_ARCHIVE_OR_DELETE = Tool(
+    name="odoo_archive_or_delete",
+    description=(
+        "Archive OR permanently delete records. ALWAYS ask the user which "
+        "they want before calling this tool — archiving is almost always "
+        "what they mean when they say 'delete'. "
+        "mode='archive' sets active=False: reversible, preserves history, "
+        'can be undone via odoo_write values={"active": true}. '
+        "mode='delete' calls unlink: PERMANENT, cannot be undone, erases "
+        "all data and linked references. Use delete only when the user "
+        "says 'permanently', 'purge', 'remove forever', or explicitly "
+        "rejects archiving. "
+        "Same prod-guard as odoo_create / odoo_write: dry_run=true (default "
+        "on prod) returns a preview + confirmation_token; commit requires "
+        "dry_run=false AND the token. "
+        "Example: user asks 'delete these 3 old leads' -> ask 'archive or "
+        "permanently delete? (archiving is reversible)' -> if they say "
+        "archive: mode='archive', ids=[...]."
+    ),
+    inputSchema={
+        "type": "object",
+        "required": ["instance", "model", "ids", "mode"],
+        "additionalProperties": False,
+        "properties": {
+            "instance": {"type": "string"},
+            "model": {"type": "string"},
+            "ids": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "minItems": 1,
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["archive", "delete"],
+                "description": (
+                    "archive=reversible (sets active=False). delete=permanent (unlink)."
+                ),
+            },
+            "dry_run": {"type": "boolean"},
+            "confirmation_token": {"type": "string"},
+        },
+    },
+)
+
+
 _TOOL_ENABLE_PROD_WRITES = Tool(
     name="odoo_enable_prod_writes",
     description=(
@@ -326,5 +372,6 @@ def build_tools() -> list[Tool]:
         _TOOL_READ,
         _TOOL_CREATE,
         _TOOL_WRITE,
+        _TOOL_ARCHIVE_OR_DELETE,
         _TOOL_ENABLE_PROD_WRITES,
     ]

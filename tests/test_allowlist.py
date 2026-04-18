@@ -5,7 +5,15 @@ from __future__ import annotations
 import pytest
 
 from odoo_mcp.errors import ModelNotAllowedError, OperationNotAllowedError
-from odoo_mcp.security.allowlist import Operation, check_model, check_operation, is_read, is_write
+from odoo_mcp.security.allowlist import (
+    ALLOWLIST_WILDCARD,
+    MODEL_DENYLIST,
+    Operation,
+    check_model,
+    check_operation,
+    is_read,
+    is_write,
+)
 
 
 def test_check_model_accepts_exact_match() -> None:
@@ -49,15 +57,23 @@ def test_check_operation_accepts_enum_values() -> None:
     assert check_operation(Operation.WRITE) is Operation.WRITE
 
 
-@pytest.mark.parametrize("bad", ["unlink", "copy", "execute_kw", "name_search", "", "UNLINK"])
+@pytest.mark.parametrize("bad", ["copy", "execute_kw", "name_search", "", "UNLINK"])
 def test_check_operation_rejects_everything_else(bad: str) -> None:
     with pytest.raises(OperationNotAllowedError):
         check_operation(bad)
 
 
+def test_check_operation_accepts_archive_and_unlink() -> None:
+    # Both are write ops used only by odoo_archive_or_delete.
+    assert check_operation("archive") is Operation.ARCHIVE
+    assert check_operation("unlink") is Operation.UNLINK
+
+
 def test_is_write_classification() -> None:
     assert is_write(Operation.CREATE)
     assert is_write(Operation.WRITE)
+    assert is_write(Operation.ARCHIVE)
+    assert is_write(Operation.UNLINK)
     assert not is_write(Operation.SEARCH_READ)
     assert not is_write(Operation.SEARCH_COUNT)
     assert not is_write(Operation.READ)
@@ -78,3 +94,62 @@ def test_is_read_classification() -> None:
 def test_check_operation_accepts_new_aggregate_ops() -> None:
     assert check_operation("search_count") is Operation.SEARCH_COUNT
     assert check_operation("read_group") is Operation.READ_GROUP
+
+
+# -- Denylist / open-mode -----------------------------------------------------
+
+
+def test_denylist_blocks_res_users_even_in_open_mode() -> None:
+    # Open mode = wildcard in the allowed set.
+    allowed = frozenset({ALLOWLIST_WILDCARD})
+    with pytest.raises(ModelNotAllowedError, match="denylist"):
+        check_model("res.users", allowed)
+
+
+def test_denylist_blocks_ir_config_parameter() -> None:
+    allowed = frozenset({ALLOWLIST_WILDCARD})
+    with pytest.raises(ModelNotAllowedError, match="denylist"):
+        check_model("ir.config_parameter", allowed)
+
+
+def test_denylist_blocks_even_in_strict_mode_override() -> None:
+    # Safety invariant: even if a misguided user put res.users on their
+    # strict allowlist, it should still be denied.
+    allowed = frozenset({"res.users", "res.partner"})
+    with pytest.raises(ModelNotAllowedError, match="denylist"):
+        check_model("res.users", allowed)
+
+
+def test_open_mode_allows_any_non_denied_model() -> None:
+    allowed = frozenset({ALLOWLIST_WILDCARD})
+    # None of these are on MODEL_DENYLIST — all should pass.
+    check_model("res.partner", allowed)
+    check_model("sale.order", allowed)
+    check_model("some.custom.module", allowed)
+
+
+def test_open_mode_still_validates_name_shape() -> None:
+    allowed = frozenset({ALLOWLIST_WILDCARD})
+    with pytest.raises(ModelNotAllowedError, match="invalid characters"):
+        check_model("res partner", allowed)
+    with pytest.raises(ModelNotAllowedError, match="invalid characters"):
+        check_model("res.partner;drop", allowed)
+    with pytest.raises(ModelNotAllowedError, match="non-empty string"):
+        check_model("", allowed)
+
+
+def test_strict_mode_unchanged() -> None:
+    # A pre-v0.4 strict list still works: only listed models are allowed.
+    allowed = frozenset({"res.partner", "crm.lead"})
+    check_model("res.partner", allowed)
+    with pytest.raises(ModelNotAllowedError, match="not on the allowlist"):
+        check_model("sale.order", allowed)
+
+
+def test_model_denylist_covers_expected_categories() -> None:
+    # Sanity: the five buckets are all represented.
+    assert "res.users" in MODEL_DENYLIST
+    assert "ir.config_parameter" in MODEL_DENYLIST
+    assert "ir.actions.server" in MODEL_DENYLIST
+    assert "mail.template" in MODEL_DENYLIST
+    assert "ir.attachment" in MODEL_DENYLIST

@@ -142,7 +142,10 @@ class OperationNotAllowedError(OdooMcpError):
 
     @property
     def hint(self) -> str:
-        return "This MCP only supports: search_read, search_count, read, read_group, create, write."
+        return (
+            "This MCP only supports: search_read, search_count, read, read_group, "
+            "create, write, archive, unlink, fields_get."
+        )
 
 
 class ProdGuardError(OdooMcpError):
