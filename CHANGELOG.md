@@ -12,6 +12,28 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.3.0] - 2026-04-17
+
+### Added
+
+- Expanded default `allowed_models` from 14 to 27 to cover common Odoo
+  business modules out of the box: `purchase.order`, `stock.picking`,
+  `stock.move`, `planning.slot`, `hr.expense`, `hr.expense.sheet`,
+  `helpdesk.ticket`, `knowledge.article`, `approval.request`,
+  `calendar.event`, `documents.document`, `mail.message`, plus
+  `account.analytic.line`. Existing per-instance `allowed_models`
+  overrides in user TOML continue to take precedence.
+
+### Security
+
+- `mail.message` ships with a strict default-hidden policy on `body`,
+  `subject`, `author_id`, `email_from`, `email_to`, `email_cc` because
+  it is a cross-model side-door that can reference any `res_model`.
+  Callers must opt in per-field via `allow_sensitive_fields`.
+- `calendar.event.description` is default-hidden — can contain
+  confidential meeting notes. Metadata (title, attendees, times) is
+  still returned by default.
+
 ## [0.2.0] - 2026-04-17
 
 First tracked release. This entry captures the full set of features

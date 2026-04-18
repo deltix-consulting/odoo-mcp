@@ -61,6 +61,19 @@ _DEFAULT_HIDDEN: Final[dict[str, frozenset[str]]] = {
             "place_of_birth",
         }
     ),
+    # mail.message is a cross-model side-door: a single message row can
+    # reference any res_model (including models NOT on the allowlist), and
+    # its `body` / `subject` / email fields can contain anything — HR notes,
+    # password resets, private discussions, quoted emails. We hide these by
+    # default so a broad read of mail.message gives back only metadata
+    # (timestamps, message_type, res_model, res_id, message counts). Opt
+    # in per-field via `allow_sensitive_fields` when the use case is clear.
+    "mail.message": frozenset(
+        {"body", "subject", "author_id", "email_from", "email_to", "email_cc"}
+    ),
+    # Calendar event descriptions can contain confidential meeting notes
+    # (1-on-1s, board topics, acquisition talks). Metadata is fine by default.
+    "calendar.event": frozenset({"description"}),
 }
 
 _BINARY_PLACEHOLDER_PREFIX: Final[str] = "<binary:"

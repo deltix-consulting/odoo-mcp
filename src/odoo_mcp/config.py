@@ -31,20 +31,45 @@ DEFAULT_CONFIG_PATH: Final[Path] = Path("~/.odoo-mcp/config.toml").expanduser()
 DEFAULT_AUDIT_LOG: Final[str] = "~/.odoo-mcp/audit.jsonl"
 
 _DEFAULT_ALLOWED_MODELS: Final[tuple[str, ...]] = (
+    # Contacts / CRM
     "res.partner",
     "crm.lead",
     "crm.team",
+    # Sales
     "sale.order",
     "sale.order.line",
     "product.product",
     "product.template",
+    # Accounting
     "account.move",
     "account.move.line",
     "account.payment",
+    "account.analytic.line",
+    # Purchase
+    "purchase.order",
+    # Inventory
+    "stock.picking",
+    "stock.move",
+    # Projects / planning
     "project.project",
     "project.task",
+    "planning.slot",
+    # HR
     "hr.employee",
     "hr.leave",
+    "hr.expense",
+    "hr.expense.sheet",
+    # Helpdesk / knowledge / approvals
+    "helpdesk.ticket",
+    "knowledge.article",
+    "approval.request",
+    # Calendar / documents
+    "calendar.event",
+    "documents.document",
+    # Communications — note: mail.message has a strict default-hidden policy
+    # on body / subject / author / email addresses because it is a cross-model
+    # side-door that references any res_model. Opt in per-field if needed.
+    "mail.message",
 )
 
 _VALID_DEFAULT_KEYS: Final[frozenset[str]] = frozenset(
