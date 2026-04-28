@@ -33,6 +33,9 @@ class _FakeClient:
         self._fields = fields if fields is not None else {"id": {"type": "integer"}}
         self.write_calls: list[tuple[str, list[int], dict[str, Any]]] = []
         self.unlink_calls: list[tuple[str, list[int]]] = []
+        # Match the OdooClient interface used by _instance_summary.
+        self.is_admin: bool | None = None
+        self.admin_reason: str | None = None
 
     def ensure_authenticated(self) -> None:
         return None

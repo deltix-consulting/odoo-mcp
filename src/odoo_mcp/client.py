@@ -167,6 +167,8 @@ class OdooClient:
         self._common = self._make_proxy(f"{instance.url}/xmlrpc/2/common")
         self._object = self._make_proxy(f"{instance.url}/xmlrpc/2/object")
         self._uid: int | None = None
+        self._is_admin: bool | None = None  # set after authenticate()
+        self._admin_reason: str | None = None  # human-readable why it's admin
         self._auth_lock = threading.Lock()
 
     # --- Construction / auth ------------------------------------------------
@@ -242,7 +244,69 @@ class OdooClient:
             raise OdooAuthError(f"Unexpected authenticate() return type: {type(uid).__name__}")
         self._uid = uid
         logger.debug("authenticate ok: instance=%s uid=%d", self._instance.name, uid)
+
+        # Detect admin-level credentials. uid=1 is the Odoo superuser (OdooBot).
+        # Any user with the ``base.group_system`` group has system-administrator
+        # rights — can bypass most record rules and access nearly everything.
+        # Using such credentials via the MCP is a security red flag because it
+        # collapses the per-user Odoo ACL that the MCP relies on for scoping.
+        # We detect and flag; we don't refuse, so existing working setups are
+        # not broken. Consultants should create a dedicated non-admin Odoo user
+        # for MCP use instead.
+        self._detect_admin_privileges(uid)
+
         return uid
+
+    def _detect_admin_privileges(self, uid: int) -> None:
+        """Populate ``_is_admin`` and ``_admin_reason`` after a successful auth.
+
+        Never raises — this is a best-effort security signal. If the check
+        cannot complete (e.g. temporary RPC error), we leave ``_is_admin`` as
+        ``None`` so callers can tell "not checked" apart from "confirmed not".
+        """
+        if uid == 1:
+            self._is_admin = True
+            self._admin_reason = "superuser (uid=1, OdooBot)"
+            logger.warning(
+                "Instance %r is authenticated as the Odoo superuser (uid=1). "
+                "Most record rules are bypassed. Create a dedicated non-admin "
+                "user for MCP use.",
+                self._instance.name,
+            )
+            return
+        try:
+            has_system = self._execute("res.users", "has_group", [uid, "base.group_system"], {})
+        except (OdooRemoteError, OdooTransportError):
+            # Couldn't check — leave admin status unknown.
+            self._is_admin = None
+            return
+        if bool(has_system):
+            self._is_admin = True
+            self._admin_reason = "system administrator (base.group_system)"
+            logger.warning(
+                "Instance %r is authenticated as an Odoo system administrator "
+                "(uid=%d). Most record rules are bypassed. Create a dedicated "
+                "non-admin user for MCP use.",
+                self._instance.name,
+                uid,
+            )
+        else:
+            self._is_admin = False
+
+    @property
+    def is_admin(self) -> bool | None:
+        """Admin status of the authenticated user.
+
+        - ``True``: uid=1 or member of ``base.group_system``.
+        - ``False``: regular user.
+        - ``None``: not yet authenticated, or the check couldn't complete.
+        """
+        return self._is_admin
+
+    @property
+    def admin_reason(self) -> str | None:
+        """Short human-readable explanation of why :attr:`is_admin` is True."""
+        return self._admin_reason
 
     def ensure_authenticated(self) -> None:
         """Authenticate lazily on first use. Thread-safe and idempotent.

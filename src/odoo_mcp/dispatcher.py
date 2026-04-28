@@ -704,6 +704,17 @@ def _instance_summary(name: str, rt: InstanceRuntime, writes_unlocked: bool) -> 
         )
     else:
         summary["allowed_models"] = sorted(rt.config.allowed_models)
+    # Admin-credential detection (set after authenticate()). Surface as a
+    # warning so both Claude and the user can see they're running with
+    # elevated Odoo rights, which defeats per-user ACL scoping.
+    if rt.client.is_admin:
+        summary["admin_warning"] = (
+            f"This instance is authenticated as {rt.client.admin_reason}. "
+            f"Most Odoo record rules are bypassed. The MCP's defense layers "
+            f"still apply, but the Odoo-side ACL scoping that this MCP relies "
+            f"on for per-user permissions is NOT in effect. Switch to a "
+            f"dedicated non-admin Odoo user for production use."
+        )
     return summary
 
 

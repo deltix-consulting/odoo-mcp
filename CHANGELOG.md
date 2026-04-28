@@ -12,6 +12,27 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.4.1] - 2026-04-22
+
+### Added
+
+- Admin-credential detection. After authentication, the client checks
+  whether the API key's user is the Odoo superuser (`uid=1`) or has the
+  `base.group_system` group, and exposes the result as `client.is_admin`
+  / `client.admin_reason`. Doctor surfaces it as a `!` warning line
+  (informational — does not change exit code). `odoo_list_instances`
+  includes an `admin_warning` field on the affected instance so Claude
+  can see it. The MCP does not refuse to run with admin credentials so
+  existing setups keep working, but the warning makes clear that
+  per-user Odoo ACL scoping is bypassed and a dedicated non-admin
+  user should be created for MCP use.
+
+### Fixed
+
+- Doctor smoke test no longer tries `fields_get("*")` when the instance
+  is in open allowlist mode — it now picks `res.partner` as a known
+  probe model.
+
 ## [0.4.0] - 2026-04-18
 
 ### Changed

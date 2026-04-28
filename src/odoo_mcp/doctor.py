@@ -42,9 +42,14 @@ class _Step:
 @dataclass(slots=True)
 class _Report:
     steps: list[_Step] = field(default_factory=list)
+    warnings: list[_Step] = field(default_factory=list)
 
     def add(self, name: str, ok: bool, detail: str = "") -> None:
         self.steps.append(_Step(name=name, ok=ok, detail=detail))
+
+    def add_warning(self, name: str, detail: str = "") -> None:
+        """Informational signal that does NOT cause exit-code failure."""
+        self.warnings.append(_Step(name=name, ok=False, detail=detail))
 
     @property
     def ok(self) -> bool:
@@ -54,6 +59,11 @@ class _Report:
         for step in self.steps:
             mark = "✓" if step.ok else "✗"
             line = f"  {mark} {step.name}"
+            if step.detail:
+                line += f" — {step.detail}"
+            print(line)
+        for step in self.warnings:
+            line = f"  ! {step.name}"
             if step.detail:
                 line += f" — {step.detail}"
             print(line)
@@ -103,8 +113,28 @@ def run_doctor(config_path: Path | None = None) -> int:
             continue
         report.add(f"{section} authenticate", True, f"uid={client.uid}")
 
-        # Smoke test: fields_get on one allowed model
-        probe_model = next(iter(inst_cfg.allowed_models))
+        # Admin-credential warning. Set by authenticate() via has_group check.
+        # Surfaced as a separate line so the signal doesn't get lost in a
+        # "green" doctor run. We pass it through `add_warning` rather than a
+        # hard fail because it's informational — the MCP still works, but
+        # per-user ACL scoping won't.
+        if client.is_admin:
+            report.add_warning(
+                f"{section} admin check",
+                f"authenticated as {client.admin_reason}. Most Odoo record "
+                f"rules are bypassed. Create a dedicated non-admin user for "
+                f"MCP use.",
+            )
+
+        # Smoke test: fields_get on one allowed model. In open mode the
+        # config holds the wildcard sentinel, which isn't a real model — pick
+        # a known-existing one (res.partner) instead.
+        from .security.allowlist import ALLOWLIST_WILDCARD
+
+        if ALLOWLIST_WILDCARD in inst_cfg.allowed_models:
+            probe_model = "res.partner"
+        else:
+            probe_model = next(iter(inst_cfg.allowed_models))
         try:
             fg = client.fields_get(probe_model)
         except OdooMcpError as exc:
