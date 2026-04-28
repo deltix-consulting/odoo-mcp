@@ -12,6 +12,18 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.6.1] - 2026-04-28
+
+### Fixed
+
+- Release workflow no longer fails when build-provenance attestations
+  cannot be generated. Private repos on free-tier GitHub orgs hit a
+  permissions error on `actions/attest-build-provenance`; the step now
+  uses `continue-on-error: true`, so the wheel + sdist still publish.
+  Once the org upgrades or the repo flips public, attestations resume
+  automatically. `odoo-mcp update` already handles "no attestation
+  found" as a soft environmental case.
+
 ## [0.6.0] - 2026-04-22
 
 ### Added

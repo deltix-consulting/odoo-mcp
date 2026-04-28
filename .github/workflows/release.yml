@@ -39,7 +39,12 @@ jobs:
         run: uv build
 
       - name: Generate build provenance attestation
+        # Attestations require a public repo OR a paid org plan. We let
+        # this step fail soft so the release still publishes on a private
+        # free-tier repo. When the org upgrades or the repo flips public,
+        # this becomes the default verification path.
         uses: actions/attest-build-provenance@v1
+        continue-on-error: true
         with:
           subject-path: 'dist/*'
 
