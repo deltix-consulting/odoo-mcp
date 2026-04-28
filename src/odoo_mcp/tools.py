@@ -45,6 +45,42 @@ _TOOL_DESCRIBE_MODEL = Tool(
     },
 )
 
+_TOOL_LOOKUP = Tool(
+    name="odoo_lookup",
+    description=(
+        "Fast name-based lookup. Searches the model's `name` field for "
+        "case-insensitive substring matches and returns only id + "
+        "display_name — much cheaper than odoo_search_read for finding "
+        "records by name. Domain sandbox does not apply (the search is "
+        "fixed to a `name ilike` filter). Sensitive-field policy still "
+        "applies: if `display_name` resolves to a sensitive field (e.g. "
+        "for some custom HR models), the result is redacted. "
+        "Example: model='res.partner', query='Acme' returns up to limit "
+        "matching companies / contacts."
+    ),
+    inputSchema={
+        "type": "object",
+        "required": ["instance", "model", "query"],
+        "additionalProperties": False,
+        "properties": {
+            "instance": {"type": "string"},
+            "model": {"type": "string"},
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Substring to match (ilike).",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 10,
+                "description": "Max results.",
+            },
+        },
+    },
+)
+
+
 _TOOL_SEARCH_READ = Tool(
     name="odoo_search_read",
     description=(
@@ -366,6 +402,7 @@ def build_tools() -> list[Tool]:
         _TOOL_HELP,
         _TOOL_LIST_INSTANCES,
         _TOOL_DESCRIBE_MODEL,
+        _TOOL_LOOKUP,
         _TOOL_SEARCH_READ,
         _TOOL_SEARCH_COUNT,
         _TOOL_READ_GROUP,

@@ -64,6 +64,11 @@ def main() -> int:
 
         return update_cli.main(argv[1:])
 
+    if argv and argv[0] == "cache":
+        from . import cache_cli
+
+        return cache_cli.main(argv[1:])
+
     if argv and argv[0] == "launch-env":
         from .setup_wizard import print_launch_env
 

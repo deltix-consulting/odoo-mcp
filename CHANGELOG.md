@@ -12,6 +12,46 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.6.0] - 2026-04-22
+
+### Added
+
+- **Persistent `fields_get` cache (L2).** A SQLite-backed cache at
+  `~/.odoo-mcp/fields-cache.db` (chmod 600) survives MCP process
+  restarts, so the common "Claude restarts and re-asks for `res.partner`
+  fields" path no longer pays the round-trip tax every time. The
+  in-memory L1 cache on `OdooClient` is unchanged; the L2 sits behind
+  it. Default TTL is 24h per entry. The cache stores only metadata
+  (field types, labels, help text) — no record values pass through.
+  Configurable via `fields_cache_path` in `[defaults]`; set to `""` to
+  disable entirely (L1 still applies).
+- **`odoo-mcp cache` CLI.** `odoo-mcp cache --info` prints row count,
+  file size, and oldest / newest entry timestamps. `odoo-mcp cache
+  --clear` drops everything; `--clear --instance NAME` drops one
+  instance's rows. Useful after a model schema change in Odoo.
+- **`odoo_lookup` tool.** Fast name-based lookup that runs
+  `name ilike <query>` and returns only `id` + `display_name`. Much
+  cheaper than `odoo_search_read` for the common "find partner X"
+  pattern. The domain shape is fixed, so the domain sandbox is
+  intentionally bypassed; sensitive-field redaction still applies.
+  Default limit 10, clamped to the instance's `max_records_hard_cap`.
+
+### Security
+
+- GitHub Actions Build Provenance Attestations are now generated for
+  every release artifact (`*.whl` and `*.tar.gz`) via Sigstore and
+  published to GitHub's transparency log. End users can verify a
+  downloaded release tarball with
+  `gh attestation verify --owner deltix-consulting --signer-workflow ".github/workflows/release.yml" odoo_mcp-X.Y.Z.tar.gz`.
+- `odoo-mcp update` now downloads the latest release tarball and
+  verifies its attestation against our release workflow before
+  applying. A hard verification failure (signature mismatch, wrong
+  signer workflow) refuses the update with a red error. Environmental
+  issues (no `gh` on PATH, offline, GitHub down) print a yellow warning
+  and prompt the user to confirm.
+- New `--skip-verification` flag on `odoo-mcp update` for users who
+  explicitly want to bypass the attestation check (not recommended).
+
 ## [0.5.0] - 2026-04-22
 
 ### Changed

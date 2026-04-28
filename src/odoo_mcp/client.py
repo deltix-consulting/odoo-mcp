@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 from .config import InstanceConfig
 from .credentials import Credentials
 from .errors import OdooAuthError, OdooRemoteError, OdooTransportError
+from .fields_cache import PersistentFieldsCache
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,7 @@ class OdooClient:
         credentials: Credentials | None = None,
         *,
         credential_loader: Callable[[], Credentials] | None = None,
+        fields_cache: PersistentFieldsCache | None = None,
     ) -> None:
         if credentials is None and credential_loader is None:
             raise OdooAuthError(
@@ -159,6 +161,8 @@ class OdooClient:
         self._credential_lock = threading.Lock()
         self._ssl_context = _build_ssl_context(instance.allow_self_signed)
         self._fields_cache: dict[str, dict[str, dict[str, Any]]] = {}
+        # Optional L2 SQLite cache shared across processes / clients.
+        self._persistent_fields_cache = fields_cache
 
         parsed = urlparse(instance.url)
         if parsed.scheme not in ("http", "https"):
@@ -374,13 +378,25 @@ class OdooClient:
     # --- Odoo operations (all go through execute_kw with a tight allowlist) -
 
     def fields_get(self, model: str, *, use_cache: bool = True) -> dict[str, dict[str, Any]]:
-        """Return ``fields_get`` for ``model``, cached per-process.
+        """Return ``fields_get`` for ``model``, cached at two levels.
 
-        The cache is important: domain validation calls this on every request,
-        and Odoo's ``fields_get`` is a non-trivial query.
+        Lookup order when ``use_cache`` is set:
+
+        1. In-memory L1 dict (per-process, no I/O).
+        2. SQLite L2 cache (per-host, survives restarts) — if one was wired
+           in via the constructor.
+        3. Odoo XML-RPC ``fields_get`` — the only path that does network I/O.
+
+        On miss-then-hit-from-Odoo we write back to both caches so the next
+        call (in this process or a future one) is a hit.
         """
         if use_cache and model in self._fields_cache:
             return self._fields_cache[model]
+        if use_cache and self._persistent_fields_cache is not None:
+            cached = self._persistent_fields_cache.get(self._instance.name, model)
+            if cached is not None:
+                self._fields_cache[model] = cached
+                return cached
         result = self._execute(
             model,
             "fields_get",
@@ -392,6 +408,8 @@ class OdooClient:
                 f"fields_get for {model!r} returned unexpected type {type(result).__name__}"
             )
         self._fields_cache[model] = result
+        if self._persistent_fields_cache is not None:
+            self._persistent_fields_cache.put(self._instance.name, model, result)
         return result
 
     def search_read(
@@ -410,6 +428,26 @@ class OdooClient:
         if not isinstance(result, list):
             raise OdooRemoteError(
                 f"search_read({model!r}) returned unexpected type {type(result).__name__}"
+            )
+        return result
+
+    def lookup(self, model: str, query: str, limit: int) -> list[dict[str, Any]]:
+        """Fast name-based lookup: ``name ilike <query>`` returning id + display_name.
+
+        The domain shape is fixed — callers do not pass an arbitrary
+        ``domain``, which deliberately sidesteps the domain sandbox. The
+        only knobs are the substring and the limit.
+        """
+        domain = [("name", "ilike", query)]
+        result = self._execute(
+            model,
+            "search_read",
+            [domain],
+            {"fields": ["id", "display_name"], "limit": limit},
+        )
+        if not isinstance(result, list):
+            raise OdooRemoteError(
+                f"lookup({model!r}) returned unexpected type {type(result).__name__}"
             )
         return result
 

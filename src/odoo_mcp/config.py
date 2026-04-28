@@ -30,6 +30,7 @@ from .errors import ConfigError
 
 DEFAULT_CONFIG_PATH: Final[Path] = Path("~/.odoo-mcp/config.toml").expanduser()
 DEFAULT_AUDIT_LOG: Final[str] = "~/.odoo-mcp/audit.jsonl"
+DEFAULT_FIELDS_CACHE: Final[str] = "~/.odoo-mcp/fields-cache.db"
 
 # Default allowlist since v0.4.0: the sentinel wildcard ``"*"`` puts every
 # instance into "open mode" — every Odoo model is reachable except the
@@ -45,6 +46,7 @@ _VALID_DEFAULT_KEYS: Final[frozenset[str]] = frozenset(
         "max_records_hard_cap",
         "audit_log",
         "allowed_models",
+        "fields_cache_path",
     }
 )
 
@@ -75,6 +77,9 @@ class Defaults:
     max_records_hard_cap: int = 500
     audit_log: str = DEFAULT_AUDIT_LOG
     allowed_models: tuple[str, ...] = _DEFAULT_ALLOWED_MODELS
+    # Empty string disables the persistent fields cache entirely (the L1
+    # in-memory cache on OdooClient still applies).
+    fields_cache_path: str = DEFAULT_FIELDS_CACHE
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +107,12 @@ class AppConfig:
     defaults: Defaults
     instances: dict[str, InstanceConfig] = field(default_factory=dict)
     audit_log_path: Path = field(default_factory=lambda: Path(DEFAULT_AUDIT_LOG).expanduser())
+    # ``None`` means the persistent fields cache is disabled (the user set
+    # ``fields_cache_path = ""`` in [defaults]). ``Path("")`` would be
+    # ambiguous, so we model "off" as an absent path.
+    fields_cache_path: Path | None = field(
+        default_factory=lambda: Path(DEFAULT_FIELDS_CACHE).expanduser()
+    )
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -132,12 +143,18 @@ def load_config(path: Path | None = None) -> AppConfig:
         raise ConfigError("No [instances.*] entries configured — nothing for the MCP to do.")
 
     audit_log_path = Path(defaults.audit_log).expanduser()
+    fields_cache_path: Path | None
+    if defaults.fields_cache_path == "":
+        fields_cache_path = None
+    else:
+        fields_cache_path = Path(defaults.fields_cache_path).expanduser()
 
     return AppConfig(
         path=cfg_path,
         defaults=defaults,
         instances=instances,
         audit_log_path=audit_log_path,
+        fields_cache_path=fields_cache_path,
     )
 
 
@@ -160,6 +177,12 @@ def _check_file_permissions(path: Path) -> None:
 
 def _parse_defaults(raw: dict[str, Any]) -> Defaults:
     _reject_unknown_keys(raw, _VALID_DEFAULT_KEYS, "defaults")
+    fields_cache_raw = raw.get("fields_cache_path", DEFAULT_FIELDS_CACHE)
+    if not isinstance(fields_cache_raw, str):
+        raise ConfigError(
+            f'[defaults].fields_cache_path must be a string (use "" to disable), '
+            f"got {type(fields_cache_raw).__name__}"
+        )
     return Defaults(
         timeout_seconds=_require_int(raw, "timeout_seconds", 30, minimum=1, maximum=120),
         max_records_default=_require_int(raw, "max_records_default", 50, minimum=1, maximum=1000),
@@ -168,6 +191,7 @@ def _parse_defaults(raw: dict[str, Any]) -> Defaults:
         ),
         audit_log=str(raw.get("audit_log", DEFAULT_AUDIT_LOG)),
         allowed_models=tuple(_require_str_list(raw, "allowed_models", _DEFAULT_ALLOWED_MODELS)),
+        fields_cache_path=fields_cache_raw,
     )
 
 

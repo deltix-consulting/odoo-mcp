@@ -94,6 +94,7 @@ class Operation(StrEnum):
     SEARCH_COUNT = "search_count"
     READ = "read"
     READ_GROUP = "read_group"
+    LOOKUP = "lookup"
     CREATE = "create"
     WRITE = "write"
     ARCHIVE = "archive"
@@ -107,6 +108,7 @@ _READ_OPS: Final[frozenset[Operation]] = frozenset(
         Operation.SEARCH_COUNT,
         Operation.READ,
         Operation.READ_GROUP,
+        Operation.LOOKUP,
         Operation.FIELDS_GET,
     }
 )

@@ -157,6 +157,27 @@ Being explicit about this matters:
   to make that visible to the human reviewer, not to prevent it. Tool
   call approvals exist precisely for this case.
 
+## Verifying releases
+
+Every release artifact (`*.whl` and `*.tar.gz`) published on GitHub
+Releases since v0.6.0 is signed via Sigstore using GitHub Actions Build
+Provenance Attestations. The attestation is published to GitHub's
+transparency log and can be independently verified. To check a
+downloaded tarball:
+
+```bash
+gh attestation verify \
+  --owner deltix-consulting \
+  --signer-workflow ".github/workflows/release.yml" \
+  odoo_mcp-0.6.0.tar.gz
+```
+
+A successful verification proves the artifact was built by our public
+release workflow on a tag push — not produced by a fork, a tampered
+checkout, or a compromised maintainer machine. `odoo-mcp update`
+performs the same check automatically before applying an update; pass
+`--skip-verification` only if you have a specific reason to bypass it.
+
 ## Reporting vulnerabilities
 
 Email `security@deltix.pro`. PGP is available on request.

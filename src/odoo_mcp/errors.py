@@ -144,7 +144,7 @@ class OperationNotAllowedError(OdooMcpError):
     def hint(self) -> str:
         return (
             "This MCP only supports: search_read, search_count, read, read_group, "
-            "create, write, archive, unlink, fields_get."
+            "lookup, create, write, archive, unlink, fields_get."
         )
 
 

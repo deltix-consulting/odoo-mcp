@@ -255,6 +255,57 @@ class Dispatcher:
         self._audit_ok(ctx, {"field_count": len(filtered)}, args)
         return {"model": ctx.model, "fields": filtered}
 
+    def _lookup(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Fast `name ilike` lookup returning only id + display_name.
+
+        The domain shape is fixed (``[("name", "ilike", query)]``), so the
+        domain sandbox is intentionally bypassed — there is nothing the
+        caller can mutate that would change which records are searchable.
+        Sensitive-field redaction still runs on the result so a model whose
+        ``display_name`` resolves to a redacted field doesn't leak it.
+        """
+        ctx = self._begin("odoo_lookup", args, Operation.LOOKUP)
+        assert ctx.model is not None
+        rt, model = ctx.rt, ctx.model
+        query = _require_str(args, "query")
+        raw_limit = args.get("limit", 10)
+        if isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
+            raise OdooMcpError("limit must be an integer.")
+        if raw_limit < 1:
+            raise OdooMcpError("limit must be >= 1.")
+        # Clamp the caller's limit to the instance's hard cap.
+        effective_limit = min(raw_limit, rt.config.max_records_hard_cap)
+
+        fields_meta = rt.client.fields_get(model)
+        results = rt.client.lookup(model, query, effective_limit)
+        # Even though we only requested id + display_name, run the result
+        # through the redactor so a model whose display_name is sensitive
+        # (or where extra patterns flag it) still gets stripped.
+        redacted = redact_response(
+            model,
+            results,
+            {n: m.get("type", "") for n, m in fields_meta.items()},
+            allow_sensitive=frozenset(),
+            include_binary=False,
+            instance_overrides=rt.config.sensitive_fields,
+            extra_redacted=rt.extra_redacted,
+        )
+        self._audit_ok(
+            ctx,
+            {
+                "query_len": len(query),
+                "result_count": len(redacted),
+                "limit": effective_limit,
+            },
+            args,
+        )
+        return {
+            "instance": ctx.instance,
+            "model": model,
+            "results": redacted,
+            "count": len(redacted),
+        }
+
     def _search_read(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_search_read", args, Operation.SEARCH_READ)
         assert ctx.model is not None
@@ -703,6 +754,7 @@ _HANDLERS: dict[str, Callable[[Dispatcher, dict[str, Any]], dict[str, Any]]] = {
     "odoo_help": Dispatcher._help,
     "odoo_list_instances": Dispatcher._list_instances,
     "odoo_describe_model": Dispatcher._describe_model,
+    "odoo_lookup": Dispatcher._lookup,
     "odoo_search_read": Dispatcher._search_read,
     "odoo_search_count": Dispatcher._search_count,
     "odoo_read_group": Dispatcher._read_group,
@@ -812,6 +864,16 @@ _HELP_COMMON_PATTERNS: list[dict[str, Any]] = [
             "model": "crm.lead",
             "fields": ["id:count", "expected_revenue:sum"],
             "groupby": ["stage_id"],
+        },
+    },
+    {
+        "goal": "Find a record by name (much faster than full search_read)",
+        "use": "odoo_lookup",
+        "example": {
+            "instance": "prod",
+            "model": "res.partner",
+            "query": "Acme",
+            "limit": 5,
         },
     },
     {

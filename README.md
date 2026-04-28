@@ -73,6 +73,11 @@ to `odoo-mcp setup`. Set `ODOO_MCP_HOME` to override the install
 directory, or pass `--git` to clone `main` instead of using a tagged
 release.
 
+Since v0.6.0, every release artifact (`*.whl` and `*.tar.gz`) is signed
+via Sigstore using GitHub Actions Build Provenance Attestations. You
+can verify a downloaded tarball with `gh attestation verify` — see the
+"Verifying releases" section in [`SECURITY.md`](SECURITY.md).
+
 ### Via git clone (manual)
 
 ```bash
@@ -175,6 +180,7 @@ leaves everything else untouched.
 |---|---|---|---|
 | `odoo_list_instances` | List configured instances and their state | no | — |
 | `odoo_describe_model` | Field metadata for one allowlisted model | no | — |
+| `odoo_lookup` | Fast `name ilike` lookup, returns id + display_name | no | — |
 | `odoo_search_read` | Query records (explicit fields, sandboxed domain) | no | — |
 | `odoo_search_count` | Count records matching a domain | no | — |
 | `odoo_read_group` | Aggregate (sum/avg/count/min/max) with groupby | no | — |
@@ -202,6 +208,8 @@ goes through the full prod-guard + dry-run + confirmation-token flow.
 | `odoo-mcp doctor` | Pre-flight: config perms, audit log, TLS, auth, smoke call |
 | `odoo-mcp status` | Live status: which instances are authenticated, unlock state, rate-limit budget |
 | `odoo-mcp audit` | Audit log inspector: filter by instance, tool, date, result |
+| `odoo-mcp cache --info` | Show persistent fields-cache stats (rows, size, age) |
+| `odoo-mcp cache --clear` | Drop persistent fields-cache rows (`--instance NAME` to scope) |
 
 ## Production write workflow
 
@@ -364,6 +372,30 @@ server fails closed: every tool call is refused until the log is
 writable again.
 
 Use `odoo-mcp audit` to query the log interactively.
+
+## Caching
+
+`fields_get` (the Odoo metadata call that the MCP uses to validate
+domains and field lists) is cached at two levels:
+
+- **L1, in-memory.** Per-process dict on `OdooClient`. No I/O, never
+  expires within a process lifetime.
+- **L2, persistent.** SQLite database at `~/.odoo-mcp/fields-cache.db`
+  (chmod 600), shared across MCP process restarts. Default TTL is
+  24 hours per `(instance, model)` row. Only field metadata (types,
+  labels, help text) is stored — never record values.
+
+The L2 cache is populated lazily on first use of each model and is
+opt-out: set `fields_cache_path = ""` in `[defaults]` to disable it
+entirely (the L1 cache still applies). After a schema change in Odoo
+(new module, new custom field), use `odoo-mcp cache --clear` to drop
+stale entries:
+
+```bash
+odoo-mcp cache --info                        # row count, size, ages
+odoo-mcp cache --clear                       # drop everything
+odoo-mcp cache --clear --instance prod       # drop one instance only
+```
 
 ## Development
 

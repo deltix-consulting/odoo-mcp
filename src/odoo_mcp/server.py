@@ -28,6 +28,7 @@ from .dispatcher import (
     _args_shape,
     _sanitize_details,
 )
+from .fields_cache import PersistentFieldsCache
 from .security.fields import compile_extra_patterns
 from .security.limits import RateLimiter
 from .security.prod_guard import ProdGuard
@@ -61,10 +62,16 @@ def build_app(config_path: Any = None) -> OdooMcpApp:
     prod_guard = ProdGuard()
     rate_limiter = RateLimiter()
 
+    # Build the L2 fields cache once and share across all clients. Disabled
+    # if the operator set ``fields_cache_path = ""`` in [defaults].
+    fields_cache: PersistentFieldsCache | None = None
+    if cfg.fields_cache_path is not None:
+        fields_cache = PersistentFieldsCache(cfg.fields_cache_path)
+
     instances: dict[str, InstanceRuntime] = {}
     for name, inst_cfg in cfg.instances.items():
         loader = make_credential_loader(name, inst_cfg.credentials_env_prefix)
-        client = OdooClient(inst_cfg, credential_loader=loader)
+        client = OdooClient(inst_cfg, credential_loader=loader, fields_cache=fields_cache)
         rate_limiter.configure(name, inst_cfg.rate_limit_per_minute)
         extra = compile_extra_patterns(list(inst_cfg.custom_sensitive_field_patterns))
         instances[name] = InstanceRuntime(config=inst_cfg, client=client, extra_redacted=extra)

@@ -2,12 +2,20 @@
 
 Usage::
 
-    odoo-mcp update           # fetch, confirm, apply, verify
-    odoo-mcp update --check   # just report whether a newer version exists
+    odoo-mcp update                       # fetch, verify, confirm, apply
+    odoo-mcp update --check               # just report whether a newer version exists
+    odoo-mcp update --skip-verification   # bypass attestation check (not recommended)
 
 The update flow assumes a git checkout that runs the package via ``uv``. If
 no ``pyproject.toml`` can be found by walking up from this file, the command
 aborts — self-update from a wheel install is not supported.
+
+Before any ``git pull`` happens, the latest release tarball's GitHub
+build-provenance attestation is verified via ``gh attestation verify``. A
+hard verification failure (``gh`` ran and rejected the artifact) refuses
+the update. Environmental issues (no ``gh``, offline, GitHub down) print
+a yellow warning and prompt the user to confirm; ``--skip-verification``
+bypasses the check entirely.
 """
 
 from __future__ import annotations
@@ -17,9 +25,16 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .update_check import check_for_update, read_changelog_security
+from .attestation import verify_release_attestation
+from .update_check import check_for_update, fetch_latest_tag, read_changelog_security
 
 _GIT = "/usr/bin/git"  # absolute path per security policy
+
+# ANSI color codes for warnings / errors. Kept simple — terminals that
+# don't support them just see the escape sequences, which is fine.
+_RED = "\033[31m"
+_YELLOW = "\033[33m"
+_RESET = "\033[0m"
 
 
 def _find_project_dir() -> Path | None:
@@ -88,6 +103,45 @@ def _run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _handle_verification(skip: bool) -> bool:
+    """Verify the latest release's attestation. Returns True if we should proceed.
+
+    - ``skip=True``: print a notice, return True.
+    - Hard verification failure: print red error, return False.
+    - Environmental issue (no gh, offline): print yellow warning, prompt user.
+    - Verified: print confirmation, return True.
+    """
+    if skip:
+        print(f"{_YELLOW}Skipping attestation verification (--skip-verification).{_RESET}")
+        return True
+
+    tag = fetch_latest_tag()
+    if tag is None:
+        print(
+            f"{_YELLOW}Warning: could not determine latest release tag "
+            f"(GitHub API unreachable). Attestation not verified.{_RESET}"
+        )
+        return _confirm("Proceed without verification? [y/N]: ")
+
+    print(f"Verifying build provenance attestation for {tag}...")
+    verified, reason = verify_release_attestation(tag)
+    if verified:
+        print(f"  OK — {reason}")
+        return True
+
+    if reason.startswith("environment:"):
+        print(f"{_YELLOW}Warning: attestation verification could not run ({reason}).{_RESET}")
+        return _confirm("Proceed without verification? [y/N]: ")
+
+    print(
+        f"{_RED}ERROR: attestation verification failed ({reason}).{_RESET}\n"
+        f"{_RED}Refusing update — the release artifact does not appear to be"
+        f" signed by our CI workflow.{_RESET}",
+        file=sys.stderr,
+    )
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
 
@@ -97,6 +151,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args and args[0] == "--check":
         return _print_check(__version__)
+
+    skip_verification = False
+    if "--skip-verification" in args:
+        skip_verification = True
+        args = [a for a in args if a != "--skip-verification"]
 
     project_dir = _find_project_dir()
     if project_dir is None:
@@ -147,6 +206,10 @@ def main(argv: list[str] | None = None) -> int:
     if not _confirm("Apply update? [y/N]: "):
         print("Aborted.")
         return 0
+
+    # Verify the latest release's build provenance before touching the repo.
+    if not _handle_verification(skip_verification):
+        return 1
 
     # Fast-forward pull.
     pull = _git(project_dir, "pull", "--ff-only", "origin", branch, check=False)
