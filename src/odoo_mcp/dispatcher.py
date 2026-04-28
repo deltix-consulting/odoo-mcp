@@ -27,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -71,6 +72,7 @@ class InstanceRuntime:
 
     config: InstanceConfig
     client: OdooClient
+    extra_redacted: tuple[re.Pattern[str], ...] = ()
 
 
 @dataclass(slots=True)
@@ -245,6 +247,7 @@ class Dispatcher:
             ctx.model,
             ctx.rt.client.fields_get(ctx.model),
             instance_overrides=ctx.rt.config.sensitive_fields,
+            extra_redacted=ctx.rt.extra_redacted,
         )
         filtered = {
             fname: {k: v for k, v in meta.items() if k in keep} for fname, meta in raw.items()
@@ -268,6 +271,7 @@ class Dispatcher:
             known,
             allow_sensitive=allow_sensitive,
             instance_overrides=overrides,
+            extra_redacted=rt.extra_redacted,
         )
         domain = sandbox_domain(args.get("domain") or [], known)
         limit = clamp_limit(
@@ -283,6 +287,7 @@ class Dispatcher:
             allow_sensitive=allow_sensitive,
             include_binary=bool(args.get("include_binary") or False),
             instance_overrides=overrides,
+            extra_redacted=rt.extra_redacted,
         )
         self._audit_ok(
             ctx,
@@ -334,6 +339,7 @@ class Dispatcher:
             known,
             allow_sensitive=allow_sensitive,
             instance_overrides=overrides,
+            extra_redacted=rt.extra_redacted,
         )
         groupby = validate_groupby(
             model,
@@ -341,6 +347,7 @@ class Dispatcher:
             known,
             allow_sensitive=allow_sensitive,
             instance_overrides=overrides,
+            extra_redacted=rt.extra_redacted,
         )
         domain = sandbox_domain(args.get("domain") or [], known)
         # Clamp group count to the hard cap regardless of caller input.
@@ -390,6 +397,7 @@ class Dispatcher:
             frozenset(fields_meta.keys()),
             allow_sensitive=allow_sensitive,
             instance_overrides=overrides,
+            extra_redacted=rt.extra_redacted,
         )
         redacted = redact_response(
             model,
@@ -398,6 +406,7 @@ class Dispatcher:
             allow_sensitive=allow_sensitive,
             include_binary=bool(args.get("include_binary") or False),
             instance_overrides=overrides,
+            extra_redacted=rt.extra_redacted,
         )
         self._audit_ok(
             ctx,
@@ -419,7 +428,7 @@ class Dispatcher:
         self.app.prod_guard.check_write(ctx.instance, rt.config.production)
 
         known = frozenset(rt.client.fields_get(model).keys())
-        validated = validate_write_values(model, values, known)
+        validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
         n = len(validated)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
@@ -442,7 +451,14 @@ class Dispatcher:
         self._consume_token_on_prod(ctx, args)
         new_id = rt.client.create(model, validated)
         self._audit_ok(ctx, {"field_count": n, "new_id": new_id}, args)
-        return {"instance": ctx.instance, "model": model, "id": new_id, "committed": True}
+        result: dict[str, Any] = {
+            "instance": ctx.instance,
+            "model": model,
+            "id": new_id,
+            "committed": True,
+        }
+        self._add_commits_remaining(result, ctx)
+        return result
 
     def _write(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_write", args, Operation.WRITE)
@@ -457,7 +473,7 @@ class Dispatcher:
             raise OdooMcpError(f"Cannot write to more than {cap} ids at once.")
 
         known = frozenset(rt.client.fields_get(model).keys())
-        validated = validate_write_values(model, values, known)
+        validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
         n = len(validated)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
@@ -482,7 +498,14 @@ class Dispatcher:
         self._consume_token_on_prod(ctx, args)
         ok = rt.client.write(model, ids, validated)
         self._audit_ok(ctx, {"id_count": len(ids), "field_count": n}, args)
-        return {"instance": ctx.instance, "model": model, "ids": ids, "committed": ok}
+        result: dict[str, Any] = {
+            "instance": ctx.instance,
+            "model": model,
+            "ids": ids,
+            "committed": ok,
+        }
+        self._add_commits_remaining(result, ctx)
+        return result
 
     def _archive_or_delete(self, args: dict[str, Any]) -> dict[str, Any]:
         """Archive (active=False) or permanently unlink records.
@@ -552,13 +575,23 @@ class Dispatcher:
         else:
             ok = rt.client.unlink(model, ids)
         self._audit_ok(ctx, {"mode": mode, "id_count": len(ids)}, args)
-        return {
+        result: dict[str, Any] = {
             "instance": ctx.instance,
             "model": model,
             "mode": mode,
             "ids": ids,
             "committed": ok,
         }
+        self._add_commits_remaining(result, ctx)
+        return result
+
+    def _add_commits_remaining(self, result: dict[str, Any], ctx: _Ctx) -> None:
+        """If on prod, expose the post-commit burst budget to the caller."""
+        if not ctx.rt.config.production:
+            return
+        remaining = self.app.prod_guard.commits_remaining(ctx.instance)
+        if remaining is not None:
+            result["commits_remaining"] = remaining
 
     def _consume_token_on_prod(self, ctx: _Ctx, args: dict[str, Any]) -> None:
         """On prod, a valid confirmation token from a prior dry run is required."""
@@ -575,7 +608,11 @@ class Dispatcher:
     def _enable_prod_writes(self, args: dict[str, Any]) -> dict[str, Any]:
         instance_name = _require_str(args, "instance")
         rt = self.app.instance(instance_name)
-        expiry = self.app.prod_guard.unlock(instance_name, rt.config.production)
+        expiry = self.app.prod_guard.unlock(
+            instance_name,
+            rt.config.production,
+            max_commits=rt.config.max_commits_per_unlock,
+        )
         self._audit(
             "odoo_enable_prod_writes",
             Operation.WRITE,
@@ -590,10 +627,12 @@ class Dispatcher:
             "instance": instance_name,
             "writes_unlocked": True,
             "expires_in_seconds": int(expiry - time.monotonic()),
+            "commits_remaining": rt.config.max_commits_per_unlock,
             "note": (
-                "Writes are unlocked for 15 minutes of activity. Every write still "
-                "defaults to dry_run=true on prod; you must pass dry_run=false and a "
-                "confirmation_token to commit."
+                f"Writes are unlocked for 15 minutes of activity. Every write still "
+                f"defaults to dry_run=true on prod; you must pass dry_run=false and a "
+                f"confirmation_token to commit. Up to "
+                f"{rt.config.max_commits_per_unlock} commits allowed in this window."
             ),
         }
 

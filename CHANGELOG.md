@@ -12,6 +12,54 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.5.0] - 2026-04-22
+
+### Changed
+
+- **BREAKING for fresh prod installs that use admin keys.** Production
+  instances now refuse to authenticate when the API key belongs to the
+  Odoo superuser (`uid=1`) or any member of `base.group_system`. The
+  detection itself shipped in 0.4.1 as an informational warning; in
+  0.5.0 it becomes a hard refusal because admin credentials bypass the
+  per-user record rules the MCP relies on for ACL scoping. To fix:
+  create a dedicated non-admin Odoo user, give it only the groups it
+  needs, generate a fresh API key as that user, and run
+  `odoo-mcp setup --rotate-key NAME`. Existing setups that knowingly
+  need admin keys (e.g. integration test rigs) can opt out by setting
+  `refuse_admin_on_production = false` per instance in `config.toml`.
+
+### Added
+
+- New per-instance config keys:
+  - `refuse_admin_on_production` (bool, default `true`) — see above.
+  - `custom_sensitive_field_patterns` (list of regex strings, default
+    empty) — extra always-redacted patterns scoped to one instance.
+    Useful for custom-module fields like `my_module\.\w+_secret`. Bad
+    regex surface as a `ConfigError` at startup with the offending
+    pattern in the message.
+  - `max_commits_per_unlock` (int, default `10`, range 1..1000) — caps
+    the number of real commits per unlock window. Dry-runs do not count.
+- The `odoo_enable_prod_writes` response now includes
+  `commits_remaining`, and every commit response (`odoo_create`,
+  `odoo_write`, `odoo_archive_or_delete`) on a production instance also
+  includes `commits_remaining` so Claude can see the running budget.
+- `odoo-mcp status` shows `N commits remaining` next to the unlock
+  expiry when a production instance is unlocked.
+
+### Security
+
+- Broader hard-coded always-redacted patterns. In addition to the
+  existing password / API key / token / secret families, the redactor
+  now blocks fields whose name contains `salary`, `compensation`,
+  `payroll`, or `bonus` anywhere; fields named exactly
+  `commission_amount`, `nda_text`, `confidential`, or `private_key`;
+  and fields matching `\w+_passphrase` or `\w+_credentials`. These are
+  always-redacted, not default-hidden — they cannot be opted into via
+  `allow_sensitive_fields`.
+- Burst-limit gate on production commits (see `max_commits_per_unlock`
+  above). Stops a runaway loop from exhausting the 15-minute unlock
+  window with hundreds of commits before the operator notices.
+
 ## [0.4.1] - 2026-04-22
 
 ### Added

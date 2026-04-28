@@ -40,6 +40,22 @@ _ALWAYS_REDACTED_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"refresh_token", re.IGNORECASE),
     re.compile(r".*_secret", re.IGNORECASE),
     re.compile(r".*_password", re.IGNORECASE),
+    # Common HR/finance custom-module fields. Salary and compensation data
+    # is highly sensitive, often regulated, and rarely needed for legitimate
+    # MCP use cases. Block by default; if a real use case shows up, the
+    # operator can carve out an allowlist via custom_sensitive_field_patterns
+    # and per-call allow_sensitive_fields (note: built-in patterns can NOT
+    # be opted out of — these are always-redacted, not default-hidden).
+    re.compile(r".*salary.*", re.IGNORECASE),
+    re.compile(r".*compensation.*", re.IGNORECASE),
+    re.compile(r".*payroll.*", re.IGNORECASE),
+    re.compile(r".*bonus.*", re.IGNORECASE),
+    re.compile(r"commission_amount", re.IGNORECASE),
+    re.compile(r"nda_text", re.IGNORECASE),
+    re.compile(r"confidential", re.IGNORECASE),
+    re.compile(r"private_key", re.IGNORECASE),
+    re.compile(r"\w+_passphrase", re.IGNORECASE),
+    re.compile(r"\w+_credentials", re.IGNORECASE),
 )
 
 # Per-model default-hidden PII. The caller must explicitly opt in to each.
@@ -99,6 +115,42 @@ def is_always_redacted(field_name: str) -> bool:
     return any(p.fullmatch(field_name) for p in _ALWAYS_REDACTED_PATTERNS)
 
 
+def is_always_redacted_with_extra(
+    field_name: str,
+    extra_patterns: tuple[re.Pattern[str], ...] | None = None,
+) -> bool:
+    """Like :func:`is_always_redacted`, but also checks per-instance patterns.
+
+    Per-instance patterns come from
+    ``InstanceConfig.custom_sensitive_field_patterns`` and are compiled once
+    via :func:`compile_extra_patterns`. They are checked with the same
+    ``fullmatch`` semantics and have the same effect: matching field names
+    are dropped from responses and rejected on writes, regardless of
+    ``allow_sensitive_fields``.
+    """
+    if is_always_redacted(field_name):
+        return True
+    if extra_patterns is None:
+        return False
+    return any(p.fullmatch(field_name) for p in extra_patterns)
+
+
+def compile_extra_patterns(patterns: list[str] | tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
+    """Compile a list of caller-supplied regex strings.
+
+    Each pattern is compiled with :data:`re.IGNORECASE` so it behaves like
+    the built-in always-redacted patterns. Bad regex surface as
+    :class:`FieldPolicyError` with the offending pattern in the message.
+    """
+    compiled: list[re.Pattern[str]] = []
+    for raw in patterns:
+        try:
+            compiled.append(re.compile(raw, re.IGNORECASE))
+        except re.error as exc:
+            raise FieldPolicyError(f"Invalid custom sensitive-field regex {raw!r}: {exc}") from exc
+    return tuple(compiled)
+
+
 def is_default_hidden(
     model: str,
     field_name: str,
@@ -124,6 +176,7 @@ def validate_requested_fields(
     *,
     allow_sensitive: frozenset[str],
     instance_overrides: dict[str, frozenset[str]] | None = None,
+    extra_redacted: tuple[re.Pattern[str], ...] = (),
 ) -> list[str]:
     """Validate the caller's ``fields`` list against all policies.
 
@@ -151,7 +204,7 @@ def validate_requested_fields(
             )
         if name not in known_fields:
             raise FieldPolicyError(f"Field {name!r} does not exist on model {model!r}.")
-        if is_always_redacted(name):
+        if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(f"Field {name!r} is permanently redacted and cannot be read.")
         if (
             is_default_hidden(model, name, instance_overrides=instance_overrides)
@@ -168,6 +221,8 @@ def validate_write_values(
     model: str,
     values: dict[str, Any],
     known_fields: frozenset[str],
+    *,
+    extra_redacted: tuple[re.Pattern[str], ...] = (),
 ) -> dict[str, Any]:
     """Validate the ``values`` dict being passed to create/write.
 
@@ -187,7 +242,7 @@ def validate_write_values(
             raise FieldPolicyError(f"Dotted field {name!r} not allowed in write values.")
         if name not in known_fields:
             raise FieldPolicyError(f"Field {name!r} does not exist on model {model!r}.")
-        if is_always_redacted(name):
+        if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(
                 f"Field {name!r} is protected and cannot be written via the MCP."
             )
@@ -202,6 +257,7 @@ def validate_aggregate_fields(
     *,
     allow_sensitive: frozenset[str],
     instance_overrides: dict[str, frozenset[str]] | None = None,
+    extra_redacted: tuple[re.Pattern[str], ...] = (),
 ) -> list[str]:
     """Validate the ``fields`` list for ``read_group``.
 
@@ -242,7 +298,7 @@ def validate_aggregate_fields(
             raise FieldPolicyError(f"Dotted aggregate field {name!r} not allowed.")
         if name not in known_fields:
             raise FieldPolicyError(f"Aggregate field {name!r} does not exist on model {model!r}.")
-        if is_always_redacted(name):
+        if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(f"Aggregate field {name!r} is permanently redacted.")
         if (
             is_default_hidden(model, name, instance_overrides=instance_overrides)
@@ -262,6 +318,7 @@ def validate_groupby(
     *,
     allow_sensitive: frozenset[str],
     instance_overrides: dict[str, frozenset[str]] | None = None,
+    extra_redacted: tuple[re.Pattern[str], ...] = (),
 ) -> list[str]:
     """Validate the ``groupby`` list for ``read_group``.
 
@@ -302,7 +359,7 @@ def validate_groupby(
             raise FieldPolicyError(f"Dotted groupby field {name!r} not allowed.")
         if name not in known_fields:
             raise FieldPolicyError(f"groupby field {name!r} does not exist on model {model!r}.")
-        if is_always_redacted(name):
+        if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(f"groupby field {name!r} is permanently redacted.")
         if (
             is_default_hidden(model, name, instance_overrides=instance_overrides)
@@ -323,6 +380,7 @@ def redact_response(
     allow_sensitive: frozenset[str],
     include_binary: bool,
     instance_overrides: dict[str, frozenset[str]] | None = None,
+    extra_redacted: tuple[re.Pattern[str], ...] = (),
 ) -> list[dict[str, Any]]:
     """Apply redaction and binary stripping to a batch of records.
 
@@ -336,7 +394,7 @@ def redact_response(
     for rec in records:
         cleaned: dict[str, Any] = {}
         for name, value in rec.items():
-            if is_always_redacted(name):
+            if is_always_redacted_with_extra(name, extra_redacted):
                 continue  # drop entirely
             if (
                 is_default_hidden(model, name, instance_overrides=instance_overrides)
@@ -357,6 +415,7 @@ def redact_fields_get(
     fields_get: dict[str, dict[str, Any]],
     *,
     instance_overrides: dict[str, frozenset[str]] | None = None,
+    extra_redacted: tuple[re.Pattern[str], ...] = (),
 ) -> dict[str, dict[str, Any]]:
     """Filter an ``fields_get`` response by the same policy used at read time.
 
@@ -366,7 +425,7 @@ def redact_fields_get(
     """
     out: dict[str, dict[str, Any]] = {}
     for name, meta in fields_get.items():
-        if is_always_redacted(name):
+        if is_always_redacted_with_extra(name, extra_redacted):
             continue
         meta_copy = dict(meta)
         if is_default_hidden(model, name, instance_overrides=instance_overrides):

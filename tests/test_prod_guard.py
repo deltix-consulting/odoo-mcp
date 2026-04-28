@@ -87,3 +87,51 @@ def test_touch_extends_unlock_window() -> None:
     guard.touch("prod", now=10 * 60)
     # At t=20min we should still be unlocked because touch reset the window.
     assert guard.is_unlocked("prod", now=20 * 60)
+
+
+# --- burst limit -------------------------------------------------------------
+
+
+def test_burst_limit_enforced() -> None:
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0, max_commits=2)
+    # First commit
+    t1 = guard.create_pending("prod", "create", "res.partner", "s", now=0.0)
+    guard.consume_pending(t1, "prod", "create", "res.partner", now=1.0)
+    # Second commit
+    t2 = guard.create_pending("prod", "create", "res.partner", "s", now=2.0)
+    guard.consume_pending(t2, "prod", "create", "res.partner", now=3.0)
+    # Third commit -> burst limit
+    t3 = guard.create_pending("prod", "create", "res.partner", "s", now=4.0)
+    with pytest.raises(ProdGuardError, match="Burst limit reached"):
+        guard.consume_pending(t3, "prod", "create", "res.partner", now=5.0)
+
+
+def test_dry_runs_dont_count_toward_burst() -> None:
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0, max_commits=2)
+    # Many dry-runs: create_pending is fine, no consume happens.
+    for _ in range(10):
+        guard.create_pending("prod", "create", "res.partner", "s", now=0.0)
+    # Counter still intact: 2 commits available.
+    assert guard.commits_remaining("prod", now=1.0) == 2
+
+
+def test_relock_resets_counter() -> None:
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0, max_commits=1)
+    t1 = guard.create_pending("prod", "create", "res.partner", "s", now=0.0)
+    guard.consume_pending(t1, "prod", "create", "res.partner", now=1.0)
+    assert guard.commits_remaining("prod", now=2.0) == 0
+    # New unlock past the previous TTL
+    guard.unlock("prod", production=True, now=20 * 60, max_commits=1)
+    assert guard.commits_remaining("prod", now=20 * 60 + 1) == 1
+
+
+def test_default_is_ten() -> None:
+    from odoo_mcp.security.prod_guard import DEFAULT_MAX_COMMITS_PER_UNLOCK
+
+    assert DEFAULT_MAX_COMMITS_PER_UNLOCK == 10
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    assert guard.commits_remaining("prod", now=1.0) == 10

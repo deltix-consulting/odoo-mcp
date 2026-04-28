@@ -254,8 +254,43 @@ class OdooClient:
         # not broken. Consultants should create a dedicated non-admin Odoo user
         # for MCP use instead.
         self._detect_admin_privileges(uid)
+        self._enforce_admin_refusal()
 
         return uid
+
+    def _enforce_admin_refusal(self) -> None:
+        """Refuse admin credentials on production unless explicitly opted out.
+
+        Default policy as of v0.5.0: a fresh production instance authenticated
+        as the Odoo superuser or a ``base.group_system`` member raises
+        :class:`OdooAuthError`. Operators who knowingly need admin keys (e.g.
+        for integration test rigs) can opt out by setting
+        ``refuse_admin_on_production = false`` in the instance's TOML config.
+        """
+        if not self._is_admin:
+            return
+        if not self._instance.production:
+            return
+        if not self._instance.refuse_admin_on_production:
+            logger.warning(
+                "Instance %r is using admin credentials on a production instance "
+                "but refuse_admin_on_production=false — opt-out acknowledged. "
+                "Per-user Odoo ACL scoping is NOT in effect.",
+                self._instance.name,
+            )
+            return
+        raise OdooAuthError(
+            f"Refusing to use admin credentials ({self._admin_reason}) on "
+            f"production instance {self._instance.name!r}. Admin keys bypass "
+            f"per-user Odoo record rules, which removes the ACL scoping the "
+            f"MCP relies on. To fix: create a non-admin Odoo user, grant only "
+            f"the groups it needs, generate a new API key as that user, then "
+            f"run 'odoo-mcp setup --rotate-key {self._instance.name}'. To "
+            f"opt out (NOT recommended — only do this if you understand the "
+            f"consequences, e.g. integration test rigs), set "
+            f"'refuse_admin_on_production = false' in the [instances."
+            f"{self._instance.name}] TOML section."
+        )
 
     def _detect_admin_privileges(self, uid: int) -> None:
         """Populate ``_is_admin`` and ``_admin_reason`` after a successful auth.

@@ -119,11 +119,14 @@ def run_doctor(config_path: Path | None = None) -> int:
         # hard fail because it's informational — the MCP still works, but
         # per-user ACL scoping won't.
         if client.is_admin:
+            opt_out_note = ""
+            if inst_cfg.production and not inst_cfg.refuse_admin_on_production:
+                opt_out_note = " (opted out via refuse_admin_on_production=false)"
             report.add_warning(
                 f"{section} admin check",
                 f"authenticated as {client.admin_reason}. Most Odoo record "
                 f"rules are bypassed. Create a dedicated non-admin user for "
-                f"MCP use.",
+                f"MCP use." + opt_out_note,
             )
 
         # Smoke test: fields_get on one allowed model. In open mode the

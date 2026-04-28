@@ -244,6 +244,21 @@ On non-production instances, writes commit directly (no unlock, no
 dry-run default, no token). The workflow exists specifically to put
 friction between Claude and prod data.
 
+Since v0.5.0 the unlock window also enforces a burst limit: by default
+at most 10 real commits per unlock. Dry-runs do not count, and the
+remaining budget is surfaced on every commit response and on
+`odoo-mcp status`. Tune per instance with `max_commits_per_unlock = N`
+(range 1..1000). When the budget hits zero the operator must call
+`odoo_enable_prod_writes` again to renew, which is a hard checkpoint
+against runaway loops.
+
+Also new in v0.5.0: production instances refuse to authenticate with
+Odoo admin credentials (uid=1 or `base.group_system`). Admin keys
+bypass per-user record rules, which removes the ACL scoping the MCP
+relies on. Create a dedicated non-admin user instead, or — only if you
+truly know what you're doing — set
+`refuse_admin_on_production = false` on the instance to opt out.
+
 ## Sensitive fields
 
 Two categories of field-level protection:
@@ -254,7 +269,13 @@ Never returned, regardless of `allow_sensitive_fields`. Also cannot be
 written, so a compromised session can't plant an API key or reset a
 password. The patterns cover `password`, `*_password`, `password_crypt`,
 `new_password`, `api_key`, `*_api_key`, `token`, `*_token`,
-`access_token`, `refresh_token`, and `*_secret`.
+`access_token`, `refresh_token`, and `*_secret`. Since v0.5.0 the
+patterns also cover any field whose name contains `salary`,
+`compensation`, `payroll`, or `bonus`; fields named exactly
+`commission_amount`, `nda_text`, `confidential`, or `private_key`; and
+any `*_passphrase` or `*_credentials` field. Each instance can extend
+this list with `custom_sensitive_field_patterns = ["..."]` in
+`config.toml` for custom-module fields the built-in list doesn't cover.
 
 **Default hidden.** Per-model sensitive fields that require per-call
 opt-in via `allow_sensitive_fields=[...]`. Currently:

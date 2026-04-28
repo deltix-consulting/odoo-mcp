@@ -28,6 +28,7 @@ from .dispatcher import (
     _args_shape,
     _sanitize_details,
 )
+from .security.fields import compile_extra_patterns
 from .security.limits import RateLimiter
 from .security.prod_guard import ProdGuard
 from .tools import build_tools
@@ -65,7 +66,8 @@ def build_app(config_path: Any = None) -> OdooMcpApp:
         loader = make_credential_loader(name, inst_cfg.credentials_env_prefix)
         client = OdooClient(inst_cfg, credential_loader=loader)
         rate_limiter.configure(name, inst_cfg.rate_limit_per_minute)
-        instances[name] = InstanceRuntime(config=inst_cfg, client=client)
+        extra = compile_extra_patterns(list(inst_cfg.custom_sensitive_field_patterns))
+        instances[name] = InstanceRuntime(config=inst_cfg, client=client, extra_redacted=extra)
 
     return OdooMcpApp(
         config=cfg,

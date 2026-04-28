@@ -19,6 +19,7 @@ Security rules enforced here:
 from __future__ import annotations
 
 import os
+import re
 import stat
 import tomllib
 from dataclasses import dataclass, field
@@ -60,6 +61,9 @@ _VALID_INSTANCE_KEYS: Final[frozenset[str]] = frozenset(
         "max_records_hard_cap",
         "allowed_models",
         "sensitive_fields",
+        "refuse_admin_on_production",
+        "custom_sensitive_field_patterns",
+        "max_commits_per_unlock",
     }
 )
 
@@ -87,6 +91,9 @@ class InstanceConfig:
     allow_self_signed: bool
     allowed_models: frozenset[str]
     sensitive_fields: dict[str, frozenset[str]] = field(default_factory=dict)
+    refuse_admin_on_production: bool = True
+    custom_sensitive_field_patterns: tuple[str, ...] = ()
+    max_commits_per_unlock: int = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +253,21 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         raise ConfigError(f"[instances.{name}].allowed_models cannot be empty")
     sensitive_fields = _parse_sensitive_fields(entry.get("sensitive_fields"), name)
 
+    refuse_admin_on_production = bool(entry.get("refuse_admin_on_production", True))
+
+    raw_patterns = _require_str_list(entry, "custom_sensitive_field_patterns", [])
+    for pattern in raw_patterns:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ConfigError(
+                f"[instances.{name}].custom_sensitive_field_patterns contains invalid "
+                f"regex {pattern!r}: {exc}"
+            ) from exc
+    custom_patterns = tuple(raw_patterns)
+
+    max_commits = _require_int(entry, "max_commits_per_unlock", 10, minimum=1, maximum=1000)
+
     return InstanceConfig(
         name=name,
         url=url.rstrip("/"),
@@ -259,6 +281,9 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         allow_self_signed=allow_self_signed,
         allowed_models=models,
         sensitive_fields=sensitive_fields,
+        refuse_admin_on_production=refuse_admin_on_production,
+        custom_sensitive_field_patterns=custom_patterns,
+        max_commits_per_unlock=max_commits,
     )
 
 

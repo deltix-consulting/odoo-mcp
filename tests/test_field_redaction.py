@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from odoo_mcp.errors import FieldPolicyError
+from odoo_mcp.errors import ConfigError, FieldPolicyError
 from odoo_mcp.security.fields import (
+    compile_extra_patterns,
     is_always_redacted,
+    is_always_redacted_with_extra,
     is_default_hidden,
     redact_fields_get,
     redact_response,
@@ -431,3 +433,83 @@ def test_validate_groupby_caps_dimensions() -> None:
             LEAD_FIELDS,
             allow_sensitive=frozenset(),
         )
+
+
+# --- broader built-in patterns + per-instance custom patterns ---------------
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "employee_salary",
+        "gross_compensation",
+        "yearly_payroll",
+        "quarterly_bonus",
+        "commission_amount",
+        "private_key",
+        "api_passphrase",
+        "db_credentials",
+        "nda_text",
+        "confidential",
+    ],
+)
+def test_broader_builtin_patterns_redacted(field: str) -> None:
+    assert is_always_redacted(field)
+
+
+def test_custom_pattern_redacts() -> None:
+    extra = compile_extra_patterns([r"my_module\.\w+_blob"])
+    assert is_always_redacted_with_extra("my_module.foo_blob", extra)
+    assert not is_always_redacted_with_extra("other_module.foo_blob", extra)
+    # And without the custom patterns, the same field is not blocked.
+    assert not is_always_redacted_with_extra("my_module.foo_blob", ())
+
+
+def test_invalid_regex_raises_clear_error() -> None:
+    # The config-loader path surfaces this as ConfigError; the runtime helper
+    # surfaces it as FieldPolicyError. Both messages must mention the pattern.
+    from odoo_mcp.config import (
+        Defaults,  # noqa: PLC0415
+        _parse_one_instance,  # noqa: PLC0415
+    )
+
+    with pytest.raises(ConfigError, match=r"\["):
+        _parse_one_instance(
+            "broken",
+            {
+                "url": "https://x.example.com",
+                "database": "db",
+                "credentials_env_prefix": "ODOO_MCP_BROKEN",
+                "custom_sensitive_field_patterns": ["["],
+            },
+            Defaults(),
+        )
+
+    with pytest.raises(FieldPolicyError, match=r"\["):
+        compile_extra_patterns(["["])
+
+
+def test_custom_pattern_blocks_even_with_allow_sensitive() -> None:
+    extra = compile_extra_patterns([r"client_data"])
+    fields = frozenset({"id", "name", "client_data"})
+    # The "always redacted" semantics apply to custom patterns too — even if
+    # the caller opts in, the field stays blocked.
+    with pytest.raises(FieldPolicyError, match="permanently redacted"):
+        validate_requested_fields(
+            "res.partner",
+            ["client_data"],
+            fields,
+            allow_sensitive=frozenset({"client_data"}),
+            extra_redacted=extra,
+        )
+    # And on responses: the value is dropped even if the caller listed it as
+    # opted-in.
+    out = redact_response(
+        "res.partner",
+        [{"id": 1, "name": "Acme", "client_data": "secret"}],
+        field_types={"id": "integer", "name": "char", "client_data": "char"},
+        allow_sensitive=frozenset({"client_data"}),
+        include_binary=False,
+        extra_redacted=extra,
+    )
+    assert "client_data" not in out[0]

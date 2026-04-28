@@ -97,10 +97,12 @@ def _render(app: OdooMcpApp) -> str:
             lines.append("  Writes:      unlocked (non-production instance)")
         elif app.prod_guard.is_unlocked(name, now=now_mono):
             # Peek at expiry without mutating state.
-            expiry = app.prod_guard._unlocked_until.get(name)
-            if expiry is not None:
-                remain = _format_relative(expiry - now_mono)
-                lines.append(f"  Writes:      unlocked (auto-lock in {remain})")
+            state = app.prod_guard._unlocked.get(name)
+            commits = app.prod_guard.commits_remaining(name, now=now_mono)
+            commits_part = f", {commits} commits remaining" if commits is not None else ""
+            if state is not None:
+                remain = _format_relative(state.expires_at - now_mono)
+                lines.append(f"  Writes:      unlocked (auto-lock in {remain}{commits_part})")
             else:
                 lines.append("  Writes:      unlocked")
         else:
