@@ -244,9 +244,14 @@ class ProdGuard:
         with self._lock:
             pending = self._pending.pop(token, None)
             if pending is None:
-                raise ProdGuardError(f"Confirmation token {token!r} is unknown or already used.")
+                # Do NOT echo the supplied token literal back into the error
+                # message: the dispatcher records error messages in the audit
+                # log (30-day retention), and a leaked token — even one that
+                # turned out to be unknown — is a credential-shaped value
+                # we'd rather keep out of long-lived storage.
+                raise ProdGuardError("The supplied confirmation token is unknown or already used.")
             if pending.expires_at < current:
-                raise ProdGuardError(f"Confirmation token {token!r} has expired.")
+                raise ProdGuardError("The supplied confirmation token has expired.")
             if (pending.instance, pending.op, pending.model) != (instance, op, model):
                 raise ProdGuardError(
                     f"Confirmation token does not match the current call "

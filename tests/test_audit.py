@@ -202,3 +202,49 @@ def test_open_fails_closed_when_unwritable(tmp_path: Path) -> None:
             AuditLog(ro_dir / "audit.jsonl")
     finally:
         ro_dir.chmod(0o700)  # let tmp_path clean up
+
+
+def test_log_rotates_on_date_change_mid_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A long-running MCP that crosses midnight must rotate yesterday's log.
+
+    The fix in v0.8.0 makes ``AuditLog.log`` re-check the date cheaply on
+    each call and rotate when it has rolled over since the last check.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    log_path = tmp_path / "audit.jsonl"
+    audit = AuditLog(log_path)
+    # Force the file's mtime to "yesterday" so the rotation check fires.
+    yesterday = datetime.now(tz=UTC) - timedelta(days=1)
+    yesterday_ts = yesterday.timestamp()
+    os.utime(log_path, (yesterday_ts, yesterday_ts))
+
+    # Pretend we last verified rotation yesterday — the log() call should
+    # notice today's date is different and rotate.
+    audit._last_rotation_check = yesterday.date()
+
+    audit.log(
+        AuditEvent(
+            instance="dev",
+            tool="odoo_search_read",
+            op="search_read",
+            model="res.partner",
+            result="ok",
+            record_count=1,
+            duration_ms=1,
+            dry_run=False,
+            details={},
+        )
+    )
+
+    # After the write, yesterday's content should live in a dated rotated
+    # file, and audit.jsonl should contain only today's new event.
+    rotated = log_path.with_name(f"audit-{yesterday.date().isoformat()}.jsonl")
+    assert rotated.exists(), "yesterday's file should have been rotated"
+    today_lines = _read_lines(log_path)
+    # Exactly one line: the just-written event (no startup marker, no
+    # yesterday data — that all rotated out).
+    assert len(today_lines) == 1
+    assert today_lines[0]["tool"] == "odoo_search_read"

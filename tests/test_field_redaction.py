@@ -513,3 +513,24 @@ def test_custom_pattern_blocks_even_with_allow_sensitive() -> None:
         extra_redacted=extra,
     )
     assert "client_data" not in out[0]
+
+
+def test_redact_response_drops_field_with_no_type_info() -> None:
+    """Defense-in-depth: fields not in field_types are dropped.
+
+    A custom-module field that's missing from ``fields_get`` could be a
+    binary blob; we'd rather drop it than risk passing an un-stripped
+    base64 payload through. The dispatcher pre-validates the requested
+    field list against ``fields_get`` so this branch never fires for
+    normal callers — but a returned record carrying an unexpected key
+    (Odoo edge case, custom override) is now safely silenced.
+    """
+    out = redact_response(
+        "res.partner",
+        [{"id": 1, "name": "Acme", "mystery_field": "blob"}],
+        field_types={"id": "integer", "name": "char"},
+        allow_sensitive=frozenset(),
+        include_binary=False,
+    )
+    assert out == [{"id": 1, "name": "Acme"}]
+    assert "mystery_field" not in out[0]

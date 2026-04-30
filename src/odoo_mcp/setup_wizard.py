@@ -25,7 +25,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from .config import _DEFAULT_ALLOWED_MODELS, DEFAULT_CONFIG_PATH
+from .config import _DEFAULT_ALLOWED_MODELS, DEFAULT_CONFIG_PATH, _check_file_permissions
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,7 @@ def _toml_value(value: object) -> str:
         escaped = (
             value.replace("\\", "\\\\")
             .replace('"', '\\"')
+            .replace("\r", "\\r")
             .replace("\n", "\\n")
             .replace("\t", "\\t")
         )
@@ -217,6 +218,13 @@ def _collect_launch_env() -> tuple[dict[str, str], list[str]]:
     """
     if not DEFAULT_CONFIG_PATH.exists():
         raise FileNotFoundError(DEFAULT_CONFIG_PATH)
+
+    # Refuse to read the TOML if perms are loose. The launch path pulls
+    # credentials from Keychain and injects them into ``os.environ``, and
+    # ``build_app`` only runs the perms check after that — too late if the
+    # config is world-readable. Apply the same gate here so the launcher
+    # bails before any Keychain access.
+    _check_file_permissions(DEFAULT_CONFIG_PATH)
 
     with DEFAULT_CONFIG_PATH.open("rb") as f:
         raw = tomllib.load(f)

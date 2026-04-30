@@ -12,6 +12,91 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.8.0] - 2026-04-30
+
+A batch of medium- and low-severity audit-report fixes. No behaviour change
+for callers exercising the documented happy paths; several defensive checks
+tightened, one performance improvement on the error path, two documentation
+corrections.
+
+### Fixed
+
+Security hardening:
+
+- **Confirmation tokens no longer appear in error messages.**
+  `ProdGuard.consume_pending` previously echoed the supplied token literal
+  back into `ProdGuardError`, which the dispatcher then included in the
+  audit log via `_args_shape` -> `details.error`. Tokens are short-lived
+  but audit logs retain for 30 days. The error now refers to "the
+  supplied confirmation token" without the literal value.
+- **Audit log rotates mid-flight, not just at startup.** `AuditLog.log`
+  now compares today's UTC date against a cached last-rotation date on
+  every write; a long-running MCP that crosses midnight rotates
+  yesterday's `audit.jsonl` into a dated file before appending the new
+  day's events. The check is one date comparison on the hot path; only
+  on a date change do we stat the file and rename.
+- **`launch-env` now refuses loose config-file permissions.** The
+  `launch` subcommand pulls credentials from Keychain and injects them
+  into `os.environ` before `build_app` performs the standard
+  `_check_file_permissions` gate. `_collect_launch_env` now applies the
+  same gate up front, so a 0o644 config aborts before any Keychain
+  access.
+- **TOML writer now escapes `\r`.** The wizard's `_toml_value` previously
+  escaped `\\`, `"`, `\n`, and `\t` but a pasted CRLF could leak a
+  literal carriage return into `config.toml`, which `tomllib` parsed
+  oddly. Now escaped consistently with the other whitespace forms.
+- **Stricter `offset` validation.** `_offset` previously accepted any
+  truthy value coercible to `int` (strings, floats), inconsistent with
+  the strict `_require_str` / `_require_list_of_int` checks elsewhere.
+  A new `_require_int_or_default` helper now rejects non-int (and
+  rejects bool, which is a subclass of int).
+
+Defensive code:
+
+- **`redact_response` drops fields with no type info.** If a returned
+  record contains a field name that is not in the `fields_get` result,
+  `redact_response` previously passed it through unredacted; for an
+  unannotated binary blob, that defeated the include-binary policy.
+  We now drop such fields entirely as defense in depth — the dispatcher
+  validates the requested field list against `fields_get` upstream, so
+  in practice this branch never fires for normal records.
+- **Attestation filename pinned by test.** Added
+  `tests/test_attestation_filename_pinning.py` to assert that the URL
+  built by `attestation._tarball_url` matches `pyproject.toml`'s
+  package name (with pip/uv's hyphen-to-underscore normalization). A
+  silent rename of `project.name` would otherwise break
+  `odoo-mcp update` by downloading the wrong file.
+
+Performance:
+
+- **Error-message redaction is now O(input) per call.** The `_SECRETS`
+  registry is bounded at 64 entries (LRU-evicted) and a single
+  compiled-regex alternation replaces the previous O(n_secrets) substring
+  loop. The pattern is rebuilt lazily on registry change.
+
+Audit log accuracy:
+
+- **`odoo_help` and `odoo_list_instances` now use proper op tags.**
+  Both previously logged `op=fields_get`, which was misleading. New
+  `Operation.HELP` and `Operation.LIST_INSTANCES` are added to the read
+  ops set; the audit log now records them under their own tag.
+
+### Changed
+
+- **Documentation: tool count and operation count corrected.** README
+  previously claimed "ten well-defined tools" and "the seven allowed
+  operations"; these are now twelve and twelve respectively (the help
+  tool was missing from the README's tool table; the operation count
+  needs to include the new `HELP` / `LIST_INSTANCES` ops as well as
+  pre-existing ones the prose had drifted from).
+- **SECURITY.md: explicit policy on usernames vs. credentials.** Added
+  one paragraph under the threat model clarifying that usernames
+  (typically email addresses) are NOT redacted from error messages,
+  because losing them would obscure useful diagnostic context. Treated
+  as identifying-but-not-secret PII; never written to the audit log,
+  never returned in tool responses, but free to appear in operator-facing
+  error text.
+
 ## [0.7.1] - 2026-04-30
 
 ### Fixed

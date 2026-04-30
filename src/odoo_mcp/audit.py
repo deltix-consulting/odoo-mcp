@@ -20,7 +20,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from threading import Lock
 
@@ -57,6 +57,11 @@ class AuditLog:
     def __init__(self, path: Path) -> None:
         self._path = path.expanduser()
         self._lock = Lock()
+        # Tracks the date we last verified the log was current (UTC). A
+        # long-running process that crosses midnight would otherwise keep
+        # writing into yesterday's file because ``_rotate_if_needed`` only
+        # ran at startup. ``log()`` re-checks via this field cheaply.
+        self._last_rotation_check: date | None = None
         self._open()
 
     # --- Lifecycle ----------------------------------------------------------
@@ -81,6 +86,7 @@ class AuditLog:
             raise AuditLogError(f"Cannot write to audit log at {self._path}: {exc}") from exc
         self._rotate_if_needed()
         self._trim_retention()
+        self._last_rotation_check = datetime.now(tz=UTC).date()
 
     def _rotate_if_needed(self) -> None:
         """Rotate ``audit.jsonl`` to ``audit-YYYY-MM-DD.jsonl`` once per day.
@@ -139,6 +145,16 @@ class AuditLog:
 
     def log(self, event: AuditEvent) -> None:
         """Append one event. Raises :class:`AuditLogError` on write failure."""
+        # Cheap mid-flight rotation check: if the date has rolled over since
+        # the last write, rotate yesterday's content into a dated file before
+        # appending. We compare against ``_last_rotation_check`` first so the
+        # hot path is one date comparison; only on a date change do we stat
+        # the file and (rarely) rename. This keeps long-running MCPs from
+        # writing Tuesday's events into Monday's ``audit.jsonl``.
+        today = datetime.now(tz=UTC).date()
+        if self._last_rotation_check != today:
+            self._rotate_if_needed()
+            self._last_rotation_check = today
         payload = {
             "ts": _now_iso(),
             "instance": event.instance,

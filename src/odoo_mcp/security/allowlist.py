@@ -100,6 +100,8 @@ class Operation(StrEnum):
     ARCHIVE = "archive"
     UNLINK = "unlink"
     FIELDS_GET = "fields_get"  # used only by odoo_describe_model
+    HELP = "help"  # used only by odoo_help (no Odoo round-trip)
+    LIST_INSTANCES = "list_instances"  # used only by odoo_list_instances
 
 
 _READ_OPS: Final[frozenset[Operation]] = frozenset(
@@ -110,6 +112,8 @@ _READ_OPS: Final[frozenset[Operation]] = frozenset(
         Operation.READ_GROUP,
         Operation.LOOKUP,
         Operation.FIELDS_GET,
+        Operation.HELP,
+        Operation.LIST_INSTANCES,
     }
 )
 _WRITE_OPS: Final[frozenset[Operation]] = frozenset(

@@ -100,3 +100,50 @@ def test_peek_unknown_instance() -> None:
     rl = RateLimiter()
     with pytest.raises(LimitExceededError, match="No rate limiter"):
         rl.peek("ghost")
+
+
+def test_offset_rejects_string_value() -> None:
+    """`offset='10'` is no longer silently coerced to int(10).
+
+    Prior to v0.8.0 the dispatcher ran ``int(args.get('offset') or 0)``
+    which accepted strings and floats. The new ``_require_int_or_default``
+    helper enforces real int.
+    """
+    from odoo_mcp.dispatcher import _offset
+    from odoo_mcp.errors import OdooMcpError
+
+    with pytest.raises(OdooMcpError, match="offset must be an integer"):
+        _offset({"offset": "10"})
+
+
+def test_offset_rejects_float_value() -> None:
+    from odoo_mcp.dispatcher import _offset
+    from odoo_mcp.errors import OdooMcpError
+
+    with pytest.raises(OdooMcpError, match="offset must be an integer"):
+        _offset({"offset": 10.5})
+
+
+def test_offset_rejects_bool_value() -> None:
+    """Bool subclasses int — explicitly rejected so True doesn't sneak in as 1."""
+    from odoo_mcp.dispatcher import _offset
+    from odoo_mcp.errors import OdooMcpError
+
+    with pytest.raises(OdooMcpError, match="offset must be an integer"):
+        _offset({"offset": True})
+
+
+def test_offset_accepts_none_or_omitted() -> None:
+    from odoo_mcp.dispatcher import _offset
+
+    assert _offset({}) == 0
+    assert _offset({"offset": None}) == 0
+    assert _offset({"offset": 5}) == 5
+
+
+def test_offset_rejects_negative_int() -> None:
+    from odoo_mcp.dispatcher import _offset
+    from odoo_mcp.errors import OdooMcpError
+
+    with pytest.raises(OdooMcpError, match="offset must be >= 0"):
+        _offset({"offset": -1})

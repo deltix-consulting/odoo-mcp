@@ -28,6 +28,9 @@ def test_launch_loads_env_then_runs_server(
         'credentials_env_prefix = "ODOO_MCP_MAIN"\n'
         "production = false\n"
     )
+    # _collect_launch_env now refuses loose perms (v0.8.0); match the
+    # 0o600 mode the wizard writes in production.
+    cfg.chmod(0o600)
 
     from odoo_mcp import setup_wizard
 

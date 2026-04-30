@@ -6,7 +6,7 @@ odoo-mcp is a local Model Context Protocol server that exposes a
 security-gated slice of [Odoo](https://www.odoo.com) to Claude Desktop
 or Claude Code over stdio. It lets Claude search partners, read
 invoices, update leads, aggregate pipeline data, and archive or delete
-records through ten well-defined tools — and nothing else. Writes to
+records through twelve well-defined tools — and nothing else. Writes to
 production are off by default, every call is rate-limited and audited,
 and a hardcoded denylist blocks calls to `res.users`, `ir.*` internals,
 stored code (`ir.actions.server`, `mail.template`, `ir.ui.view`),
@@ -43,7 +43,7 @@ Defended against:
 - Runaway resource consumption. Every call is rate-limited, record
   counts are capped, and each XML-RPC call has a per-instance timeout.
 - Arbitrary method execution. There is no `execute_kw` surface — only
-  the seven allowed operations.
+  the twelve allowed operations.
 
 Not defended against: a compromised host, a malicious Odoo server, or
 side-channel attacks. See `SECURITY.md` for the full threat model.
@@ -189,6 +189,7 @@ leaves everything else untouched.
 
 | Tool | Purpose | Writes | Prod-gated |
 |---|---|---|---|
+| `odoo_help` | Capability overview (no Odoo round-trip) | no | — |
 | `odoo_list_instances` | List configured instances and their state | no | — |
 | `odoo_describe_model` | Field metadata for one allowlisted model | no | — |
 | `odoo_lookup` | Fast `name ilike` lookup, returns id + display_name | no | — |

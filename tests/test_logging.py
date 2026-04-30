@@ -79,7 +79,7 @@ def test_info_filters_out_debug(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_registered_secret_is_scrubbed_from_log(monkeypatch: pytest.MonkeyPatch) -> None:
     # Register a unique secret so we don't collide with other tests.
     secret = "super-secret-api-key-abcdef123456"
-    _SECRETS.discard(secret)
+    _SECRETS.pop(secret, None)
     register_secret(secret)
 
     monkeypatch.setenv("ODOO_MCP_LOG_LEVEL", "DEBUG")
@@ -92,7 +92,7 @@ def test_registered_secret_is_scrubbed_from_log(monkeypatch: pytest.MonkeyPatch)
         log.info("raw secret leak: %s", secret)
         log.error(f"interpolated already: {secret}")  # noqa: G004 — intentional test
     finally:
-        _SECRETS.discard(secret)
+        _SECRETS.pop(secret, None)
 
     output = buf.getvalue()
     assert secret not in output

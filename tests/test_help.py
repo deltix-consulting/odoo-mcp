@@ -103,3 +103,40 @@ def test_help_does_not_authenticate(tmp_path: Path) -> None:
     _call(dispatcher, "odoo_help")
     # The help call neither authenticated nor reached out over the network.
     assert client._uid is None
+
+
+def test_help_audit_uses_help_op(tmp_path: Path) -> None:
+    """`odoo_help` must record op='help' in the audit log, not 'fields_get'."""
+    app = _build_app(tmp_path)
+    dispatcher = Dispatcher(app)
+
+    _call(dispatcher, "odoo_help")
+
+    raw = (tmp_path / "audit.jsonl").read_text().strip().splitlines()
+    # Last line is the help call's audit entry (the first is the open marker).
+    last = json.loads(raw[-1])
+    assert last["tool"] == "odoo_help"
+    assert last["op"] == "help"
+
+
+def test_list_instances_audit_uses_list_instances_op(tmp_path: Path) -> None:
+    """`odoo_list_instances` must record op='list_instances'."""
+    app = _build_app(tmp_path)
+    dispatcher = Dispatcher(app)
+
+    _call(dispatcher, "odoo_list_instances")
+
+    raw = (tmp_path / "audit.jsonl").read_text().strip().splitlines()
+    last = json.loads(raw[-1])
+    assert last["tool"] == "odoo_list_instances"
+    assert last["op"] == "list_instances"
+
+
+def test_help_and_list_instances_are_read_ops() -> None:
+    """The new ops must be classified as read ops, not write ops."""
+    from odoo_mcp.security.allowlist import Operation, is_read, is_write
+
+    assert is_read(Operation.HELP)
+    assert is_read(Operation.LIST_INSTANCES)
+    assert not is_write(Operation.HELP)
+    assert not is_write(Operation.LIST_INSTANCES)

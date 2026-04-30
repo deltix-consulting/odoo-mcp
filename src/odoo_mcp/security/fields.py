@@ -389,6 +389,18 @@ def redact_response(
 
     We copy each record (rather than mutating) so callers don't accidentally
     retain a reference to the pre-redaction dict.
+
+    **Defense-in-depth on missing field types.** If a returned record
+    contains a field name that is NOT present in ``field_types``, we drop
+    it. The rationale is conservative: we cannot tell whether the field is
+    a binary blob (which would otherwise pass through without the size
+    placeholder), and a custom module's field that doesn't appear in
+    ``fields_get`` is unusual enough to warrant erring on the side of
+    silence rather than potentially blowing up the model context with an
+    un-stripped binary. The dispatcher already validates the requested
+    field list against ``fields_get`` before calling Odoo, so in practice
+    this branch only fires for fields the server appended itself
+    (``id``, computed extras) — and those are always type-known.
     """
     out: list[dict[str, Any]] = []
     for rec in records:
@@ -401,6 +413,11 @@ def redact_response(
                 and name not in allow_sensitive
             ):
                 continue  # drop entirely
+            if name not in field_types:
+                # No type info — be conservative and drop it (see docstring).
+                # `id` is a built-in primary key always present in fields_get,
+                # so this branch never fires for normal records.
+                continue
             if not include_binary and field_types.get(name) == "binary" and value:
                 size = _binary_size_hint(value)
                 cleaned[name] = f"{_BINARY_PLACEHOLDER_PREFIX}{size} bytes>"

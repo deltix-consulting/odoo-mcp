@@ -177,3 +177,41 @@ def test_default_is_ten() -> None:
     guard = ProdGuard()
     guard.unlock("prod", production=True, now=0.0)
     assert guard.commits_remaining("prod", now=1.0) == 10
+
+
+def test_unknown_token_error_does_not_echo_token_value() -> None:
+    """Confirmation tokens must not appear verbatim in the error message.
+
+    Tokens are credential-shaped and the dispatcher records error messages
+    in the audit log (30-day retention). Echoing a supplied (or
+    accidentally-mistyped) token is a leak path.
+    """
+    from odoo_mcp.errors import ProdGuardError
+
+    guard = ProdGuard()
+    bad_token = "conf_abcdef_ThisShouldNotAppearInTheError_0123456"
+    try:
+        guard.consume_pending(bad_token, "prod", "create", "res.partner", now=1.0)
+    except ProdGuardError as exc:
+        msg = str(exc)
+        assert bad_token not in msg, f"token leaked into error message: {msg!r}"
+        # We still want a useful message.
+        assert "confirmation token" in msg.lower()
+    else:
+        raise AssertionError("expected ProdGuardError")
+
+
+def test_expired_token_error_does_not_echo_token_value() -> None:
+    from odoo_mcp.errors import ProdGuardError
+
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    token = guard.create_pending("prod", "create", "res.partner", "s", now=0.0)
+    # Past the 5-minute pending-token TTL.
+    try:
+        guard.consume_pending(token, "prod", "create", "res.partner", now=10 * 60)
+    except ProdGuardError as exc:
+        assert token not in str(exc)
+        assert "expired" in str(exc).lower()
+    else:
+        raise AssertionError("expected ProdGuardError")

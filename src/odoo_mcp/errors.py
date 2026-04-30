@@ -16,12 +16,23 @@ inside an exception message.
 
 from __future__ import annotations
 
+import re
+from collections import OrderedDict
 from typing import ClassVar, Final
 
 # Populated by credentials.register_secret(). We keep it module-level so that
 # *any* error, including third-party ones re-raised as OdooMcpError, is scrubbed
 # without the caller having to thread a registry through.
-_SECRETS: set[str] = set()
+#
+# The registry is bounded (LRU-evicted) at ``_SECRETS_MAX`` entries — enough
+# for any realistic multi-instance setup (one username + one key per instance,
+# plus headroom for rotations) without growing without bound across long-lived
+# processes. Substring scans were O(n * k) per error; we now compile the
+# alternation regex lazily and cache it, recompiling only when the registry
+# changes.
+_SECRETS_MAX: Final[int] = 64
+_SECRETS: OrderedDict[str, None] = OrderedDict()
+_SECRETS_PATTERN: re.Pattern[str] | None = None
 
 _REDACTED: Final[str] = "<redacted>"
 
@@ -32,23 +43,44 @@ def register_secret(secret: str) -> None:
     Called by :mod:`odoo_mcp.credentials` right after loading an API key.
     Ignores empty strings (so a misconfigured instance can't accidentally
     register ``""`` and then "redact" every space in every error).
+
+    The registry is LRU-bounded at :data:`_SECRETS_MAX`; when full, the
+    oldest entry is evicted before inserting the new one. The compiled
+    redaction pattern is invalidated so the next :func:`redact` call
+    rebuilds it.
     """
-    if secret and len(secret) >= 4:
-        _SECRETS.add(secret)
+    global _SECRETS_PATTERN
+    if not secret or len(secret) < 4:
+        return
+    if secret in _SECRETS:
+        # Refresh recency without changing membership; pattern is unchanged.
+        _SECRETS.move_to_end(secret)
+        return
+    if len(_SECRETS) >= _SECRETS_MAX:
+        _SECRETS.popitem(last=False)
+    _SECRETS[secret] = None
+    _SECRETS_PATTERN = None
 
 
 def redact(text: str) -> str:
     """Return ``text`` with every registered secret substituted by ``<redacted>``.
 
-    This is intentionally O(n * k) over the secrets set; the set is small
-    (one per instance) and this path runs only on the error path, not the
-    happy path.
+    Uses a single compiled regex alternation across all registered secrets,
+    so substitution is one pass over the input regardless of registry size.
+    The pattern is rebuilt lazily on first use after a registry change.
     """
-    out = text
-    for secret in _SECRETS:
-        if secret in out:
-            out = out.replace(secret, _REDACTED)
-    return out
+    global _SECRETS_PATTERN
+    if not _SECRETS:
+        return text
+    pattern = _SECRETS_PATTERN
+    if pattern is None:
+        # Sort by length descending so a longer secret that contains a
+        # shorter one is matched first (e.g. "abcd" before "abc"). Without
+        # this, a partial-overlap secret could swallow the longer match.
+        ordered = sorted(_SECRETS.keys(), key=len, reverse=True)
+        pattern = re.compile("|".join(re.escape(s) for s in ordered))
+        _SECRETS_PATTERN = pattern
+    return pattern.sub(_REDACTED, text)
 
 
 class OdooMcpError(Exception):

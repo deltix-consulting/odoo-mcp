@@ -217,7 +217,7 @@ class Dispatcher:
             "denylist_size": len(MODEL_DENYLIST),
             "instances": instances,
         }
-        self._audit("odoo_help", Operation.FIELDS_GET, None, None, 0, False, {})
+        self._audit("odoo_help", Operation.HELP, None, None, 0, False, {})
         return payload
 
     def _list_instances(self, _args: dict[str, Any]) -> dict[str, Any]:
@@ -230,7 +230,7 @@ class Dispatcher:
             }
             for name, rt in self.app.instances.items()
         ]
-        self._audit("odoo_list_instances", Operation.FIELDS_GET, None, None, 0, False, {})
+        self._audit("odoo_list_instances", Operation.LIST_INSTANCES, None, None, 0, False, {})
         return {
             "mcp_version": __version__,
             "denylist_size": len(MODEL_DENYLIST),
@@ -982,11 +982,30 @@ def _optional_str(args: dict[str, Any], key: str) -> str | None:
     return value
 
 
+def _require_int_or_default(
+    args: dict[str, Any], key: str, default: int, *, minimum: int = 0
+) -> int:
+    """Strict integer arg with default and minimum.
+
+    Rejects anything that isn't a real ``int`` (no implicit conversion of
+    strings or floats). Booleans are subclasses of ``int`` in Python and are
+    explicitly rejected — they would otherwise sneak through as 0/1.
+    """
+    value = args.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise OdooMcpError(f"{key} must be an integer.")
+    # mypy --strict can't narrow ``Any`` past the isinstance check above;
+    # we know it's a real int here.
+    ivalue: int = value
+    if ivalue < minimum:
+        raise OdooMcpError(f"{key} must be >= {minimum}.")
+    return ivalue
+
+
 def _offset(args: dict[str, Any]) -> int:
-    offset = int(args.get("offset") or 0)
-    if offset < 0:
-        raise OdooMcpError("offset must be >= 0")
-    return offset
+    return _require_int_or_default(args, "offset", 0, minimum=0)
 
 
 # ---------------------------------------------------------------------------

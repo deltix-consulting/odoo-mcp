@@ -386,3 +386,54 @@ def test_group_check_silent_when_user_has_internal_group(
     out = capsys.readouterr().out
     assert "WARNING" not in out
     assert "Internal User" in out
+
+
+def test_collect_launch_env_refuses_loose_permissions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_collect_launch_env` must refuse a 0o644 config before any Keychain access.
+
+    The launch path runs before ``build_app``'s permissions check, so it
+    needs its own gate to keep credentials from being injected into
+    ``os.environ`` against a loose config.
+    """
+    import os
+
+    if os.name != "posix":
+        pytest.skip("permissions check is posix-only")
+
+    from odoo_mcp import setup_wizard
+    from odoo_mcp.errors import ConfigError
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[instances.x]\nurl = "https://x"\ndatabase = "d"\n'
+        'credentials_env_prefix = "ODOO_MCP_X"\nproduction = false\n'
+    )
+    cfg.chmod(0o644)  # loose
+
+    monkeypatch.setattr(setup_wizard, "DEFAULT_CONFIG_PATH", cfg)
+
+    # If the gate fails to fire, the test would proceed to call Keychain;
+    # blow up if that happens so we can tell the gate didn't gate.
+    def boom(_name: str, _service: str) -> str:
+        raise AssertionError("Keychain accessed despite loose-perm config")
+
+    monkeypatch.setattr(setup_wizard, "_keychain_get", boom)
+
+    with pytest.raises(ConfigError, match="loose permissions"):
+        setup_wizard._collect_launch_env()
+
+
+def test_toml_value_escapes_carriage_return() -> None:
+    """`_toml_value` must escape \\r alongside \\n / \\t."""
+    import tomllib
+
+    from odoo_mcp.setup_wizard import _toml_value
+
+    raw = "line1\r\nline2\rtail"
+    serialized = _toml_value(raw)
+    # Round-trip through tomllib to ensure the escape produces a valid
+    # TOML string and reads back to the original value.
+    parsed = tomllib.loads(f"v = {serialized}\n")
+    assert parsed["v"] == raw

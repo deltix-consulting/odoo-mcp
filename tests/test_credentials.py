@@ -76,6 +76,58 @@ def test_redact_helper_ignores_short_secrets() -> None:
     assert redact("The quick brown fox") == "The quick brown fox"
 
 
+def test_secrets_registry_is_lru_bounded() -> None:
+    """The secret registry caps growth at _SECRETS_MAX entries (LRU)."""
+    from odoo_mcp.errors import _SECRETS, _SECRETS_MAX, register_secret
+
+    # Snapshot + restore so we don't pollute other tests.
+    snapshot = list(_SECRETS.keys())
+    _SECRETS.clear()
+    try:
+        # Push more than the cap; the oldest entries must be evicted.
+        for i in range(_SECRETS_MAX + 25):
+            register_secret(f"secret-{i:04d}-padded-to-min-length")
+        assert len(_SECRETS) == _SECRETS_MAX, "registry must not grow past cap"
+        # The very first entries should have been evicted.
+        assert "secret-0000-padded-to-min-length" not in _SECRETS
+        # The last-inserted ones should still be there.
+        assert f"secret-{_SECRETS_MAX + 24:04d}-padded-to-min-length" in _SECRETS
+    finally:
+        from odoo_mcp import errors as _err
+
+        _SECRETS.clear()
+        for s in snapshot:
+            _SECRETS[s] = None
+        _err._SECRETS_PATTERN = None
+
+
+def test_redaction_uses_compiled_regex_and_scrubs_new_secrets() -> None:
+    """A newly registered secret is picked up on the next redact() call.
+
+    Validates the lazy-recompile behaviour of the cached pattern.
+    """
+    from odoo_mcp.errors import _SECRETS, register_secret
+
+    snapshot = list(_SECRETS.keys())
+    _SECRETS.clear()
+    try:
+        register_secret("first-rotation-key-abcdef")
+        assert "<redacted>" in redact("the api key first-rotation-key-abcdef leaked")
+        # Register a second secret AFTER the pattern was first compiled.
+        register_secret("second-rotation-key-ghijkl")
+        out = redact("two leaks: first-rotation-key-abcdef and second-rotation-key-ghijkl")
+        assert "first-rotation-key-abcdef" not in out
+        assert "second-rotation-key-ghijkl" not in out
+        assert out.count("<redacted>") == 2
+    finally:
+        from odoo_mcp import errors as _err
+
+        _SECRETS.clear()
+        for s in snapshot:
+            _SECRETS[s] = None
+        _err._SECRETS_PATTERN = None
+
+
 def test_credentials_instance_is_frozen() -> None:
     creds = Credentials(instance_name="x", username="u", _api_key="k" * 10)
     with pytest.raises(AttributeError):

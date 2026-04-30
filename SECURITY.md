@@ -38,6 +38,18 @@ The concrete threats we defend against:
    invoke any method on any model (`action_confirm`, `button_cancel`,
    `unlink`, custom `action_do_scary_thing`).
 
+**On usernames vs. API keys.** The error-redaction registry in
+`odoo_mcp.errors` registers the API key for scrubbing but **not** the
+username. This is deliberate. Usernames (typically email addresses) are
+identifying-but-not-secret: a redacted error like
+`"Access denied for <redacted>"` is significantly less useful for
+diagnosis than `"Access denied for jan@deltix.pro"`, and the username is
+already disclosed at every authentication step against the Odoo server.
+We therefore treat usernames as PII rather than as credentials — they may
+appear in error messages and operator-facing logs, but they are never
+written to the audit log (which records only metadata and an instance
+name) and never returned in tool responses.
+
 ## Defense layers
 
 For each threat above:
@@ -115,12 +127,14 @@ domain never reaches Odoo.
 - Per-call XML-RPC timeout (`timeout_seconds`, default 30s).
 
 **6. Unauthorized method execution.** There is no `execute_kw`
-surface at the MCP boundary. The seven operations in
+surface at the MCP boundary. The twelve operations in
 `odoo_mcp.security.allowlist.Operation` are the only ones the client
 knows how to call: `search_read`, `search_count`, `read`,
-`read_group`, `create`, `write`, `fields_get`. No `unlink`. No
-arbitrary methods. No workflow buttons. The client is a closed API,
-not a passthrough.
+`read_group`, `lookup`, `create`, `write`, `archive`, `unlink`,
+`fields_get`, `help`, `list_instances`. `unlink` is reachable only
+via `odoo_archive_or_delete` with `mode='delete'`. No arbitrary
+methods. No workflow buttons. The client is a closed API, not a
+passthrough.
 
 Model-level allowlist runs independently: even within the allowed
 operations, the server rejects any call targeting a model outside the
