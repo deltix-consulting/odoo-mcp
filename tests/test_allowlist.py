@@ -153,3 +153,51 @@ def test_model_denylist_covers_expected_categories() -> None:
     assert "ir.actions.server" in MODEL_DENYLIST
     assert "mail.template" in MODEL_DENYLIST
     assert "ir.attachment" in MODEL_DENYLIST
+
+
+def test_denylist_contents_are_locked_in() -> None:
+    """The denylist is the single most security-critical constant in the
+    codebase. This test pins it to the expected contents so a refactor
+    that accidentally trims a sensitive entry trips CI before merge.
+
+    Adding new entries: update both the denylist and this test, with
+    a comment in the commit explaining why the new model is dangerous.
+    Removing entries: should be very rare and require explicit review.
+    """
+    required = {
+        # Auth / user / group
+        "res.users",
+        "res.users.log",
+        "res.users.apikeys",
+        "res.users.apikeys.description",
+        "res.users.identitycheck",
+        "res.groups",
+        "auth_totp.device",
+        "auth_oauth.provider",
+        "auth_signup.reset.password",
+        # System config + ACL
+        "ir.config_parameter",
+        "ir.model.access",
+        "ir.rule",
+        # Stored executable content
+        "ir.actions.server",
+        "ir.actions.client",
+        "ir.ui.view",
+        "mail.template",
+        # Scheduler / module / log internals
+        "ir.cron",
+        "ir.module.module",
+        "ir.logging",
+        "ir.sequence",
+        # Model metadata
+        "ir.model",
+        "ir.model.fields",
+        "ir.model.data",
+        # Raw attachments
+        "ir.attachment",
+        # Import/export infra
+        "base_import.import",
+        "base_import.mapping",
+    }
+    missing = required - MODEL_DENYLIST
+    assert not missing, f"MODEL_DENYLIST is missing: {sorted(missing)}"

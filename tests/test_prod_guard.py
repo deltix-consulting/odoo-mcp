@@ -128,6 +128,48 @@ def test_relock_resets_counter() -> None:
     assert guard.commits_remaining("prod", now=20 * 60 + 1) == 1
 
 
+def test_token_rejected_after_unlock_expires_and_renews() -> None:
+    """H1: a confirmation token issued under unlock window A must NOT be
+    consumable under a later, different unlock window B even if the
+    token's own 5-minute TTL has not yet elapsed.
+
+    Staging note: the unlock TTL is 15min and the token TTL is 5min,
+    so to expose the bug we need a token still within its own TTL but
+    issued under a distinct, no-longer-active unlock. We force the
+    first unlock to drop by reaching into ``_unlocked`` directly —
+    simulating a real expiry without having to fast-forward past the
+    token's 5-min TTL too. Pre-fix this consume would silently
+    succeed; post-fix it raises with the H1 error.
+    """
+    guard = ProdGuard()
+    # Window A
+    guard.unlock("prod", production=True, now=0.0)
+    token = guard.create_pending("prod", "create", "res.partner", "s", now=0.0)
+    # Window A expires (simulated — keeps token within its 5-min TTL).
+    guard._unlocked.pop("prod")  # noqa: SLF001 — test stages the H1 race
+    # Window B: fresh unlock with a distinct unlocked_at.
+    guard.unlock("prod", production=True, now=10.0)
+    # Token from A must be rejected under B even though both the token
+    # TTL (5min) and the unlock TTL (15min) are still in the future.
+    with pytest.raises(ProdGuardError, match="different unlock window"):
+        guard.consume_pending(token, "prod", "create", "res.partner", now=10.0)
+
+
+def test_token_accepted_when_unlock_was_only_touched() -> None:
+    """A touch() within the same unlock must not invalidate tokens —
+    only re-acquiring the unlock does. This guards the H1 fix from
+    over-rejecting and breaking normal multi-write flows.
+    """
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    token = guard.create_pending("prod", "create", "res.partner", "s", now=0.0)
+    # Activity a few minutes in extends the unlock window.
+    guard.touch("prod", now=2 * 60)
+    # Token should still be consumable (within the 5-min token TTL,
+    # under the same unlock identity that touch did NOT change).
+    guard.consume_pending(token, "prod", "create", "res.partner", now=2 * 60 + 1)
+
+
 def test_default_is_ten() -> None:
     from odoo_mcp.security.prod_guard import DEFAULT_MAX_COMMITS_PER_UNLOCK
 

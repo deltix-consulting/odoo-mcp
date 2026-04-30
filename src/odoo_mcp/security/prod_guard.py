@@ -47,6 +47,13 @@ class _UnlockState:
 
     expires_at: float
     commits_remaining: int
+    # Monotonic timestamp at which this unlock was created. Acts as a
+    # stable identity for the unlock window: confirmation tokens record
+    # this value at issue time, and the consume path requires the
+    # current unlock to still carry the same identity. ``touch()`` only
+    # extends ``expires_at`` and leaves this field untouched — touching
+    # is not a fresh unlock.
+    unlocked_at: float
 
 
 @dataclass(slots=True)
@@ -57,6 +64,16 @@ class _PendingWrite:
     model: str
     summary: str
     expires_at: float
+    # Identity of the unlock window under which this token was issued.
+    # ``None`` means the token was created with no active unlock — the
+    # legacy non-prod / unit-test path; consume_pending then skips the
+    # identity check. A non-None value pins the token to that specific
+    # unlock window: the consume path requires the current unlock to
+    # still carry the same ``unlocked_at`` timestamp, otherwise a
+    # token issued during a previous unlock could be replayed against a
+    # fresh unlock and defeat the review-then-commit property of the
+    # dry-run flow.
+    unlock_id: float | None
 
 
 class ProdGuard:
@@ -91,7 +108,9 @@ class ProdGuard:
         expiry = current + _UNLOCK_TTL_SECONDS
         with self._lock:
             self._unlocked[instance] = _UnlockState(
-                expires_at=expiry, commits_remaining=max_commits
+                expires_at=expiry,
+                commits_remaining=max_commits,
+                unlocked_at=current,
             )
         return expiry
 
@@ -163,7 +182,20 @@ class ProdGuard:
         *,
         now: float | None = None,
     ) -> str:
-        """Register a pending write and return a one-time confirmation token."""
+        """Register a pending write and return a one-time confirmation token.
+
+        Tokens are bound to the active unlock window via the unlock's
+        ``unlocked_at`` timestamp (the unlock identity). At consume time
+        the current unlock must still carry the same identity, otherwise
+        the token is rejected — this prevents a token issued under one
+        unlock from being replayed against a later, separate unlock.
+
+        For non-production instances there is no unlock state to bind
+        against; in that case the token records ``unlock_id=None`` and
+        the consume path's identity check is short-circuited (non-prod
+        never goes through ``_consume_token_on_prod`` in the dispatcher
+        anyway).
+        """
         current = now if now is not None else time.monotonic()
         token = "conf_" + secrets.token_urlsafe(16)
         with self._lock:
@@ -171,6 +203,18 @@ class ProdGuard:
             expired = [t for t, p in self._pending.items() if p.expires_at < current]
             for t in expired:
                 del self._pending[t]
+            state = self._unlocked.get(instance)
+            # Bind to the current unlock window if one is active. We do
+            # NOT raise when no unlock is present — the dispatcher's
+            # check_write is the gate that requires an unlock for prod
+            # writes, and unit tests of consume_pending without a prior
+            # unlock should keep working (non-prod codepaths). We
+            # record ``unlock_id=None`` in that case; consume_pending
+            # treats ``None`` as "no binding" and skips the identity
+            # check, matching the no-unlock test path.
+            unlock_id: float | None = None
+            if state is not None and state.expires_at >= current:
+                unlock_id = state.unlocked_at
             self._pending[token] = _PendingWrite(
                 token=token,
                 instance=instance,
@@ -178,6 +222,7 @@ class ProdGuard:
                 model=model,
                 summary=summary,
                 expires_at=current + _PENDING_TOKEN_TTL_SECONDS,
+                unlock_id=unlock_id,
             )
         return token
 
@@ -207,6 +252,22 @@ class ProdGuard:
                     f"Confirmation token does not match the current call "
                     f"(expected {pending.instance}/{pending.op}/{pending.model})."
                 )
+            # H1: token must have been issued under the *current* unlock
+            # window. If the unlock has expired and been re-acquired
+            # since the dry run, reject — the dry run was reviewed under
+            # a different unlock and replaying it now would let a stale
+            # preview commit against a fresh window.
+            if pending.unlock_id is not None:
+                state = self._unlocked.get(instance)
+                if (
+                    state is None
+                    or state.expires_at < current
+                    or state.unlocked_at != pending.unlock_id
+                ):
+                    raise ProdGuardError(
+                        "Confirmation token was issued under a different unlock "
+                        "window — re-do the dry run under the current unlock."
+                    )
             # Decrement the burst counter BEFORE the actual commit. The
             # dispatcher's check_write enforces that an unlock exists for
             # production calls, so when an unlock state is present we honor

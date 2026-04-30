@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 
 import pytest
 
 from odoo_mcp.audit import AuditEvent, AuditLog
+from odoo_mcp.client import OdooClient
+from odoo_mcp.config import AppConfig, Defaults, InstanceConfig
+from odoo_mcp.credentials import Credentials
+from odoo_mcp.dispatcher import Dispatcher, InstanceRuntime, OdooMcpApp
 from odoo_mcp.errors import AuditLogError
+from odoo_mcp.security.limits import RateLimiter
+from odoo_mcp.security.prod_guard import ProdGuard
 
 
 def _read_lines(path: Path) -> list[dict]:
@@ -106,6 +114,82 @@ def test_log_preserves_nested_args_dict(tmp_path: Path) -> None:
     assert details["args"]["model"] == "res.partner"
     assert details["args"]["field_count"] == 2
     assert details["args"]["field_names"] == ["id", "name"]
+
+
+def _build_dispatcher(tmp_path: Path) -> tuple[Dispatcher, OdooMcpApp]:
+    inst_cfg = InstanceConfig(
+        name="dev",
+        url="https://example.odoo.com",
+        database="db",
+        credentials_env_prefix="ODOO_MCP_DEV",
+        production=False,
+        timeout_seconds=30,
+        max_records_default=50,
+        max_records_hard_cap=500,
+        rate_limit_per_minute=60,
+        allow_self_signed=False,
+        allowed_models=frozenset({"res.partner"}),
+    )
+    creds = Credentials(instance_name=inst_cfg.name, username="u", _api_key="k" * 10)
+    client = OdooClient(inst_cfg, credentials=creds)
+    app_cfg = AppConfig(
+        path=tmp_path / "config.toml",
+        defaults=Defaults(),
+        instances={inst_cfg.name: inst_cfg},
+        audit_log_path=tmp_path / "audit.jsonl",
+    )
+    audit = AuditLog(app_cfg.audit_log_path)
+    app = OdooMcpApp(
+        config=app_cfg,
+        audit=audit,
+        prod_guard=ProdGuard(),
+        rate_limiter=RateLimiter(),
+        instances={inst_cfg.name: InstanceRuntime(config=inst_cfg, client=client)},
+    )
+    return Dispatcher(app), app
+
+
+def test_audit_failure_swallow_logs_error_to_stderr(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """H3: when the audit-log write fails on the FAILURE path, the
+    dispatcher must still surface the original tool error to the
+    caller AND emit a logging.ERROR record so operators see audit
+    breakage. Pre-fix the audit failure was silently swallowed.
+    """
+    dispatcher, app = _build_dispatcher(tmp_path)
+
+    # Replace audit.log with one that always fails. We must hit the
+    # FAILURE path (a tool call that raises an OdooMcpError); the
+    # easiest way is to call an unknown tool, which the dispatcher
+    # rejects with OdooMcpError.
+    def _broken_log(_event: AuditEvent) -> None:
+        raise AuditLogError("disk full (simulated)")
+
+    app.audit.log = _broken_log  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.ERROR, logger="odoo_mcp.dispatcher"):
+        contents = asyncio.run(dispatcher.call("not_a_real_tool", {"instance": "dev"}))
+
+    # Caller still sees the original tool error, NOT an audit failure.
+    assert len(contents) == 1
+    payload = json.loads(contents[0].text)
+    assert payload["ok"] is False
+    # The ORIGINAL error message — "Unknown tool" — survives. The
+    # broken audit log must not mask it.
+    assert "Unknown tool" in payload["error"] or payload.get("error_code") == "internal_error"
+
+    # And the audit-system breakage was emitted at ERROR level rather
+    # than swallowed silently.
+    matching = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.ERROR and "audit log write failed" in r.getMessage()
+    ]
+    assert matching, (
+        f"Expected ERROR-level 'audit log write failed' record; got: "
+        f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
+    )
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Permission test relies on POSIX chmod semantics")

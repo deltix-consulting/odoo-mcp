@@ -68,15 +68,19 @@ curl -fsSL https://raw.githubusercontent.com/deltix-consulting/odoo-mcp/main/scr
 
 The installer checks for `uv` (and installs it via the official
 installer if missing), confirms `gh` is authenticated, downloads the
-latest release tarball into `~/odoo-mcp`, runs `uv sync`, and hands off
-to `odoo-mcp setup`. Set `ODOO_MCP_HOME` to override the install
-directory, or pass `--git` to clone `main` instead of using a tagged
-release.
+latest release tarball into `~/odoo-mcp`, **verifies the build-provenance
+attestation** before extracting, runs `uv sync`, and hands off to
+`odoo-mcp setup`. Set `ODOO_MCP_HOME` to override the install
+directory, pass `--git` to clone `main` instead of using a tagged
+release, or pass `--skip-verification` for environmental edge cases
+where attestation verification cannot run (offline, free-tier org with
+attestations disabled). Hard verification failures abort the install.
 
 Since v0.6.0, every release artifact (`*.whl` and `*.tar.gz`) is signed
 via Sigstore using GitHub Actions Build Provenance Attestations. You
-can verify a downloaded tarball with `gh attestation verify` — see the
-"Verifying releases" section in [`SECURITY.md`](SECURITY.md).
+can also verify a downloaded tarball manually with
+`gh attestation verify` — see the "Verifying releases" section in
+[`SECURITY.md`](SECURITY.md).
 
 ### Via git clone (manual)
 

@@ -37,6 +37,14 @@ def test_install_script_has_safety_flags() -> None:
         "install.sh must register the CLI on PATH via uv tool install"
     )
     assert "odoo-mcp setup" in text
+    # M11: first-install attestation verification.
+    assert "gh attestation verify" in text, (
+        "install.sh must verify release attestations before extracting tarball"
+    )
+    assert "--signer-workflow" in text, "attestation verify must pin the signer workflow"
+    assert "--skip-verification" in text, (
+        "install.sh must accept --skip-verification to bypass attestation check"
+    )
 
 
 def _load_extract_module() -> object:

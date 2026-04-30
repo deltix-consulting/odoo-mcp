@@ -24,7 +24,6 @@ Pipeline::
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import re
@@ -726,14 +725,26 @@ class Dispatcher:
         error: OdooMcpError,
         duration_ms: int,
     ) -> None:
+        """Best-effort audit-log write for a failed tool call.
+
+        Asymmetry with :meth:`_audit_ok` is intentional. The success
+        path is fail-loud: if the audit log is broken we refuse to
+        return a result, because an unaudited successful side-effect
+        would be a security gap. The failure path is fail-quiet
+        towards the caller — we already have an error to surface and
+        double-faulting would mask it — but a broken audit log is
+        itself an operational concern, so we log it at ``ERROR`` via
+        the standard ``logging`` module instead of swallowing it
+        silently. Operators with ``ODOO_MCP_LOG_LEVEL=ERROR`` (or
+        below) will see audit-system breakage even on the failure
+        path.
+        """
         instance = arguments.get("instance") if isinstance(arguments, dict) else None
         model = arguments.get("model") if isinstance(arguments, dict) else None
         raw: dict[str, Any] = {"error": error.user_message[:500]}
         if isinstance(arguments, dict):
             raw["args"] = _args_shape(arguments)
-        # Audit is fail-closed at the dispatcher level (call() surfaces the
-        # underlying error to the caller); don't double-raise here.
-        with contextlib.suppress(OdooMcpError):
+        try:
             self.app.audit.log(
                 AuditEvent(
                     instance=instance if isinstance(instance, str) else "-",
@@ -747,6 +758,8 @@ class Dispatcher:
                     details=_sanitize_details(raw),
                 )
             )
+        except OdooMcpError as audit_exc:
+            logger.error("audit log write failed during failure path: %s", audit_exc)
 
 
 # Name -> handler dispatch table. Bound methods resolve via the instance arg.

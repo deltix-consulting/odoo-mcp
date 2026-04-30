@@ -13,15 +13,17 @@ REPO="deltix-consulting/odoo-mcp"
 DEFAULT_HOME="$HOME/odoo-mcp"
 ODOO_MCP_HOME="${ODOO_MCP_HOME:-$DEFAULT_HOME}"
 USE_GIT="${ODOO_MCP_INSTALL_GIT:-0}"
+SKIP_VERIFICATION=0
 
 for arg in "$@"; do
     case "$arg" in
         --git) USE_GIT=1 ;;
+        --skip-verification) SKIP_VERIFICATION=1 ;;
         *) ;;
     esac
 done
 
-TOTAL_STEPS=7
+TOTAL_STEPS=9
 step() {
     printf '\n[%s/%s] %s\n' "$1" "$TOTAL_STEPS" "$2"
 }
@@ -89,6 +91,8 @@ echo "  Will install to: $ODOO_MCP_HOME"
 # ----------------------------------------------------------------------
 step 5 "Fetching source"
 FETCHED_VIA_RELEASE=0
+TARBALL=""
+TMPDIR_INSTALL=""
 if [ "$USE_GIT" != "1" ]; then
     LATEST_TAG=""
     if LATEST_TAG="$(gh release view --repo "$REPO" --json tagName --jq .tagName 2>/dev/null)"; then
@@ -105,33 +109,92 @@ if [ "$USE_GIT" != "1" ]; then
                 --dir "$TMPDIR_INSTALL" >/dev/null 2>&1; then
             TARBALL="$(find "$TMPDIR_INSTALL" -maxdepth 1 -name '*.tar.gz' | head -n 1)"
             if [ -n "$TARBALL" ]; then
-                mkdir -p "$ODOO_MCP_HOME"
-                tar -xzf "$TARBALL" -C "$ODOO_MCP_HOME" --strip-components=1
                 FETCHED_VIA_RELEASE=1
-                rm -rf "$TMPDIR_INSTALL"
-                echo "  Extracted $LATEST_TAG into $ODOO_MCP_HOME"
+                echo "  Downloaded $LATEST_TAG tarball"
             fi
         fi
         if [ "$FETCHED_VIA_RELEASE" = "0" ]; then
             echo "  Release download failed; falling back to git clone."
-            rm -rf "$TMPDIR_INSTALL" "$ODOO_MCP_HOME" 2>/dev/null || true
+            rm -rf "$TMPDIR_INSTALL" 2>/dev/null || true
+            TMPDIR_INSTALL=""
+            TARBALL=""
         fi
     else
         echo "  No releases published yet; falling back to git clone."
     fi
 fi
-if [ "$FETCHED_VIA_RELEASE" = "0" ]; then
+
+# ----------------------------------------------------------------------
+step 6 "Verifying release attestation"
+# Only applies to release tarballs. Git clones don't have attestations
+# attached to them; trust there comes from the gh-authed repo access.
+if [ "$FETCHED_VIA_RELEASE" = "1" ]; then
+    if [ "$SKIP_VERIFICATION" = "1" ]; then
+        printf '  \033[33mSkipping attestation verification (--skip-verification).\033[0m\n'
+    else
+        # `gh attestation verify` distinguishes hard verification failure
+        # (signature mismatch) from environmental failure (offline, gh
+        # not authed, attestation not yet published) only via exit code
+        # plus context. We treat the situation pragmatically: if
+        # `gh auth status` succeeds we already know gh is wired up, so
+        # any non-zero exit from `gh attestation verify` is treated as a
+        # hard failure. If gh auth is broken, we treat the whole step
+        # as environmental — same soft-fail policy as
+        # `odoo-mcp update`.
+        if gh auth status >/dev/null 2>&1; then
+            VERIFY_OUTPUT=""
+            if VERIFY_OUTPUT="$(gh attestation verify \
+                    --owner deltix-consulting \
+                    --signer-workflow ".github/workflows/release.yml" \
+                    "$TARBALL" 2>&1)"; then
+                echo "  Attestation verified."
+            else
+                # Distinguish: if the message mentions "no attestations
+                # found" we treat it as environmental (free-tier orgs
+                # may have attestations disabled per 0.6.1). Anything
+                # else is a hard failure.
+                if printf '%s' "$VERIFY_OUTPUT" | grep -qi "no attestations"; then
+                    printf '\n  \033[33mWarning:\033[0m no attestations found for %s.\n' "$LATEST_TAG"
+                    printf '  This can happen on free-tier GitHub orgs.\n'
+                    if [ -t 0 ]; then
+                        printf '  Proceed anyway? [y/N] '
+                        read -r reply
+                        case "$reply" in
+                            y|Y|yes|YES) ;;
+                            *) fail "Aborted by user." "Re-run with --skip-verification to bypass." ;;
+                        esac
+                    else
+                        printf '  \033[33mNon-interactive shell; proceeding.\033[0m\n'
+                    fi
+                else
+                    printf '\n  \033[31mAttestation verification FAILED for %s:\033[0m\n' "$LATEST_TAG"
+                    printf '%s\n' "$VERIFY_OUTPUT" | sed 's/^/    /'
+                    fail "Refusing to install an unverified release tarball." \
+                         "If this is unexpected, file an issue. To bypass for environmental reasons only, re-run with --skip-verification."
+                fi
+            fi
+        else
+            printf '  \033[33mWarning:\033[0m gh CLI is not authenticated; skipping attestation check.\n'
+            printf '  This is treated as an environmental failure (same policy as odoo-mcp update).\n'
+        fi
+    fi
+    mkdir -p "$ODOO_MCP_HOME"
+    tar -xzf "$TARBALL" -C "$ODOO_MCP_HOME" --strip-components=1
+    rm -rf "$TMPDIR_INSTALL"
+    echo "  Extracted $LATEST_TAG into $ODOO_MCP_HOME"
+else
+    echo "  Skipped (no release tarball — using git clone)."
     gh repo clone "$REPO" "$ODOO_MCP_HOME" -- --quiet
     echo "  Cloned $REPO into $ODOO_MCP_HOME"
 fi
 
 # ----------------------------------------------------------------------
-step 6 "Installing Python dependencies (uv sync)"
+step 7 "Installing Python dependencies (uv sync)"
 cd "$ODOO_MCP_HOME"
 uv sync
 
 # ----------------------------------------------------------------------
-step 7 "Installing odoo-mcp on PATH (uv tool)"
+step 8 "Installing odoo-mcp on PATH (uv tool)"
 # Without this the launcher.sh that Claude Cowork runs works fine, but
 # the user has no way to call `odoo-mcp doctor` / `odoo-mcp status` /
 # `odoo-mcp update` from anywhere except inside the project directory.
@@ -153,6 +216,6 @@ case ":$PATH:" in
 esac
 
 # ----------------------------------------------------------------------
-step 8 "Launching setup wizard"
+step 9 "Launching setup wizard"
 echo "  Install complete. Running setup wizard..."
 exec uv run odoo-mcp setup

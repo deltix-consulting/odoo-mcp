@@ -12,6 +12,52 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.7.1] - 2026-04-30
+
+### Fixed
+
+- **Confirmation tokens are now bound to the unlock window that issued
+  them.** Previously the 5-minute token TTL was independent of the
+  15-minute unlock TTL, so a token created during one unlock could be
+  redeemed against a *different* later unlock as long as the token
+  itself had not yet expired. That broke the review-then-commit
+  property: a dry run reviewed under window A could end up committing
+  under window B. Tokens now record the issuing unlock's identity
+  (`_UnlockState.unlocked_at`); `consume_pending` rejects with
+  "token issued under a different unlock window" when the current
+  unlock state does not match. `touch()` extends the same window and
+  preserves the identity.
+- **Audit-log breakage on the failure path is no longer silent.**
+  `Dispatcher._audit_failure` previously swallowed `AuditLogError`
+  via `contextlib.suppress`, which meant a broken audit log silently
+  dropped failure events — the security-interesting ones. The handler
+  now logs `audit log write failed during failure path: ...` at
+  `ERROR` level via the standard `logging` module so operators with
+  `ODOO_MCP_LOG_LEVEL=ERROR` see the breakage. The original tool-call
+  error is still returned to the caller (no double-fault). The
+  success path remains fail-loud — that asymmetry is by design and
+  is now documented in the docstring.
+- **`scripts/install.sh` now verifies release attestations before
+  extracting the tarball.** The README and `SECURITY.md` already
+  advertised attestation verification, but it only ran in
+  `odoo-mcp update`. First install — when a colleague is most
+  exposed — used to extract unverified. The installer now runs
+  `gh attestation verify --owner deltix-consulting
+  --signer-workflow ".github/workflows/release.yml"` between download
+  and extract. Hard verification failures (signature mismatch) abort
+  with a red error; environmental failures (gh not authed, "no
+  attestations" on free-tier orgs) print a yellow warning and prompt
+  to proceed. New `--skip-verification` flag bypasses the check; the
+  prompt is also auto-skipped on non-interactive shells.
+- **`MODEL_DENYLIST` contents are now pinned by an explicit
+  regression test.** The denylist is the single most security-
+  critical constant in the codebase, and the existing test suite
+  only checked behavior given a denylist — a refactor that
+  accidentally trimmed `res.users` would have passed CI. The new
+  test enumerates every required entry; adding a model now requires
+  updating both the denylist and the test, and removing one trips
+  CI before merge.
+
 ## [0.7.0] - 2026-04-30
 
 ### Added
