@@ -250,9 +250,21 @@ When a colleague leaves the team or rotates roles:
 1. **Revoke the API key in Odoo** — *My Profile → Account Security →
    delete the `claude-mcp-…` key*. This is the single source of truth
    for "this person can no longer access via the MCP". Do this first.
-2. Optionally, on their machine: `odoo-mcp setup --remove` to drop the
-   instance from their config and Keychain. Without this the MCP simply
-   stops working — fail-closed.
+2. On their machine, run a single command to clean everything up:
+
+       odoo-mcp uninstall
+
+   This removes Keychain entries for every configured instance, the
+   `odoo-mcp` entry in Claude Desktop / Cowork, the local config and
+   launcher (`~/.odoo-mcp/`), the persistent fields cache, all audit
+   logs, and the `uv tool` installation of `odoo-mcp` itself. The
+   project checkout at `~/odoo-mcp` is intentionally left alone — the
+   command prints the path and the colleague can `rm -rf` it manually
+   once they have confirmed there is no uncommitted local work in it.
+
+   Without step 2 the MCP just stops working when the API key is
+   revoked — fail-closed — but their laptop will keep stale config
+   and credentials sitting around. Step 2 is the proper hygiene.
 
 If a key is suspected leaked, revoke immediately and notify your deltix
 admin. The leaked key cannot be used to write to production without going

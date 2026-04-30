@@ -40,10 +40,16 @@ def _build_client(
     *,
     execute_results: list[dict[str, dict[str, Any]]],
     name: str = "dev",
+    fields_cache_max_size: int = 64,
 ) -> tuple[OdooClient, dict[str, int]]:
     cfg = _make_instance_config(name)
     creds = Credentials(instance_name=name, username="u", _api_key="k" * 10)
-    client = OdooClient(cfg, credentials=creds, fields_cache=cache)
+    client = OdooClient(
+        cfg,
+        credentials=creds,
+        fields_cache=cache,
+        fields_cache_max_size=fields_cache_max_size,
+    )
     # Pretend the client is already authenticated so fields_get won't
     # contact Odoo for auth.
     client._uid = 1  # type: ignore[attr-defined]
@@ -117,3 +123,62 @@ def test_per_instance_isolation(tmp_path: Path) -> None:
     out_b = client_b.fields_get("res.partner")
     assert out_b == payload_b
     assert counter_b["calls"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Bounded LRU (v0.7.0)
+# ---------------------------------------------------------------------------
+
+
+def _execute_factory(payloads: dict[str, dict[str, dict[str, Any]]]) -> Any:
+    """Build a fake _execute that returns a per-model payload."""
+
+    def _fake(model: str, method: str, args: list[Any], kwargs: dict[str, Any]) -> Any:
+        return payloads.get(model, {})
+
+    return _fake
+
+
+def test_fields_cache_evicts_lru_when_full() -> None:
+    cfg = _make_instance_config("dev")
+    creds = Credentials(instance_name="dev", username="u", _api_key="k" * 10)
+    client = OdooClient(cfg, credentials=creds, fields_cache_max_size=3)
+    client._uid = 1  # type: ignore[attr-defined]
+    payloads = {f"m{i}": {"id": {"type": "integer"}} for i in range(5)}
+    client._execute = _execute_factory(payloads)  # type: ignore[assignment]
+
+    client.fields_get("m0")
+    client.fields_get("m1")
+    client.fields_get("m2")
+    # All three present.
+    assert set(client._fields_cache.keys()) == {"m0", "m1", "m2"}
+    # Insert a 4th — m0 (oldest) must be evicted.
+    client.fields_get("m3")
+    assert "m0" not in client._fields_cache
+    assert set(client._fields_cache.keys()) == {"m1", "m2", "m3"}
+
+
+def test_fields_cache_lru_promotes_recently_used() -> None:
+    cfg = _make_instance_config("dev")
+    creds = Credentials(instance_name="dev", username="u", _api_key="k" * 10)
+    client = OdooClient(cfg, credentials=creds, fields_cache_max_size=3)
+    client._uid = 1  # type: ignore[attr-defined]
+    payloads = {f"m{i}": {"id": {"type": "integer"}} for i in range(5)}
+    client._execute = _execute_factory(payloads)  # type: ignore[assignment]
+
+    client.fields_get("m0")
+    client.fields_get("m1")
+    client.fields_get("m2")
+    # Touch m0 — it becomes most-recently-used.
+    client.fields_get("m0")
+    # Insert m3 — least-recently-used is now m1, not m0.
+    client.fields_get("m3")
+    assert "m0" in client._fields_cache
+    assert "m1" not in client._fields_cache
+
+
+def test_fields_cache_default_cap_is_64() -> None:
+    cfg = _make_instance_config("dev")
+    creds = Credentials(instance_name="dev", username="u", _api_key="k" * 10)
+    client = OdooClient(cfg, credentials=creds)
+    assert client._fields_cache_max_size == 64

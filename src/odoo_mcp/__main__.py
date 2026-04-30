@@ -15,7 +15,9 @@ Usage::
     python -m odoo_mcp setup --regenerate-launcher  # rewrite launch.sh
     python -m odoo_mcp config show              # dump the effective config (sanitized)
     python -m odoo_mcp config validate [PATH]   # validate a config file
-    python -m odoo_mcp launch-env               # print export lines for launch.sh
+    python -m odoo_mcp launch                   # load keychain creds + start server (used by launch.sh)
+    python -m odoo_mcp launch-env               # print export lines for launch.sh (legacy)
+    python -m odoo_mcp uninstall                # remove config, credentials, launcher, registration
     python -m odoo_mcp update                   # self-update from git + uv sync
     python -m odoo_mcp update --check           # check for a newer release only
 """
@@ -34,6 +36,19 @@ def main() -> int:
     configure_logging()
 
     argv = sys.argv[1:]
+
+    # ``launch`` is a transparent prefix: it loads credentials from the
+    # macOS Keychain into ``os.environ`` and then proceeds as if the
+    # ``launch`` token were not there. That lets the launcher script run
+    # both ``launch.sh`` (no args -> server) and ``launch.sh doctor``
+    # (env-load + doctor) through the same single ``uv run`` invocation.
+    if argv and argv[0] == "launch":
+        from .setup_wizard import load_launch_env_into_os
+
+        load_launch_env_into_os()
+        argv = argv[1:]
+        sys.argv = [sys.argv[0], *argv]
+
     if argv and argv[0] == "doctor":
         from . import doctor
 
@@ -73,6 +88,11 @@ def main() -> int:
         from .setup_wizard import print_launch_env
 
         return print_launch_env()
+
+    if argv and argv[0] == "uninstall":
+        from . import setup_wizard
+
+        return setup_wizard.uninstall_main(argv[1:])
 
     if argv and argv[0] in {"-h", "--help"}:
         print(__doc__)

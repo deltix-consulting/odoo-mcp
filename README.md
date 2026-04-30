@@ -105,6 +105,13 @@ This runs `git pull` against the install directory followed by
 `uv sync`. It does not touch your `~/.odoo-mcp/config.toml`,
 Keychain entries, or Claude Desktop registration.
 
+Since v0.7.0 the launcher template uses a single Python process to load
+Keychain credentials and start the server, instead of two `uv run`
+invocations. This shaves roughly 150-300 ms off every Claude Cowork /
+Claude Desktop launch. Existing installs auto-migrate to the new
+template on the next `odoo-mcp update`; the legacy `launch-env`
+subcommand stays for backward compatibility.
+
 ## Configuration
 
 The wizard generates a config that looks like this at
@@ -205,6 +212,7 @@ goes through the full prod-guard + dry-run + confirmation-token flow.
 | `odoo-mcp setup --list` | List configured instances |
 | `odoo-mcp setup --rotate-key NAME` | Rotate the API key for one instance |
 | `odoo-mcp setup --regenerate-launcher` | Rewrite `launch.sh` (useful after moving the repo) |
+| `odoo-mcp uninstall` | Remove config, Keychain entries, launcher, Claude Desktop registration, and the `uv tool` install (project checkout left alone) |
 | `odoo-mcp doctor` | Pre-flight: config perms, audit log, TLS, auth, smoke call |
 | `odoo-mcp status` | Live status: which instances are authenticated, unlock state, rate-limit budget |
 | `odoo-mcp audit` | Audit log inspector: filter by instance, tool, date, result |

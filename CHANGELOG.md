@@ -12,6 +12,50 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.7.0] - 2026-04-30
+
+### Added
+
+- **`odoo-mcp uninstall`** — single-command offboarding. Removes Keychain
+  entries for every configured instance, deletes the `odoo-mcp` entry
+  from Claude Desktop config (other MCPs preserved), drops
+  `~/.odoo-mcp/` (config, launcher, audit logs, fields cache), and runs
+  `uv tool uninstall odoo-mcp` best-effort. The project checkout is
+  intentionally left alone — print-and-tell so a stale work tree never
+  gets nuked. Same flag is also reachable via
+  `odoo-mcp setup --uninstall`.
+- **Pre-flight Internal-User check** in the setup wizard. After `doctor`
+  passes, the wizard authenticates the new instance once more and runs
+  `res.users has_group base.group_user`. If the API key belongs to a
+  portal / external / shared user the wizard prints a clear warning so
+  the user (or their Odoo admin) can fix permissions before the first
+  tool call appears mysteriously broken. Best-effort: any error is
+  swallowed so the check never fails the wizard.
+
+### Changed
+
+- **Faster MCP startup.** New `python -m odoo_mcp launch` subcommand
+  loads Keychain credentials into `os.environ` and starts the server in
+  one Python process. The new launcher template skips the previous
+  `eval "$(launch-env)"` round-trip, removing one full Python
+  interpreter startup (~150-300 ms) on every Claude Cowork launch.
+  Existing launchers auto-migrate on the next `odoo-mcp update`. The
+  legacy `launch-env` subcommand stays for backward compat.
+
+### Fixed
+
+- **Atomic config writes.** Both `~/.odoo-mcp/config.toml` and Claude
+  Desktop's `claude_desktop_config.json` now go through a temp-file +
+  `os.replace` write that survives interruption. Before, a Ctrl+C / OOM
+  / disk-full mid-write could leave either file truncated or
+  half-written, which on Claude Desktop manifested as "MCP not loading
+  on next start". Temp files are cleaned up on every exception path.
+- **Bounded in-memory fields cache.** The per-`OdooClient` `_fields_cache`
+  is now an LRU capped at 64 models (configurable via
+  `fields_cache_max_size`). Long-running MCP processes that touched many
+  distinct models could grow the cache without bound. The persistent L2
+  SQLite cache is unchanged.
+
 ## [0.6.2] - 2026-04-30
 
 ### Fixed

@@ -12,6 +12,7 @@ stored in the macOS Keychain via ``security(1)``. No external dependencies.
 
 from __future__ import annotations
 
+import contextlib
 import getpass
 import json
 import logging
@@ -19,6 +20,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -37,6 +39,46 @@ _CLAUDE_DESKTOP_CONFIG: Path = Path(
     "~/Library/Application Support/Claude/claude_desktop_config.json"
 ).expanduser()
 _KEYCHAIN_ACCOUNT_PREFIX = "odoo-mcp-"
+
+
+# ---------------------------------------------------------------------------
+# Atomic file write helper
+# ---------------------------------------------------------------------------
+
+
+def _atomic_write_text(target: Path, content: str, *, mode: int = 0o600) -> None:
+    """Write *content* to *target* atomically with chmod *mode*.
+
+    Writes to a temp file in the same directory (so ``os.replace`` is atomic
+    on the same filesystem), chmods it, then replaces the target. On any
+    exception during write/chmod the temp file is cleaned up. If
+    ``os.replace`` itself raises (rare), the temp file is also cleaned up
+    and the original target is left untouched — this is the property we care
+    most about: a half-written config never replaces a working one.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115 — manual close: needed to chmod + replace
+        mode="w",
+        dir=str(target.parent),
+        delete=False,
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+    )
+    tmp_path = Path(tmp.name)
+    try:
+        try:
+            tmp.write(content)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        finally:
+            tmp.close()
+        if os.name == "posix":
+            os.chmod(tmp_path, mode)
+        os.replace(tmp_path, target)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError, OSError):
+            tmp_path.unlink()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -163,21 +205,24 @@ def _keychain_get(instance_name: str, service: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def print_launch_env() -> int:
-    """Print ``export VAR=val`` lines for all configured instances.
+def _collect_launch_env() -> tuple[dict[str, str], list[str]]:
+    """Resolve all (USERNAME, API_KEY) pairs from Keychain.
 
-    Reads config.toml, discovers each instance's ``credentials_env_prefix``,
-    fetches both USERNAME and API_KEY from the macOS Keychain, and writes
-    shell-compatible ``export`` lines to stdout.
+    Returns ``(env_vars, errors)``. ``env_vars`` is a flat dict suitable for
+    splatting into ``os.environ.update``; ``errors`` is a list of human-
+    readable strings describing missing Keychain entries.
+
+    Raises ``FileNotFoundError`` if the config file is missing — callers
+    decide how to surface that.
     """
     if not DEFAULT_CONFIG_PATH.exists():
-        print("Config not found. Run: odoo-mcp setup", file=sys.stderr)
-        return 1
+        raise FileNotFoundError(DEFAULT_CONFIG_PATH)
 
     with DEFAULT_CONFIG_PATH.open("rb") as f:
         raw = tomllib.load(f)
 
     instances: dict[str, Any] = raw.get("instances", {})
+    env: dict[str, str] = {}
     errors: list[str] = []
 
     for name, entry in instances.items():
@@ -200,16 +245,58 @@ def print_launch_env() -> int:
             errors.append(f"Keychain entry not found: {api_key_service} for instance {name}")
             continue
 
+        env[username_service] = username
+        env[api_key_service] = api_key
+
+    return env, errors
+
+
+def print_launch_env() -> int:
+    """Print ``export VAR=val`` lines for all configured instances.
+
+    Kept for backward compat with old launchers that still ``eval`` this
+    output. New launchers use ``python -m odoo_mcp launch`` which loads
+    Keychain credentials directly into ``os.environ``.
+    """
+    try:
+        env, errors = _collect_launch_env()
+    except FileNotFoundError:
+        print("Config not found. Run: odoo-mcp setup", file=sys.stderr)
+        return 1
+
+    for var, value in env.items():
         # Shell-escape values by using single quotes with embedded quote escaping
-        safe_user = username.replace("'", "'\\''")
-        safe_key = api_key.replace("'", "'\\''")
-        print(f"export {username_service}='{safe_user}'")
-        print(f"export {api_key_service}='{safe_key}'")
+        safe = value.replace("'", "'\\''")
+        print(f"export {var}='{safe}'")
 
     for err in errors:
         print(f"# WARNING: {err}", file=sys.stderr)
 
-    return 1 if errors and not instances else 0
+    return 1 if errors and not env else 0
+
+
+def load_launch_env_into_os() -> int:
+    """Resolve Keychain credentials and set them in ``os.environ``.
+
+    Returns 0 on success, 1 if config is missing, 2 if any Keychain entry
+    is missing. Warnings are written to stderr but do not abort — the
+    server itself will surface a clearer error when the affected instance
+    is touched.
+    """
+    try:
+        env, errors = _collect_launch_env()
+    except FileNotFoundError:
+        print("Config not found. Run: odoo-mcp setup", file=sys.stderr)
+        return 1
+
+    for var, value in env.items():
+        os.environ[var] = value
+    for err in errors:
+        print(f"WARNING: {err}", file=sys.stderr)
+
+    if errors and not env:
+        return 2
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -281,23 +368,26 @@ def _env_prefix(name: str) -> str:
 
 
 def _write_config(defaults: dict[str, Any], instances: dict[str, dict[str, Any]]) -> None:
-    """Write config.toml with chmod 600."""
+    """Write config.toml with chmod 600 atomically."""
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     content = _generate_toml(defaults, instances)
-    DEFAULT_CONFIG_PATH.write_text(content)
-    if os.name == "posix":
-        DEFAULT_CONFIG_PATH.chmod(0o600)
+    _atomic_write_text(DEFAULT_CONFIG_PATH, content, mode=0o600)
 
 
 def _write_launch_sh() -> None:
-    """Generate launch.sh that uses the launch-env helper."""
-    # Discover the project directory so uv can find pyproject.toml
+    """Generate launch.sh.
+
+    Since v0.7.0 we use the unified ``python -m odoo_mcp launch`` subcommand
+    which loads credentials from Keychain and starts the server in one Python
+    process. Previously this was two ``uv run`` invocations (~150-300ms each
+    of interpreter startup). The old ``launch-env`` subcommand still exists
+    for backward compatibility with old launchers.
+    """
     project_dir = Path(__file__).resolve().parent.parent.parent
     script = f"""\
 #!/bin/bash
 set -euo pipefail
-eval "$(uv run --directory '{project_dir}' python -m odoo_mcp launch-env)"
-exec uv run --directory '{project_dir}' python -m odoo_mcp "$@"
+exec uv run --directory '{project_dir}' python -m odoo_mcp launch "$@"
 """
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     _LAUNCH_SH.write_text(script)
@@ -320,7 +410,7 @@ def _delete_credentials(instance_name: str, prefix: str) -> None:
 
 
 def _register_claude_desktop() -> None:
-    """Add odoo-mcp to Claude Desktop config."""
+    """Add odoo-mcp to Claude Desktop config (atomic write)."""
     config: dict[str, Any] = {}
     if _CLAUDE_DESKTOP_CONFIG.exists():
         try:
@@ -336,8 +426,11 @@ def _register_claude_desktop() -> None:
         "args": [],
     }
 
-    _CLAUDE_DESKTOP_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    _CLAUDE_DESKTOP_CONFIG.write_text(json.dumps(config, indent=2) + "\n")
+    _atomic_write_text(
+        _CLAUDE_DESKTOP_CONFIG,
+        json.dumps(config, indent=2) + "\n",
+        mode=0o600,
+    )
     print(f"  Registered in Claude Desktop config: {_CLAUDE_DESKTOP_CONFIG}")
 
 
@@ -347,6 +440,40 @@ def _run_doctor() -> None:
     from .doctor import run_doctor
 
     run_doctor()
+
+
+def _check_user_is_internal(name: str) -> None:
+    """Verify the just-created instance's API key has ``base.group_user``.
+
+    Portal / external users authenticate fine but cannot access most
+    business models — many MCP tools will appear broken. Surface this
+    early with a clear message rather than letting the user discover it
+    via cryptic ACL failures later. Best-effort: any exception is
+    swallowed so a transient issue doesn't fail the whole wizard.
+    """
+    try:
+        from .client import OdooClient
+        from .config import load_config
+        from .credentials import load_credentials
+
+        cfg = load_config(DEFAULT_CONFIG_PATH)
+        instance = cfg.instances.get(name)
+        if instance is None:
+            return
+        creds = load_credentials(instance.name, instance.credentials_env_prefix)
+        client = OdooClient(instance, credentials=creds)
+        client.authenticate()
+        is_user = client._execute("res.users", "has_group", [client.uid, "base.group_user"], {})
+        if bool(is_user):
+            print("  ✓ API key user has the Internal User group.")
+        else:
+            print(
+                "  ! WARNING: this API key does not have the basic Internal User "
+                "group (base.group_user). Many tools may not work. Ask your Odoo "
+                "admin to give the user the appropriate groups for their role."
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort post-flight check
+        logger.debug("internal-user check skipped: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +540,7 @@ def _cmd_setup() -> int:
     _register_claude_desktop()
 
     _run_doctor()
+    _check_user_is_internal(name)
     _print_setup_summary(name, str(info["url"]))
     return 0
 
@@ -446,6 +574,7 @@ def _cmd_add() -> int:
     print(f"  Updated {DEFAULT_CONFIG_PATH}")
 
     _run_doctor()
+    _check_user_is_internal(name)
     print(f"\nInstance '{name}' added successfully.")
     return 0
 
@@ -585,6 +714,140 @@ def _cmd_regenerate_launcher() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: uninstall
+# ---------------------------------------------------------------------------
+
+
+def _remove_odoo_mcp_from_claude_desktop() -> bool:
+    """Strip the ``odoo-mcp`` entry from Claude Desktop config (atomic).
+
+    Returns True if an entry was removed. Other ``mcpServers`` entries are
+    preserved untouched.
+    """
+    if not _CLAUDE_DESKTOP_CONFIG.exists():
+        return False
+    try:
+        config = json.loads(_CLAUDE_DESKTOP_CONFIG.read_text())
+    except (json.JSONDecodeError, OSError):
+        print(f"  Warning: could not read {_CLAUDE_DESKTOP_CONFIG}; leaving it alone.")
+        return False
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict) or "odoo-mcp" not in servers:
+        return False
+    del servers["odoo-mcp"]
+    _atomic_write_text(
+        _CLAUDE_DESKTOP_CONFIG,
+        json.dumps(config, indent=2) + "\n",
+        mode=0o600,
+    )
+    return True
+
+
+def _remove_audit_logs() -> list[Path]:
+    """Delete the active audit log + any rotated audit-log files."""
+    removed: list[Path] = []
+    if not _CONFIG_DIR.exists():
+        return removed
+    for path in sorted(_CONFIG_DIR.iterdir()):
+        if path.name == "audit.jsonl" or path.name.startswith("audit.jsonl."):
+            with contextlib.suppress(FileNotFoundError, OSError):
+                path.unlink()
+                removed.append(path)
+    return removed
+
+
+def _cmd_uninstall() -> int:
+    """Remove every trace of odoo-mcp from this machine.
+
+    Best-effort: a failure in one step does not abort the others. The
+    project checkout (~/odoo-mcp by default) is intentionally left alone —
+    we don't risk eating uncommitted local work.
+    """
+    project_dir = Path(__file__).resolve().parent.parent.parent
+
+    print("This will remove:")
+    print(f"  - All Keychain entries under '{_KEYCHAIN_ACCOUNT_PREFIX}*'")
+    print(f"  - {_CONFIG_DIR} (config.toml, launch.sh, audit logs, fields cache)")
+    print(f"  - The 'odoo-mcp' entry in {_CLAUDE_DESKTOP_CONFIG}")
+    print("  - The 'odoo-mcp' uv tool installation")
+    print()
+    print(f"It will NOT remove the project checkout at {project_dir}.")
+    print(f"  -> rm -rf '{project_dir}' yourself if desired.")
+    print()
+    if not _ask_bool("Proceed with uninstall?", default=False):
+        print("Aborted.")
+        return 0
+
+    instances: dict[str, dict[str, Any]] = {}
+    if DEFAULT_CONFIG_PATH.exists():
+        try:
+            _, instances = _load_raw_config()
+        except Exception as exc:  # noqa: BLE001 — diagnostic only
+            print(f"  Warning: could not read config: {exc}")
+
+    print()
+    print("Removing Keychain entries...")
+    for name, entry in instances.items():
+        prefix = str(entry.get("credentials_env_prefix") or _env_prefix(name))
+        _delete_credentials(name, prefix)
+
+    print("\nRemoving Claude Desktop registration...")
+    if _remove_odoo_mcp_from_claude_desktop():
+        print(f"  Removed odoo-mcp entry from {_CLAUDE_DESKTOP_CONFIG}")
+    else:
+        print("  No odoo-mcp entry found (already gone).")
+
+    print("\nRemoving local files...")
+    files_to_remove = [
+        _LAUNCH_SH,
+        DEFAULT_CONFIG_PATH,
+        _CONFIG_DIR / "fields-cache.db",
+    ]
+    for path in files_to_remove:
+        if path.exists():
+            with contextlib.suppress(FileNotFoundError, OSError):
+                path.unlink()
+                print(f"  Removed {path}")
+    audit_removed = _remove_audit_logs()
+    for path in audit_removed:
+        print(f"  Removed {path}")
+
+    print("\nUninstalling 'odoo-mcp' from uv tool...")
+    try:
+        result = subprocess.run(  # noqa: S603, S607
+            ["uv", "tool", "uninstall", "odoo-mcp"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            print("  Removed via 'uv tool uninstall odoo-mcp'.")
+        else:
+            print(f"  Warning: 'uv tool uninstall' failed: {result.stderr.strip()}")
+    except FileNotFoundError:
+        print("  Warning: 'uv' not on PATH; skip 'uv tool uninstall odoo-mcp'.")
+
+    print()
+    print("--- Uninstall complete ---")
+    print(f"To finish: rm -rf '{project_dir}'  (your project checkout)")
+    print("Restart Claude Desktop to drop the now-stale MCP entry.")
+    return 0
+
+
+def uninstall_main(argv: list[str] | None = None) -> int:
+    """Entry point used by ``__main__.py`` for ``odoo-mcp uninstall``."""
+    args = list(argv if argv is not None else [])
+    if args and args[0] in {"-h", "--help"}:
+        print("Usage: odoo-mcp uninstall")
+        return 0
+    try:
+        return _cmd_uninstall()
+    except KeyboardInterrupt:
+        print("\n\nUninstall cancelled.")
+        return 130
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -605,6 +868,8 @@ def main(argv: list[str] | None = None) -> int:
     """Dispatch setup subcommands."""
     args = list(argv if argv is not None else sys.argv[1:])
     try:
+        if "--uninstall" in args:
+            return _cmd_uninstall()
         if "--list" in args:
             return _cmd_list()
         if "--regenerate-launcher" in args:

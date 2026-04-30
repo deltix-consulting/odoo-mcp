@@ -74,6 +74,34 @@ def _has_local_changes(project_dir: Path) -> bool:
     return bool(out.strip())
 
 
+def _maybe_migrate_launcher() -> None:
+    """Regenerate ``~/.odoo-mcp/launch.sh`` if it still uses the legacy template.
+
+    The legacy template called the ``launch-env`` subcommand in a separate
+    ``uv run`` invocation; the v0.7.0 template uses a single ``launch``
+    subcommand. We detect by substring — if ``launch-env`` appears, the
+    file is from the old template. Untouched custom launchers (no
+    ``launch-env`` reference) are left alone.
+    """
+    from .setup_wizard import _LAUNCH_SH, _write_launch_sh
+
+    if not _LAUNCH_SH.exists():
+        return
+    try:
+        content = _LAUNCH_SH.read_text()
+    except OSError:
+        return
+    if "launch-env" not in content:
+        return
+    try:
+        _write_launch_sh()
+        print(f"Migrated launcher to faster v0.7.0 template: {_LAUNCH_SH}")
+    except OSError as exc:
+        print(
+            f"Warning: could not migrate launcher ({exc}); run 'odoo-mcp setup --regenerate-launcher'."
+        )
+
+
 def _print_check(current_version: str) -> int:
     result = check_for_update(current_version)
     if result is None:
@@ -228,6 +256,13 @@ def main(argv: list[str] | None = None) -> int:
         print("uv sync failed:", file=sys.stderr)
         print(sync.stderr.rstrip(), file=sys.stderr)
         return 1
+
+    # Auto-migrate the launch.sh template if it still uses the old
+    # two-process `launch-env` pattern. New (v0.7.0+) launchers go
+    # through `python -m odoo_mcp launch` which loads Keychain creds
+    # in-process. Existing users get the speed boost without manual
+    # action.
+    _maybe_migrate_launcher()
 
     # Refresh the user-installed CLI shim so `odoo-mcp` on PATH points at
     # the new version. `uv tool install --editable` resolves to a wrapper

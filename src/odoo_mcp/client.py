@@ -25,6 +25,7 @@ import socket
 import ssl
 import threading
 import xmlrpc.client
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any, Final
 from urllib.parse import urlparse
@@ -41,6 +42,12 @@ logger = logging.getLogger(__name__)
 # override. If a caller needs any of these, they should file an issue and we
 # can add a vetted opt-in, not a pass-through.
 _FROZEN_CONTEXT: Final[dict[str, Any]] = {"lang": "en_US"}
+
+# Default cap for the per-process L1 fields cache. A long-running MCP server
+# that touches many distinct models (an Odoo with hundreds of installed
+# modules) would otherwise grow ``_fields_cache`` without bound. 64 covers
+# typical interactive sessions; bump via constructor kwarg if needed.
+_DEFAULT_FIELDS_CACHE_MAX_SIZE: Final[int] = 64
 
 
 class _TimeoutHTTPConnection(http.client.HTTPConnection):
@@ -149,6 +156,7 @@ class OdooClient:
         *,
         credential_loader: Callable[[], Credentials] | None = None,
         fields_cache: PersistentFieldsCache | None = None,
+        fields_cache_max_size: int = _DEFAULT_FIELDS_CACHE_MAX_SIZE,
     ) -> None:
         if credentials is None and credential_loader is None:
             raise OdooAuthError(
@@ -160,7 +168,14 @@ class OdooClient:
         self._credential_loader = credential_loader
         self._credential_lock = threading.Lock()
         self._ssl_context = _build_ssl_context(instance.allow_self_signed)
-        self._fields_cache: dict[str, dict[str, dict[str, Any]]] = {}
+        if fields_cache_max_size <= 0:
+            raise ValueError("fields_cache_max_size must be > 0")
+        self._fields_cache_max_size = fields_cache_max_size
+        # Bounded LRU keyed by model name. OrderedDict preserves insertion
+        # order; ``move_to_end`` on hit promotes recency, ``popitem(last=False)``
+        # evicts the least-recently-used entry on overflow.
+        self._fields_cache: OrderedDict[str, dict[str, dict[str, Any]]] = OrderedDict()
+        self._fields_lock = threading.Lock()
         # Optional L2 SQLite cache shared across processes / clients.
         self._persistent_fields_cache = fields_cache
 
@@ -390,12 +405,16 @@ class OdooClient:
         On miss-then-hit-from-Odoo we write back to both caches so the next
         call (in this process or a future one) is a hit.
         """
-        if use_cache and model in self._fields_cache:
-            return self._fields_cache[model]
+        if use_cache:
+            with self._fields_lock:
+                cached_l1 = self._fields_cache.get(model)
+                if cached_l1 is not None:
+                    self._fields_cache.move_to_end(model)
+                    return cached_l1
         if use_cache and self._persistent_fields_cache is not None:
             cached = self._persistent_fields_cache.get(self._instance.name, model)
             if cached is not None:
-                self._fields_cache[model] = cached
+                self._cache_fields_l1(model, cached)
                 return cached
         result = self._execute(
             model,
@@ -407,10 +426,18 @@ class OdooClient:
             raise OdooRemoteError(
                 f"fields_get for {model!r} returned unexpected type {type(result).__name__}"
             )
-        self._fields_cache[model] = result
+        self._cache_fields_l1(model, result)
         if self._persistent_fields_cache is not None:
             self._persistent_fields_cache.put(self._instance.name, model, result)
         return result
+
+    def _cache_fields_l1(self, model: str, payload: dict[str, dict[str, Any]]) -> None:
+        """Insert into the L1 LRU, evicting the oldest entry on overflow."""
+        with self._fields_lock:
+            self._fields_cache[model] = payload
+            self._fields_cache.move_to_end(model)
+            while len(self._fields_cache) > self._fields_cache_max_size:
+                self._fields_cache.popitem(last=False)
 
     def search_read(
         self,
