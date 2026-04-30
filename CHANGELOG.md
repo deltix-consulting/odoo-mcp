@@ -12,6 +12,21 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.6.2] - 2026-04-30
+
+### Fixed
+
+- Installer now registers the `odoo-mcp` CLI on `PATH`. Previously
+  `scripts/install.sh` only ran `uv sync`, which created a virtualenv
+  inside the project but did not expose the entry point globally. Users
+  following the ONBOARDING guide hit `command not found: odoo-mcp` for
+  every CLI command (doctor, status, audit, update, setup --rotate-key).
+  The installer now runs `uv tool install --editable . --force` after
+  `uv sync` and prints a one-liner to add `~/.local/bin` to `PATH` if
+  it is missing. `odoo-mcp update` performs the same step after a
+  successful `git pull`, so existing installs converge on the next
+  update without requiring a re-install.
+
 ## [0.6.1] - 2026-04-28
 
 ### Fixed

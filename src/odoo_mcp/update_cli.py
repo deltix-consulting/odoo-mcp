@@ -229,6 +229,13 @@ def main(argv: list[str] | None = None) -> int:
         print(sync.stderr.rstrip(), file=sys.stderr)
         return 1
 
+    # Refresh the user-installed CLI shim so `odoo-mcp` on PATH points at
+    # the new version. `uv tool install --editable` resolves to a wrapper
+    # that imports from the checkout, so a fresh git pull is technically
+    # already live, but re-installing makes sure entry-point metadata
+    # (new subcommands, version) is picked up.
+    _run(["uv", "tool", "install", "--editable", str(project_dir), "--force"], cwd=project_dir)
+
     # Run the test suite.
     tests = _run(["uv", "run", "pytest", "-q"], cwd=project_dir)
     tests_ok = tests.returncode == 0

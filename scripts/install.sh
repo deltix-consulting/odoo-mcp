@@ -131,6 +131,28 @@ cd "$ODOO_MCP_HOME"
 uv sync
 
 # ----------------------------------------------------------------------
-step 7 "Launching setup wizard"
+step 7 "Installing odoo-mcp on PATH (uv tool)"
+# Without this the launcher.sh that Claude Cowork runs works fine, but
+# the user has no way to call `odoo-mcp doctor` / `odoo-mcp status` /
+# `odoo-mcp update` from anywhere except inside the project directory.
+# `uv tool install --editable` puts a thin wrapper into ~/.local/bin
+# that points at this checkout, so updates via `git pull` are picked up
+# without re-running `uv tool install`.
+uv tool install --editable . --force >/dev/null
+echo "  odoo-mcp CLI installed (run 'odoo-mcp --help' to verify)"
+# Make sure ~/.local/bin is on PATH for the current shell session.
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *)
+        echo
+        echo "  NOTE: '$HOME/.local/bin' is not on your PATH yet."
+        echo "  Add this line to ~/.zshrc (or ~/.bash_profile):"
+        echo "      export PATH=\"\$HOME/.local/bin:\$PATH\""
+        echo "  Then open a new terminal so 'odoo-mcp' resolves correctly."
+        ;;
+esac
+
+# ----------------------------------------------------------------------
+step 8 "Launching setup wizard"
 echo "  Install complete. Running setup wizard..."
 exec uv run odoo-mcp setup

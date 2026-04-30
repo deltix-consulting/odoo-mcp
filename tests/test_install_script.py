@@ -33,6 +33,9 @@ def test_install_script_has_safety_flags() -> None:
         "install.sh must install uv via the official installer when missing"
     )
     assert "uv sync" in text
+    assert "uv tool install --editable" in text, (
+        "install.sh must register the CLI on PATH via uv tool install"
+    )
     assert "odoo-mcp setup" in text
 
 
