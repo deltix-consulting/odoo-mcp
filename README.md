@@ -166,6 +166,20 @@ Fields:
 The config file must be `chmod 600`. The server refuses to start
 otherwise.
 
+### Industry templates
+
+The `templates/` directory in the repo ships per-industry starting-point
+configs you can copy into `~/.odoo-mcp/config.toml` and adapt:
+
+- `templates/wholesale.toml` — distribution / stock-heavy klanten
+- `templates/manufacturing.toml` — mrp / quality / maintenance
+- `templates/hr.toml` — HR-heavy klanten with stricter PII redaction
+- `templates/professional-services.toml` — project / timesheet / helpdesk
+
+Each template is a valid `[instances.NAME]` block. See
+`INDUSTRY_AUDIT.md` for the methodology and per-industry guidance behind
+the redaction defaults.
+
 ## Credentials
 
 Credentials never touch disk in plaintext. The setup wizard stores your

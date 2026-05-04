@@ -1,0 +1,97 @@
+# odoo-mcp instance template — HR-heavy klanten
+#
+# For klanten whose primary use case is people operations: hr, recruitment,
+# time-off, expenses, contracts. Payroll itself lives in Odoo Enterprise
+# (out of scope for the public 18.0 audit) — if you run hr_payroll on
+# Enterprise, do an additional pass yourself.
+#
+# This template tightens the default-hidden surface around HR data and
+# layers extra always-redacted patterns on top of the built-ins so that
+# common Enterprise payroll-module field names are also blocked.
+#
+# How to use:
+#   1. Copy this [instances.NAME] block into ~/.odoo-mcp/config.toml.
+#   2. Rename "hr_demo" to your klant's instance name.
+#   3. Fill in url, database, credentials_env_prefix.
+#   4. If you run hr_payroll Enterprise, ADD field names you discover to
+#      sensitive_fields below.
+#
+# STARTING POINT — review per klant.
+
+[instances.hr_demo]
+url = "https://CHANGE-ME.odoo.com"
+database = "CHANGE-ME"
+credentials_env_prefix = "HR"
+production = false
+allowed_models = ["*"]
+refuse_admin_on_production = true
+
+# HR-specific extra redaction. The built-in always-redacted regex already
+# catches salary / compensation / payroll / bonus / nda_text / private_key.
+# These add Enterprise / custom-module variants seen in the wild.
+custom_sensitive_field_patterns = [
+    ".*net_amount.*",
+    ".*gross_amount.*",
+    ".*severance.*",
+    ".*pip_.*",                     # performance improvement plan
+    ".*disciplinary.*",
+    ".*medical.*",
+    ".*disability.*",
+    ".*religion.*",
+    "x_studio_.*personal.*",
+]
+
+[instances.hr_demo.sensitive_fields]
+# Standard partner redaction
+"res.partner" = ["vat", "bank_ids", "company_registry", "comment", "barcode"]
+# Employee data — tighter than the global default; explicit list so a klant
+# admin can see at a glance what is hidden.
+"hr.employee" = [
+    "ssnid",
+    "sinid",
+    "identification_id",
+    "passport_id",
+    "permit_no",
+    "visa_no",
+    "visa_expire",
+    "private_email",
+    "private_phone",
+    "private_street",
+    "private_street2",
+    "private_city",
+    "private_state_id",
+    "private_zip",
+    "private_country_id",
+    "private_car_plate",
+    "birthday",
+    "gender",
+    "marital",
+    "children",
+    "spouse_complete_name",
+    "spouse_birthdate",
+    "country_of_birth",
+    "place_of_birth",
+    "emergency_contact",
+    "emergency_phone",
+    "study_field",
+    "study_school",
+    "km_home_work",
+    "bank_account_id",
+    "barcode",
+]
+"hr.contract" = ["wage", "contract_wage", "notes"]
+"hr.applicant" = [
+    "email_from",
+    "partner_phone",
+    "partner_phone_sanitized",
+    "linkedin_profile",
+    "refuse_reason_id",
+]
+"hr.candidate" = [
+    "email_from",
+    "partner_phone",
+    "partner_phone_sanitized",
+    "linkedin_profile",
+]
+"hr.leave" = ["private_name", "notes"]
+"hr.expense" = ["description"]

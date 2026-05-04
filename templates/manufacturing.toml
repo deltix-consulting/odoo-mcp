@@ -1,0 +1,40 @@
+# odoo-mcp instance template — Manufacturing
+#
+# Discrete / process manufacturers running mrp, quality, maintenance on top
+# of the standard stock + purchase backbone. Quality-check notes and
+# maintenance reports often contain incident narrative that should not be
+# bulk-read by the agent without an explicit opt-in.
+#
+# How to use:
+#   1. Copy this [instances.NAME] block into ~/.odoo-mcp/config.toml.
+#   2. Rename "manufacturing_demo" to your klant's instance name.
+#   3. Fill in url, database, credentials_env_prefix.
+#
+# This is a STARTING POINT — review per klant before deploying.
+
+[instances.manufacturing_demo]
+url = "https://CHANGE-ME.odoo.com"
+database = "CHANGE-ME"
+credentials_env_prefix = "MFG"
+production = false
+allowed_models = ["*"]
+refuse_admin_on_production = true
+
+# Custom patterns for common manufacturing-side sensitive fields.
+custom_sensitive_field_patterns = [
+    "x_studio_.*recipe.*",
+    "x_studio_.*formula.*",
+    "x_studio_.*supplier_cost.*",
+    ".*incident_report.*",
+]
+
+[instances.manufacturing_demo.sensitive_fields]
+# Quality check notes carry incident narrative + people involved
+"quality.check" = ["note"]
+"maintenance.request" = ["description"]
+# BoM components reveal cost structure
+"mrp.bom" = ["code"]
+# Workorder operator notes
+"mrp.workorder" = ["operation_note"]
+# Standard partner / employee redaction same as global defaults
+"res.partner" = ["vat", "bank_ids", "company_registry", "comment", "barcode"]

@@ -1,0 +1,44 @@
+# odoo-mcp instance template — Wholesale / Distribution
+#
+# Use this as a starting point for klanten whose primary Odoo footprint is
+# stock + purchase + sale + accounting. The template runs in OPEN MODE
+# (allowed_models = ["*"]) so the built-in MODEL_DENYLIST is the security
+# floor, with extra redaction tightened around financial fields.
+#
+# How to use:
+#   1. Copy this entire [instances.NAME] block into ~/.odoo-mcp/config.toml.
+#   2. Rename "wholesale_demo" to your actual instance name.
+#   3. Fill in url, database, credentials_env_prefix.
+#   4. Adjust sensitive_fields as needed for your klant.
+#
+# This is a STARTING POINT, not a strict mandate. Klant admins should
+# review and adapt before going to production.
+
+[instances.wholesale_demo]
+url = "https://CHANGE-ME.odoo.com"
+database = "CHANGE-ME"
+credentials_env_prefix = "WHOLESALE"
+production = false
+allowed_models = ["*"]
+refuse_admin_on_production = true
+
+# Extra patterns applied on top of the built-in always-redacted set.
+# Wholesale klanten frequently expose discount tiers and margin data via
+# custom modules; these patterns catch the common cases.
+custom_sensitive_field_patterns = [
+    "x_studio_.*margin.*",
+    "x_studio_.*cost.*",
+    "x_studio_.*discount_rate.*",
+]
+
+# Per-model default-hidden overrides. Listed fields require an explicit
+# allow_sensitive_fields=[...] opt-in per call. An empty list "[]" means
+# "this model has NO default-hidden fields" for THIS instance only.
+[instances.wholesale_demo.sensitive_fields]
+# Stock locations: keep default (no override needed)
+# Purchase orders: protect supplier-side margin info if stored on the PO
+"purchase.order" = ["partner_ref", "notes"]
+# Customer pricing detail
+"sale.order" = ["note"]
+# Bank info on partners stays hidden — same as global default
+"res.partner" = ["vat", "bank_ids", "company_registry", "comment", "barcode"]

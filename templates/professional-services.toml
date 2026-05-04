@@ -1,0 +1,46 @@
+# odoo-mcp instance template — Professional Services
+#
+# For consulting / agency / freelance-style klanten: project, timesheet,
+# helpdesk, invoicing. Matches deltix's own internal profile, so this is
+# the template we reach for first when onboarding a similar klant.
+#
+# The default-hidden surface here is intentionally lighter than the HR
+# template — you want the agent to reason about projects and tasks
+# freely. Customer contact data still gets the standard partner / mail
+# redaction.
+#
+# How to use:
+#   1. Copy this [instances.NAME] block into ~/.odoo-mcp/config.toml.
+#   2. Rename "psa_demo" to your klant's instance name.
+#   3. Fill in url, database, credentials_env_prefix.
+#
+# STARTING POINT — review per klant before production rollout.
+
+[instances.psa_demo]
+url = "https://CHANGE-ME.odoo.com"
+database = "CHANGE-ME"
+credentials_env_prefix = "PSA"
+production = false
+allowed_models = ["*"]
+refuse_admin_on_production = true
+
+# Common patterns in professional-services Studio / OCA modules.
+custom_sensitive_field_patterns = [
+    "x_studio_.*rate.*",
+    "x_studio_.*billing.*",
+    ".*nda.*",
+    ".*confidential.*",
+]
+
+[instances.psa_demo.sensitive_fields]
+"res.partner" = ["vat", "bank_ids", "company_registry", "comment", "barcode"]
+# Project / task descriptions are usually safe — leave open. But internal
+# kanban / private notes on tasks may carry client-confidential context.
+"project.task" = ["description"]
+# Helpdesk tickets often contain customer-supplied screenshots, error logs,
+# and credentials pasted into the description.
+"helpdesk.ticket" = ["description"]
+# Timesheet line "name" sometimes contains client-billable narrative.
+# Leave readable — but expense and invoice notes are protected.
+"hr.expense" = ["description"]
+"account.move" = ["narration"]

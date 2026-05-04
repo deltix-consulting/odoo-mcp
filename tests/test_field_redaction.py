@@ -63,6 +63,68 @@ def test_default_hidden_by_model() -> None:
     assert not is_default_hidden("crm.lead", "vat")
 
 
+@pytest.mark.parametrize(
+    ("model", "field"),
+    [
+        # res.partner additions (v0.9.0): notes + barcode treated as PII.
+        ("res.partner", "comment"),
+        ("res.partner", "barcode"),
+        # res.partner.bank.acc_number is the IBAN/account number itself.
+        ("res.partner.bank", "acc_number"),
+        # account.journal exposes the journal's bank acc_number via related.
+        ("account.journal", "bank_acc_number"),
+        # account.payment.memo can contain customer-facing reference text
+        # that occasionally carries sensitive context.
+        ("account.payment", "memo"),
+        # hr.employee additions: physical address, identifiers, demographics.
+        ("hr.employee", "passport_id"),
+        ("hr.employee", "sinid"),
+        ("hr.employee", "permit_no"),
+        ("hr.employee", "visa_no"),
+        ("hr.employee", "private_street"),
+        ("hr.employee", "private_zip"),
+        ("hr.employee", "private_car_plate"),
+        ("hr.employee", "gender"),
+        ("hr.employee", "emergency_contact"),
+        ("hr.employee", "emergency_phone"),
+        ("hr.employee", "study_school"),
+        ("hr.employee", "bank_account_id"),
+        # hr.contract: wage figures (not caught by always-redacted "salary"
+        # / "compensation" / "payroll" / "bonus" patterns).
+        ("hr.contract", "wage"),
+        ("hr.contract", "contract_wage"),
+        ("hr.contract", "notes"),
+        # Recruitment confidentiality: candidate identity / contact.
+        ("hr.applicant", "email_from"),
+        ("hr.applicant", "linkedin_profile"),
+        ("hr.applicant", "refuse_reason_id"),
+        ("hr.candidate", "partner_phone"),
+        # Time-off: medical / personal context in description and notes.
+        ("hr.leave", "private_name"),
+        ("hr.leave", "notes"),
+        # Expense internal notes.
+        ("hr.expense", "description"),
+        # Fleet vehicle PII.
+        ("fleet.vehicle", "license_plate"),
+        ("fleet.vehicle", "vin_sn"),
+        # Calendar: video-call URL and invitation tokens are join secrets.
+        ("calendar.event", "videocall_location"),
+        ("calendar.event", "access_token"),
+        ("calendar.attendee", "access_token"),
+    ],
+)
+def test_v090_default_hidden_additions(model: str, field: str) -> None:
+    """Survey-driven default-hidden additions in v0.9.0 (see INDUSTRY_AUDIT.md)."""
+    assert is_default_hidden(model, field), f"expected {model}.{field} to be default-hidden"
+
+
+def test_v090_additions_do_not_leak_other_models() -> None:
+    # Sanity check: a wage on hr.contract is hidden, but a wage column on
+    # an unrelated custom model is NOT hidden by the per-model default.
+    assert not is_default_hidden("crm.lead", "wage")
+    assert not is_default_hidden("sale.order", "memo")
+
+
 def test_default_hidden_respects_instance_overrides() -> None:
     # Override: add 'ref' as hidden on res.partner AND drop 'vat' for this instance.
     overrides = {"res.partner": frozenset({"ref"})}

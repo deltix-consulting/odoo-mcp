@@ -55,34 +55,83 @@ MODEL_DENYLIST: Final[frozenset[str]] = frozenset(
         "res.users.log",
         "res.users.apikeys",
         "res.users.apikeys.description",
+        "res.users.apikeys.show",  # transient wizard that echoes new key
         "res.users.identitycheck",
+        "res.users.deletion",  # pending GDPR-style user deletions
+        "res.users.settings",  # holds OAuth refresh tokens via inherit
+        "res.users.settings.volumes",
         "res.groups",
         "auth_totp.device",
+        # NOTE: auth_oauth.provider and auth_signup.reset.password are kept
+        # as legacy entries. The actual Odoo model is `auth.oauth.provider`
+        # (with a dot), added below; `auth_signup.reset.password` is not a
+        # real model in Odoo 18.0 but the entry is harmless and would block
+        # any future module that registered that name.
         "auth_oauth.provider",
         "auth_signup.reset.password",
+        "auth.oauth.provider",  # OAuth client_id / endpoints / scopes
+        "auth.passkey.key",  # WebAuthn credentials (sign_count, key handles)
+        "auth.totp.rate.limit.log",  # 2FA attempt log — auth telemetry
         # System configuration and ACL rules
         "ir.config_parameter",
         "ir.model.access",
         "ir.rule",
+        "ir.default",  # default values across any model — write-side sneak
+        "ir.filters",  # saved searches with arbitrary domains
         # Stored code / executable content (injection + exec risk)
         "ir.actions.server",
         "ir.actions.client",
+        "ir.actions.act_url",  # URL-redirect actions — phishing vector
+        "ir.actions.todo",  # configuration-wizard queue
+        "ir.embedded.actions",  # embedded buttons / hidden actions
         "ir.ui.view",
+        "ir.asset",  # frontend JS / CSS assets — XSS vector on write
         "mail.template",
+        # Mail server credentials and gateway/credential storage
+        "ir.mail_server",  # smtp_user / smtp_pass
+        "fetchmail.server",  # incoming mail credentials, oauth tokens
+        "mail.gateway.allowed",  # mail-routing bypass allowlist
+        "google.gmail.mixin",  # google_gmail_refresh_token storage
+        "microsoft.outlook.mixin",  # microsoft_outlook_refresh_token storage
+        "google.service",
+        "microsoft.service",
+        "google.calendar.sync",
+        "microsoft.calendar.sync",
+        # IAP (Odoo's metered API service) account tokens
+        "iap.account",  # account_token field
+        "iap.service",
+        # Payment provider tokens / transactions (PCI scope)
+        "payment.token",  # tokenized cards / saved payment methods
+        "payment.transaction",
+        "payment.provider",
+        "payment.method",
         # Scheduler / module / logging internals
         "ir.cron",
+        "ir.cron.progress",
+        "ir.cron.trigger",
         "ir.module.module",
+        "ir.module.category",
         "ir.logging",
+        "ir.profile",  # full SQL/Python stack-trace profiles
         "ir.sequence",
+        # Real-time bus / presence (not business data, just noise)
+        "bus.bus",
+        "bus.presence",
         # Model metadata itself (noisy, little business value)
         "ir.model",
         "ir.model.fields",
+        "ir.model.fields.selection",
+        "ir.model.constraint",
+        "ir.model.relation",
+        "ir.model.inherit",
         "ir.model.data",
         # Raw attachments — can reference any model
         "ir.attachment",
         # Import/export infrastructure (exfil vector)
         "base_import.import",
         "base_import.mapping",
+        "ir.exports",  # saved export specs reusable for exfil
+        "ir.exports.line",
     }
 )
 

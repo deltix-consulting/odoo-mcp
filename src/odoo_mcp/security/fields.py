@@ -59,24 +59,94 @@ _ALWAYS_REDACTED_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
 )
 
 # Per-model default-hidden PII. The caller must explicitly opt in to each.
+#
+# The per-model lists below are the result of an evidence-based survey of
+# Odoo Community 18.0 (see INDUSTRY_AUDIT.md in the repo root for the
+# methodology and full citations). Every entry corresponds to a real
+# field on the named model whose contents are personal, financial, or
+# otherwise confidential by Odoo convention (e.g. fields gated behind
+# ``groups="hr.group_hr_user"`` in the source).
 _DEFAULT_HIDDEN: Final[dict[str, frozenset[str]]] = {
-    "res.partner": frozenset({"vat", "bank_ids", "company_registry"}),
-    "account.payment": frozenset({"partner_bank_id"}),
+    "res.partner": frozenset(
+        {
+            "vat",
+            "bank_ids",
+            "company_registry",
+            # `comment` is the partner Notes Html field — often used by
+            # sales/HR for internal-only notes about the contact.
+            "comment",
+            # `barcode` is a per-contact identifier — treated as PII.
+            "barcode",
+        }
+    ),
+    "res.partner.bank": frozenset({"acc_number"}),
+    "account.journal": frozenset({"bank_acc_number"}),
+    "account.payment": frozenset({"partner_bank_id", "memo"}),
     "hr.employee": frozenset(
         {
             "ssnid",
+            "sinid",
             "identification_id",
+            "passport_id",
+            "permit_no",
+            "visa_no",
+            "visa_expire",
             "private_email",
             "private_phone",
+            "private_street",
+            "private_street2",
+            "private_city",
+            "private_state_id",
+            "private_zip",
+            "private_country_id",
+            "private_car_plate",
             "birthday",
+            "gender",
             "marital",
             "children",
             "spouse_complete_name",
             "spouse_birthdate",
             "country_of_birth",
             "place_of_birth",
+            "emergency_contact",
+            "emergency_phone",
+            "study_field",
+            "study_school",
+            "km_home_work",
+            "bank_account_id",
+            "barcode",
         }
     ),
+    # hr.contract holds compensation data. The wage fields are not caught by
+    # the always-redacted regex (which matches salary/compensation/payroll/
+    # bonus but not "wage" alone). Notes can contain HR-internal narrative.
+    "hr.contract": frozenset({"wage", "contract_wage", "notes"}),
+    # Recruitment is HR-confidential; candidate identity and contact info
+    # leaks via these fields if read in bulk.
+    "hr.applicant": frozenset(
+        {
+            "email_from",
+            "partner_phone",
+            "partner_phone_sanitized",
+            "linkedin_profile",
+            "refuse_reason_id",
+        }
+    ),
+    "hr.candidate": frozenset(
+        {
+            "email_from",
+            "partner_phone",
+            "partner_phone_sanitized",
+            "linkedin_profile",
+        }
+    ),
+    # Time-off requests can carry medical / personal context.
+    "hr.leave": frozenset({"private_name", "notes"}),
+    # Expense Internal Notes — often contain personal context.
+    "hr.expense": frozenset({"description"}),
+    # Vehicle identifiers are PII (license plate links to a person) and
+    # the description / VIN is similarly tracked.
+    "fleet.vehicle": frozenset({"license_plate", "vin_sn", "description"}),
     # mail.message is a cross-model side-door: a single message row can
     # reference any res_model (including models NOT on the allowlist), and
     # its `body` / `subject` / email fields can contain anything — HR notes,
@@ -89,7 +159,9 @@ _DEFAULT_HIDDEN: Final[dict[str, frozenset[str]]] = {
     ),
     # Calendar event descriptions can contain confidential meeting notes
     # (1-on-1s, board topics, acquisition talks). Metadata is fine by default.
-    "calendar.event": frozenset({"description"}),
+    # `videocall_location` and `access_token` give direct join-link access.
+    "calendar.event": frozenset({"description", "videocall_location", "access_token"}),
+    "calendar.attendee": frozenset({"access_token"}),
 }
 
 _BINARY_PLACEHOLDER_PREFIX: Final[str] = "<binary:"

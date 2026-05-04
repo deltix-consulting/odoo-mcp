@@ -12,6 +12,74 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.9.0] - 2026-05-04
+
+Evidence-based security update. We did a full survey of Odoo Community
+18.0's standard-module surface (`addons/` + `odoo/addons/`, 1444 model
+declarations) and used the findings to expand `MODEL_DENYLIST` and the
+per-model `_DEFAULT_HIDDEN` map. Each addition is cited against a real
+file path in the Odoo source — see `INDUSTRY_AUDIT.md` for the full
+methodology and citation table. Limitations: Odoo Enterprise modules
+(payroll, sign, documents, country-specific payroll packs) are not in
+the public repo and remain a per-klant audit responsibility.
+
+### Security
+
+- **`MODEL_DENYLIST` grew from 26 to 66 entries.** New blocked
+  categories: WebAuthn / passkey credentials (`auth.passkey.key`),
+  2FA telemetry (`auth.totp.rate.limit.log`), per-user OAuth-token
+  storage (`res.users.settings`, `res.users.settings.volumes`),
+  user-deletion queue (`res.users.deletion`), all of Odoo's mail-server
+  credential models (`ir.mail_server`, `fetchmail.server`, the
+  `google.gmail.mixin` / `microsoft.outlook.mixin` token mixins,
+  `google.service` / `microsoft.service` / `*.calendar.sync`),
+  IAP account tokens (`iap.account`, `iap.service`), the entire
+  payment-provider surface (`payment.token`, `payment.transaction`,
+  `payment.provider`, `payment.method`), additional system internals
+  (`ir.default`, `ir.filters`, `ir.actions.act_url`, `ir.actions.todo`,
+  `ir.embedded.actions`, `ir.asset`, `ir.profile`, `ir.cron.progress`,
+  `ir.cron.trigger`, `ir.module.category`, `ir.model.fields.selection`,
+  `ir.model.constraint`, `ir.model.relation`, `ir.model.inherit`,
+  `ir.exports`, `ir.exports.line`, `bus.bus`, `bus.presence`), and
+  the corrected spelling `auth.oauth.provider` (the existing entry
+  with an underscore was a typo and is kept for defense in depth).
+- **`_DEFAULT_HIDDEN` got ~50 new (model, field) entries.**
+  `hr.employee` gained `passport_id`, `sinid`, `permit_no`, `visa_no`,
+  `visa_expire`, the full `private_*` address block, `gender`,
+  `emergency_contact` / `emergency_phone`, `study_field` /
+  `study_school`, `km_home_work`, `bank_account_id`,
+  `private_car_plate`, `barcode`. New per-model entries on
+  `hr.contract` (`wage`, `contract_wage`, `notes` — wage is not caught
+  by the always-redacted regex), `hr.applicant` / `hr.candidate`
+  (recruitment contact), `hr.leave` (`private_name`, `notes`),
+  `hr.expense` (`description`), `fleet.vehicle` (`license_plate`,
+  `vin_sn`, `description`), `res.partner.bank` (`acc_number`),
+  `account.journal` (`bank_acc_number`), `account.payment` (`memo`),
+  `calendar.event` (`videocall_location`, `access_token`),
+  `calendar.attendee` (`access_token`). `res.partner` gained `comment`
+  and `barcode`. The pinning regression test
+  (`test_denylist_contents_are_locked_in`) was extended to cover every
+  new entry, plus a parametrised test enumerates the new
+  `_DEFAULT_HIDDEN` additions so a future refactor that drops one
+  trips CI before merge.
+
+### Added
+
+- **Per-industry config templates under `templates/`.** Four starting-
+  point TOML files for the typical klant categories deltix sees:
+  `wholesale.toml` (stock + purchase + sale + accounting),
+  `manufacturing.toml` (mrp + quality + maintenance),
+  `hr.toml` (full HR redaction + Enterprise-payroll regex hooks),
+  `professional-services.toml` (project + timesheet + helpdesk +
+  invoicing — matches deltix's own profile). Each template is a valid
+  TOML `[instances.NAME]` block that `load_config` accepts; klant
+  admins copy and adapt. README points operators at the directory.
+- **`INDUSTRY_AUDIT.md`** at the repo root. Full methodology, citation
+  tables for every denylist and default-hidden addition, per-industry
+  guidance, an explicit "what was left alone and why" section, and a
+  rerun playbook for when Odoo ships a new major version. This is a
+  consultant-facing reference, not a runtime artifact.
+
 ## [0.8.0] - 2026-04-30
 
 A batch of medium- and low-severity audit-report fixes. No behaviour change
