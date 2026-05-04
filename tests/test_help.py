@@ -56,8 +56,10 @@ def _build_app(tmp_path: Path) -> OdooMcpApp:
     )
 
 
-def _call(dispatcher: Dispatcher, name: str) -> dict[str, object]:
-    contents = asyncio.run(dispatcher.call(name, {}))
+def _call(
+    dispatcher: Dispatcher, name: str, args: dict[str, object] | None = None
+) -> dict[str, object]:
+    contents = asyncio.run(dispatcher.call(name, args or {}))
     assert len(contents) == 1
     payload: dict[str, object] = json.loads(contents[0].text)
     return payload
@@ -70,10 +72,11 @@ def test_help_is_registered_as_first_tool() -> None:
 
 
 def test_help_returns_expected_structure(tmp_path: Path) -> None:
+    """Verbose mode preserves the v0.10.x cookbook shape."""
     app = _build_app(tmp_path)
     dispatcher = Dispatcher(app)
 
-    payload = _call(dispatcher, "odoo_help")
+    payload = _call(dispatcher, "odoo_help", {"verbose": True})
 
     assert payload["ok"] is True
     assert "version" in payload
@@ -91,6 +94,19 @@ def test_help_returns_expected_structure(tmp_path: Path) -> None:
     assert isinstance(inst, dict)
     for key in ("name", "url", "database", "production", "writes_unlocked", "allowed_models"):
         assert key in inst
+
+
+def test_help_default_is_terse(tmp_path: Path) -> None:
+    """Default mode drops common_patterns/gotchas in favour of a tools list."""
+    app = _build_app(tmp_path)
+    dispatcher = Dispatcher(app)
+
+    payload = _call(dispatcher, "odoo_help")
+
+    assert payload["ok"] is True
+    assert "tools" in payload
+    assert "common_patterns" not in payload
+    assert "gotchas" not in payload
 
 
 def test_help_does_not_authenticate(tmp_path: Path) -> None:

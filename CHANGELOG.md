@@ -12,6 +12,55 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.11.0] - 2026-05-04
+
+Token-budget pass on every tool response. Our MCP doesn't make LLM calls
+itself, but every byte of a tool response is a byte Claude pays for on the
+next turn. This release tightens five hot-path payloads and adds a
+regression-guarding test file (`tests/test_token_budgets.py`).
+
+### Changed
+
+- **`odoo_describe_model` defaults to a minimal field shape.** Each field
+  is now `{type, string, required?, _sensitive?}` only — `help`, `relation`,
+  `readonly`, and `_note` are omitted. Pass `verbose=true` to get the full
+  schema (the v0.10 shape). Measured: a 280-field synthetic model drops
+  from ~120k chars (now `verbose=true`) to ~14k chars (default) — about
+  **88% smaller**.
+- **`odoo_search_read` and `odoo_read` strip Odoo extras.** Records now
+  contain ONLY the fields the caller explicitly requested (plus `id`,
+  always preserved as the record key). Odoo's automatic `__last_update`
+  and `display_name` extras are dropped unless the caller asked for them.
+  Measured: ~75% reduction on a 30-record fixture asking for 2 fields.
+- **`odoo_read_group` drops `__domain` by default.** The per-group
+  drill-down domain is rarely used by Claude directly. Pass
+  `include_domain=true` to keep it. `__count` and `__fold` are still
+  returned (tiny + informative). Measured: ~35% reduction on a typical
+  20-group response.
+- **`odoo_help` defaults to a terse summary + tool one-liners.** The full
+  cookbook (common patterns with examples, gotchas) is gated behind
+  `verbose=true`. The terse summary points at `verbose=true` for callers
+  who want it. Measured: ~45% smaller on the synthetic single-instance
+  fixture.
+- **Error envelope dedupes hint when it is a substring of error.** If
+  `error` already contains the actionable next step, `hint` is dropped
+  to avoid duplicated text on the wire.
+
+### Backward compatibility
+
+Opting back in to the v0.10 shape is a single boolean per call:
+`verbose=true` on `odoo_help` and `odoo_describe_model`,
+`include_domain=true` on `odoo_read_group`. With those flags set, the
+response shape is identical to v0.10. `odoo_search_read` and `odoo_read`
+have no opt-out — the dropped fields were never explicitly requested by
+the caller, so the change is observable only on consumers that relied on
+Odoo's incidental extras.
+
+### Added
+
+- `tests/test_token_budgets.py` — guards each of the five reductions with
+  a deterministic mock and a hard char-count budget.
+
 ## [0.10.0] - 2026-05-04
 
 Per-klant custom-surface scanner. Every klant deployment has Studio fields

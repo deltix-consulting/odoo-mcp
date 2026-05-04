@@ -26,6 +26,9 @@ _TOOL_DESCRIBE_MODEL = Tool(
     name="odoo_describe_model",
     description=(
         "Return the field metadata (fields_get) for one allowlisted Odoo model. "
+        "Default response is minimal: per field {type, string, required?, _sensitive?} "
+        "— enough to pick fields without paragraphs of help text per field. "
+        "Pass `verbose=true` for the full schema (help, relation, readonly, _note). "
         "Permanently-redacted fields (passwords, tokens) are omitted entirely; "
         "default-hidden sensitive fields (VAT, IBAN, employee PII) are marked "
         "with `_sensitive: true` so you know they require explicit unlock. "
@@ -40,6 +43,15 @@ _TOOL_DESCRIBE_MODEL = Tool(
             "model": {
                 "type": "string",
                 "description": "Odoo model name (e.g. 'res.partner').",
+            },
+            "verbose": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "If true, include help text, relation, readonly, and _note for "
+                    "each field (much larger response — useful when designing "
+                    "complex writes or studying a custom model)."
+                ),
             },
         },
     },
@@ -218,6 +230,15 @@ _TOOL_READ_GROUP = Tool(
                 "items": {"type": "string"},
                 "default": [],
             },
+            "include_domain": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "If true, include the per-group `__domain` (a literal "
+                    "domain-list for drill-down) in each row. Off by default "
+                    "to keep the response small."
+                ),
+            },
         },
     },
 )
@@ -387,12 +408,23 @@ _TOOL_ENABLE_PROD_WRITES = Tool(
 _TOOL_HELP = Tool(
     name="odoo_help",
     description=(
-        "Returns a capability overview of this Odoo MCP: available tools, "
-        "common patterns with examples, gotchas, and the list of configured "
-        "instances. Call this at the start of a session to orient quickly. "
+        "Returns a capability overview of this Odoo MCP. Default response is "
+        "terse: a one-sentence summary, a tool list with one-liners, and the "
+        "configured instances. Pass `verbose=true` for the full cookbook "
+        "(common patterns with examples + gotchas) — useful at session start. "
         "Never contacts Odoo."
     ),
-    inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "verbose": {
+                "type": "boolean",
+                "default": False,
+                "description": "If true, include common_patterns (with examples) and gotchas.",
+            },
+        },
+        "additionalProperties": False,
+    },
 )
 
 

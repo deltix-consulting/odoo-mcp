@@ -146,7 +146,10 @@ class Dispatcher:
                 "error_code": exc.code,
                 "error": exc.user_message,
             }
-            if exc.hint:
+            # Token discipline: if the hint is already a substring of the
+            # error message, the caller would just see duplicated text —
+            # drop it. Only include hints that add new information.
+            if exc.hint and exc.hint not in exc.user_message:
                 payload["hint"] = exc.hint
             return [_text(payload)]
         except Exception as exc:  # noqa: BLE001 — last-resort safety net
@@ -203,20 +206,36 @@ class Dispatcher:
 
     # ---- Handlers ---------------------------------------------------------
 
-    def _help(self, _args: dict[str, Any]) -> dict[str, Any]:
-        """Return a capability overview. Never authenticates, never contacts Odoo."""
+    def _help(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Return a capability overview. Never authenticates, never contacts Odoo.
+
+        Default response is a terse summary + tool one-liners + instance list.
+        Pass ``verbose=true`` to include the cookbook (common_patterns with
+        examples) and gotchas — useful at the start of a session, but ~3x the
+        token cost.
+        """
+        verbose = bool(args.get("verbose") or False)
         instances = [
             _instance_summary(name, rt, self.app.prod_guard.is_unlocked(name))
             for name, rt in self.app.instances.items()
         ]
-        payload: dict[str, Any] = {
-            "version": __version__,
-            "summary": _HELP_SUMMARY,
-            "common_patterns": _HELP_COMMON_PATTERNS,
-            "gotchas": _HELP_GOTCHAS,
-            "denylist_size": len(MODEL_DENYLIST),
-            "instances": instances,
-        }
+        payload: dict[str, Any]
+        if verbose:
+            payload = {
+                "version": __version__,
+                "summary": _HELP_SUMMARY,
+                "common_patterns": _HELP_COMMON_PATTERNS,
+                "gotchas": _HELP_GOTCHAS,
+                "denylist_size": len(MODEL_DENYLIST),
+                "instances": instances,
+            }
+        else:
+            payload = {
+                "version": __version__,
+                "summary": _HELP_SUMMARY_TERSE,
+                "tools": _HELP_TOOLS_TERSE,
+                "instances": instances,
+            }
         self._audit("odoo_help", Operation.HELP, None, None, 0, False, {})
         return payload
 
@@ -240,17 +259,41 @@ class Dispatcher:
     def _describe_model(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_describe_model", args, Operation.FIELDS_GET)
         assert ctx.model is not None
-        # Keep only the schema-relevant bits so the response stays compact.
-        keep = {"type", "string", "required", "readonly", "help", "relation", "_sensitive", "_note"}
+        verbose = bool(args.get("verbose") or False)
+        # Default: only the bits Claude actually needs to choose fields.
+        # Verbose: full schema (help text, relation, readonly, _note).
+        if verbose:
+            keep = {
+                "type",
+                "string",
+                "required",
+                "readonly",
+                "help",
+                "relation",
+                "_sensitive",
+                "_note",
+            }
+        else:
+            keep = {"type", "string", "required", "_sensitive"}
         raw = redact_fields_get(
             ctx.model,
             ctx.rt.client.fields_get(ctx.model),
             instance_overrides=ctx.rt.config.sensitive_fields,
             extra_redacted=ctx.rt.extra_redacted,
         )
-        filtered = {
-            fname: {k: v for k, v in meta.items() if k in keep} for fname, meta in raw.items()
-        }
+        if verbose:
+            filtered = {
+                fname: {k: v for k, v in meta.items() if k in keep} for fname, meta in raw.items()
+            }
+        else:
+            # Drop falsy required / _sensitive entries — they add no signal
+            # but ~15 chars per field. type + string are always kept.
+            filtered = {
+                fname: {
+                    k: v for k, v in meta.items() if k in keep and (k in {"type", "string"} or v)
+                }
+                for fname, meta in raw.items()
+            }
         self._audit_ok(ctx, {"field_count": len(filtered)}, args)
         return {"model": ctx.model, "fields": filtered}
 
@@ -339,6 +382,10 @@ class Dispatcher:
             instance_overrides=overrides,
             extra_redacted=rt.extra_redacted,
         )
+        # Token discipline: Odoo sometimes returns extras like __last_update
+        # or display_name that the caller didn't ask for. Strip anything not
+        # explicitly requested, but always keep id (the record key).
+        redacted = _strip_extra_fields(redacted, fields)
         self._audit_ok(
             ctx,
             {
@@ -414,6 +461,12 @@ class Dispatcher:
             orderby=_optional_str(args, "orderby"),
             lazy=lazy,
         )
+        # Token discipline: Odoo returns a literal __domain per group for
+        # drill-down, but Claude rarely uses it. Drop unless caller opts in.
+        if not bool(args.get("include_domain") or False):
+            for row in rows:
+                if isinstance(row, dict):
+                    row.pop("__domain", None)
         self._audit_ok(
             ctx,
             {
@@ -458,6 +511,8 @@ class Dispatcher:
             instance_overrides=overrides,
             extra_redacted=rt.extra_redacted,
         )
+        # Strip extras Odoo added (__last_update, display_name when not asked).
+        redacted = _strip_extra_fields(redacted, fields)
         self._audit_ok(
             ctx,
             {"record_count": len(redacted), "field_count": len(fields), "id_count": len(ids)},
@@ -833,6 +888,22 @@ def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
 
+def _strip_extra_fields(
+    records: list[dict[str, Any]], requested: list[str]
+) -> list[dict[str, Any]]:
+    """Drop fields the caller didn't explicitly request.
+
+    Odoo's ``search_read`` / ``read`` may return ``__last_update`` and
+    ``display_name`` even when those aren't in ``fields``. They bloat every
+    record (display_name alone can be 50+ chars). Strip anything not in the
+    caller's requested set, but always keep ``id`` — every consumer needs
+    the record key.
+    """
+    keep: set[str] = set(requested)
+    keep.add("id")
+    return [{k: v for k, v in rec.items() if k in keep} for rec in records]
+
+
 _DRY_RUN_NOTE = (
     "This was a dry run. To commit, call {tool} again with "
     "dry_run=false and confirmation_token set to the token above."
@@ -842,6 +913,38 @@ _DRY_RUN_NOTE = (
 # ---------------------------------------------------------------------------
 # odoo_help content — hardcoded knowledge, no Odoo calls
 # ---------------------------------------------------------------------------
+
+
+_HELP_SUMMARY_TERSE = (
+    "Security-gated Odoo over XML-RPC: per-instance allowlists, domain sandbox, "
+    "field redaction, prod-write guard with dry-run + confirmation tokens. "
+    "Call odoo_help(verbose=true) for the full cookbook (patterns + gotchas)."
+)
+
+
+_HELP_TOOLS_TERSE: list[dict[str, str]] = [
+    {"name": "odoo_help", "purpose": "Capability overview. Pass verbose=true for cookbook."},
+    {"name": "odoo_list_instances", "purpose": "List configured instances + their modes."},
+    {
+        "name": "odoo_describe_model",
+        "purpose": "Field schema for a model. Pass verbose=true for help text + relations.",
+    },
+    {"name": "odoo_lookup", "purpose": "Fast name ilike lookup -> id + display_name."},
+    {"name": "odoo_search_read", "purpose": "Search + read with explicit fields list."},
+    {"name": "odoo_search_count", "purpose": "Count records matching a domain."},
+    {
+        "name": "odoo_read_group",
+        "purpose": "Aggregations / dashboards. Pass include_domain=true for drill-down domains.",
+    },
+    {"name": "odoo_read", "purpose": "Read records by id with explicit fields."},
+    {"name": "odoo_create", "purpose": "Create record. Prod: dry_run -> token -> commit."},
+    {"name": "odoo_write", "purpose": "Update records. Prod: dry_run -> token -> commit."},
+    {
+        "name": "odoo_archive_or_delete",
+        "purpose": "Archive (reversible) or delete (permanent). Always ask user which.",
+    },
+    {"name": "odoo_enable_prod_writes", "purpose": "Unlock prod writes for 15 minutes."},
+]
 
 
 _HELP_SUMMARY = (

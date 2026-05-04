@@ -210,7 +210,8 @@ def test_lookup_default_limit_is_ten(tmp_path: Path) -> None:
 def test_lookup_in_help_patterns(tmp_path: Path) -> None:
     app, _ = _build_app(tmp_path)
     dispatcher = Dispatcher(app)
-    contents = asyncio.run(dispatcher.call("odoo_help", {}))
+    # common_patterns lives in verbose mode (v0.11.0+).
+    contents = asyncio.run(dispatcher.call("odoo_help", {"verbose": True}))
     payload = json.loads(contents[0].text)
     patterns = payload["common_patterns"]
     assert any("odoo_lookup" in (p.get("use") or "") for p in patterns)

@@ -128,7 +128,8 @@ def test_tool_description_mentions_archive_first() -> None:
 def test_help_gotchas_mention_archive_or_delete(tmp_path: Path) -> None:
     app, _ = _build_app(tmp_path)
     dispatcher = Dispatcher(app)
-    contents = asyncio.run(dispatcher.call("odoo_help", {}))
+    # gotchas lives in verbose mode (v0.11.0+).
+    contents = asyncio.run(dispatcher.call("odoo_help", {"verbose": True}))
     payload = json.loads(contents[0].text)
     gotchas = payload["gotchas"]
     assert any("archive" in g.lower() for g in gotchas)
