@@ -52,7 +52,33 @@ Reminder: the MCP applies its own allowlist + redaction layers on top, but
 record-level scoping is enforced by Odoo. If Odoo's rules are loose, the
 MCP can't tighten them.
 
-### 4. Confirm GitHub access
+### 4. Map the klant's custom-field surface (`scan-custom`)
+
+After the colleague's MCP is configured for the klant instance, run:
+
+```bash
+odoo-mcp scan-custom <instance>             # human-readable report
+odoo-mcp scan-custom <instance> --toml      # paste-ready config snippet
+```
+
+The scan diffs the klant's Odoo schema against the embedded Odoo
+Community 18.0 reference and surfaces:
+
+- **Custom models** (Studio + bespoke modules + OCA additions).
+- **Custom fields on standard models** with a sensitivity verdict
+  (`BLOCKED` / `GATED` / `LIKELY_SENSITIVE` / `LIKELY_FINANCIAL` /
+  `BINARY_AUTO_STRIPPED` / `UNCERTAIN`). Dutch / Flemish keywords
+  (`loon`, `geboorte`, `vertrouwelijk`, `rijksregister`, etc.) are
+  recognised.
+
+Take the `--toml` output, review each entry, and paste the resulting
+`custom_sensitive_field_patterns` + `sensitive_fields` blocks into the
+klant's instance section of `~/.odoo-mcp/config.toml`. UNCERTAIN
+findings warrant a manual look — they fall through to the safe default
+(no opt-in needed for Claude to read them) but might still be klant-
+sensitive in context.
+
+### 5. Confirm GitHub access
 
 The MCP installer pulls the latest release from
 `deltix-consulting/odoo-mcp` (private repo). The colleague must be able to

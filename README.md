@@ -237,6 +237,18 @@ goes through the full prod-guard + dry-run + confirmation-token flow.
 | `odoo-mcp audit` | Audit log inspector: filter by instance, tool, date, result |
 | `odoo-mcp cache --info` | Show persistent fields-cache stats (rows, size, age) |
 | `odoo-mcp cache --clear` | Drop persistent fields-cache rows (`--instance NAME` to scope) |
+| `odoo-mcp scan-custom INSTANCE` | Discover klant-custom models and fields, classify on sensitivity, suggest TOML overrides. `--toml` / `--json` flags switch the output format. |
+
+### Custom-surface scan (`scan-custom`)
+
+When onboarding a new klant, run `odoo-mcp scan-custom <instance>` after
+`doctor` succeeds. It connects with the configured credentials, walks
+`ir.model` + `fields_get`, diffs against the embedded Odoo Community 18.0
+reference, and tells you which custom models exist and which fields on
+standard models are likely sensitive (with Dutch / Flemish keyword
+coverage for BE klanten). Re-run with `--toml` to get a paste-ready
+config snippet for `~/.odoo-mcp/config.toml`. The scan reads schema only
+— it never reads record contents.
 
 ## Production write workflow
 

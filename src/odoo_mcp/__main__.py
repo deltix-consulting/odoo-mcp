@@ -20,6 +20,8 @@ Usage::
     python -m odoo_mcp uninstall                # remove config, credentials, launcher, registration
     python -m odoo_mcp update                   # self-update from git + uv sync
     python -m odoo_mcp update --check           # check for a newer release only
+    python -m odoo_mcp scan-custom INSTANCE     # discover klant-custom models / fields
+                  [--toml | --json]
 """
 
 from __future__ import annotations
@@ -83,6 +85,11 @@ def main() -> int:
         from . import cache_cli
 
         return cache_cli.main(argv[1:])
+
+    if argv and argv[0] == "scan-custom":
+        from . import scan_cli
+
+        return scan_cli.main(argv[1:])
 
     if argv and argv[0] == "launch-env":
         from .setup_wizard import print_launch_env

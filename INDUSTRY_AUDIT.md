@@ -179,7 +179,49 @@ operates under.
   sensitive transcripts but are extremely klant-specific. Left to the
   per-instance override mechanism.
 
-## 6. Rerunning the audit
+## 6. Per-klant scan (v0.10+)
+
+The audit above describes the **standard** Odoo Community 18.0 surface.
+Every klant has Studio fields, OCA modules, and bespoke custom modules
+that we cannot anticipate from upstream alone. Use `scan-custom` after
+onboarding any new klant to discover that custom surface:
+
+```bash
+odoo-mcp scan-custom <instance>             # human-readable report
+odoo-mcp scan-custom <instance> --toml      # paste-ready config snippet
+odoo-mcp scan-custom <instance> --json      # for scripting
+```
+
+The command authenticates as the configured MCP user, enumerates every
+model and field via `ir.model.search_read` + `fields_get`, diffs against
+the embedded Odoo 18.0 reference (`src/odoo_mcp/_odoo_reference.py`),
+and classifies each non-standard field on sensitivity. Each finding gets
+one of: `BLOCKED` (already covered by built-in always-redacted regex),
+`GATED` (already in `_DEFAULT_HIDDEN`), `LIKELY_SENSITIVE` (name or
+help-text matches a PII / confidentiality keyword — Dutch / Flemish
+included for BE klanten: `loon`, `geboorte`, `vertrouwelijk`,
+`persoonlijk`, `rijksregister`, `geslacht`, `burgerlijk`),
+`LIKELY_FINANCIAL` (numeric type + financial keyword),
+`BINARY_AUTO_STRIPPED` (informational), or `UNCERTAIN` (requires
+manual review).
+
+Worked example from a fictional klantx:
+
+```text
+== Custom fields on standard models ==
+  hr.employee  [3 custom field(s)]
+    x_studio_salary_grade   [many2one ] BLOCKED          — already covered by built-in policy
+    x_loon_groep            [selection] LIKELY_SENSITIVE — name contains 'loon'
+    x_klantx_pin            [char     ] UNCERTAIN        — review manually
+```
+
+Then `--toml` produces a snippet you can paste under `[instances.klantx]`.
+
+The command **deliberately bypasses the dispatcher denylist**. It is
+admin tooling operated by the consultant, not a Claude tool call. The
+denylist exists to constrain Claude, not the operator.
+
+## 7. Rerunning the audit
 
 When Odoo ships a new major version, the methodology in section 1 is
 the playbook. The high-leverage searches are:
@@ -200,3 +242,16 @@ grep -rh "fields\." addons/hr*/ --include="*.py" \
 
 Update this document with the new findings, bump
 `MODEL_DENYLIST` / `_DEFAULT_HIDDEN`, and ship a new version.
+
+After bumping `MODEL_DENYLIST` / `_DEFAULT_HIDDEN`, regenerate the
+embedded standard-model reference used by `scan-custom`:
+
+```bash
+git clone --branch <new-major> --depth 1 \
+  https://github.com/odoo/odoo.git /tmp/odoo-audit/odoo
+uv run python scripts/regen_odoo_reference.py --version <new-major>
+```
+
+This rewrites `src/odoo_mcp/_odoo_reference.py`. Commit it alongside the
+audit changes; the file is auto-generated but committed so the MCP has
+zero runtime dependency on Odoo source.
