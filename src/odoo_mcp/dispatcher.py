@@ -38,10 +38,17 @@ from . import __version__
 from .audit import AuditEvent, AuditLog
 from .client import OdooClient
 from .config import AppConfig, InstanceConfig
-from .errors import FieldPolicyError, InstanceNotFoundError, OdooMcpError, ProdGuardError
+from .errors import (
+    FieldPolicyError,
+    InstanceNotFoundError,
+    ModelNotAllowedError,
+    OdooMcpError,
+    ProdGuardError,
+)
 from .security.allowlist import (
     ALLOWLIST_WILDCARD,
     MODEL_DENYLIST,
+    MODEL_WRITE_BLOCKLIST,
     Operation,
     check_model,
     check_operation,
@@ -529,6 +536,7 @@ class Dispatcher:
         ctx = self._begin("odoo_create", args, Operation.CREATE)
         assert ctx.model is not None
         rt, model = ctx.rt, ctx.model
+        _refuse_write_blocklisted(model)
         values = _require_dict(args, "values")
         self.app.prod_guard.check_write(ctx.instance, rt.config.production)
 
@@ -569,6 +577,7 @@ class Dispatcher:
         ctx = self._begin("odoo_write", args, Operation.WRITE)
         assert ctx.model is not None
         rt, model = ctx.rt, ctx.model
+        _refuse_write_blocklisted(model)
         ids = _require_list_of_int(args, "ids")
         values = _require_dict(args, "values")
         self.app.prod_guard.check_write(ctx.instance, rt.config.production)
@@ -626,6 +635,7 @@ class Dispatcher:
         ctx = self._begin("odoo_archive_or_delete", args, op)
         assert ctx.model is not None
         rt, model = ctx.rt, ctx.model
+        _refuse_write_blocklisted(model)
         ids = _require_list_of_int(args, "ids")
 
         cap = rt.config.max_records_hard_cap
@@ -886,6 +896,22 @@ def _text(payload: dict[str, Any], *, default: Callable[[Any], Any] | None = Non
 
 def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
+
+
+def _refuse_write_blocklisted(model: str) -> None:
+    """Refuse any write-path call against a model in :data:`MODEL_WRITE_BLOCKLIST`.
+
+    Runs BEFORE prod-guard / dry-run logic so the refusal is the same on
+    dev and prod, and so an unlocked prod-write window cannot be used to
+    sneak a write through. The hint deliberately does NOT enumerate
+    workarounds — see v0.13.1 F2 (no-suggestion error policy).
+    """
+    if model in MODEL_WRITE_BLOCKLIST:
+        raise ModelNotAllowedError(
+            f"Model {model!r} is read-only via the MCP. "
+            f"This model is exposed for reading but writes (create / update / "
+            f"archive / delete) are refused as a hard safety invariant."
+        )
 
 
 def _strip_extra_fields(

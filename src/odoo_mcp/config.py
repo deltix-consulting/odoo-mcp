@@ -47,6 +47,7 @@ _VALID_DEFAULT_KEYS: Final[frozenset[str]] = frozenset(
         "audit_log",
         "allowed_models",
         "fields_cache_path",
+        "rotation_warning_days",
     }
 )
 
@@ -80,6 +81,12 @@ class Defaults:
     # Empty string disables the persistent fields cache entirely (the L1
     # in-memory cache on OdooClient still applies).
     fields_cache_path: str = DEFAULT_FIELDS_CACHE
+    # Doctor emits a warning when an instance's API key was last set more
+    # than this many days ago. Odoo doesn't enforce a key TTL; this is the
+    # MCP's local reminder. Set lower for stricter regimes; setting to 0
+    # effectively warns every run. Recorded set-time comes from the OS
+    # credential store via :mod:`odoo_mcp._credstore`.
+    rotation_warning_days: int = 90
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +199,9 @@ def _parse_defaults(raw: dict[str, Any]) -> Defaults:
         audit_log=str(raw.get("audit_log", DEFAULT_AUDIT_LOG)),
         allowed_models=tuple(_require_str_list(raw, "allowed_models", _DEFAULT_ALLOWED_MODELS)),
         fields_cache_path=fields_cache_raw,
+        rotation_warning_days=_require_int(
+            raw, "rotation_warning_days", 90, minimum=0, maximum=3650
+        ),
     )
 
 

@@ -147,16 +147,16 @@ _DEFAULT_HIDDEN: Final[dict[str, frozenset[str]]] = {
     # Vehicle identifiers are PII (license plate links to a person) and
     # the description / VIN is similarly tracked.
     "fleet.vehicle": frozenset({"license_plate", "vin_sn", "description"}),
-    # mail.message is a cross-model side-door: a single message row can
-    # reference any res_model (including models NOT on the allowlist), and
-    # its `body` / `subject` / email fields can contain anything — HR notes,
-    # password resets, private discussions, quoted emails. We hide these by
-    # default so a broad read of mail.message gives back only metadata
-    # (timestamps, message_type, res_model, res_id, message counts). Opt
-    # in per-field via `allow_sensitive_fields` when the use case is clear.
-    "mail.message": frozenset(
-        {"body", "subject", "author_id", "email_from", "email_to", "email_cc"}
-    ),
+    # mail.message body / subject / author / email fields are kept
+    # readable by default for Claude — chat messages and log notes are a
+    # primary read use case. The protection against creating mail.message
+    # records via odoo_create lives in `MODEL_WRITE_BLOCKLIST` (see
+    # `odoo_mcp.security.allowlist`); that blocklist refuses every write
+    # path against this model regardless of prod-guard state, so Claude
+    # cannot use the MCP as a side door to send messages, post log
+    # notes, or impersonate authors. Reading remains gated by the
+    # standard allowlist + denylist + per-instance overrides.
+    "mail.message": frozenset(),
     # Calendar event descriptions can contain confidential meeting notes
     # (1-on-1s, board topics, acquisition talks). Metadata is fine by default.
     # `videocall_location` and `access_token` give direct join-link access.

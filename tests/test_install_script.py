@@ -45,6 +45,18 @@ def test_install_script_has_safety_flags() -> None:
     assert "--skip-verification" in text, (
         "install.sh must accept --skip-verification to bypass attestation check"
     )
+    # v0.13.1 B1: bootstrap Homebrew when both gh and brew are missing.
+    assert "Homebrew/install" in text, (
+        "install.sh must offer the official Homebrew installer when brew is missing"
+    )
+    assert "brew shellenv" in text, "install.sh must source brew shellenv after installing Homebrew"
+    # v0.13.1 B2: lenient attestation verification — broader pattern set.
+    assert "404" in text, "install.sh attestation lenience must recognise 404"
+    assert "failed to fetch" in text, (
+        "install.sh attestation lenience must recognise fetch failures"
+    )
+    # v0.13.1 B3: persist ~/.local/bin on PATH for future shells.
+    assert ".zshrc" in text, "install.sh must touch ~/.zshrc to persist PATH"
 
 
 def _load_extract_module() -> object:

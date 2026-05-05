@@ -136,6 +136,27 @@ MODEL_DENYLIST: Final[frozenset[str]] = frozenset(
 )
 
 
+# Models that are read-allowed but write-forbidden through the MCP. Even
+# when production writes are unlocked, ``create`` / ``write`` /
+# ``archive`` / ``unlink`` calls against these models are refused. This
+# lets us expose ``mail.message`` (chat messages and log notes) and a
+# couple of related notification tables as data — Claude can read them
+# to answer questions — without giving Claude a side door to actually
+# send messages, post log notes, manage followers, or write into the
+# notification table on a user's behalf.
+#
+# Like :data:`MODEL_DENYLIST`, this is a hard safety invariant: it is
+# NOT overrideable from config. Adding to it tightens; removing should
+# be very rare and reviewed.
+MODEL_WRITE_BLOCKLIST: Final[frozenset[str]] = frozenset(
+    {
+        "mail.message",
+        "mail.followers",
+        "mail.notification",
+    }
+)
+
+
 class Operation(StrEnum):
     """The only operations the MCP is allowed to execute against Odoo."""
 
