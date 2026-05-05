@@ -182,14 +182,25 @@ try {
     Write-Host "  odoo-mcp CLI installed."
 
     # uv puts tool entry points in %USERPROFILE%\.local\bin on Windows.
+    # Make it available NOW (so the setup wizard launched below can resolve
+    # odoo-mcp without restarting PowerShell) AND persist it on the User
+    # PATH so future shells see it. We avoid appending if it's already
+    # there, so re-running the installer doesn't pile up duplicates.
     $localBin = Join-Path $env:USERPROFILE '.local\bin'
     if ($env:Path -notlike "*$localBin*") {
+        $env:Path = "$localBin;$env:Path"
+    }
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (-not $userPath) { $userPath = '' }
+    if (($userPath -split ';') -notcontains $localBin) {
+        $newUserPath = if ($userPath) { "$userPath;$localBin" } else { $localBin }
+        [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
         Write-Host ''
-        Write-Host "  NOTE: '$localBin' is not on your PATH yet."
-        Write-Host '  Add it via System Properties -> Environment Variables (User PATH),'
-        Write-Host '  or run this in PowerShell:'
-        Write-Host "    [Environment]::SetEnvironmentVariable('Path', `"`$([Environment]::GetEnvironmentVariable('Path','User'));$localBin`", 'User')"
-        Write-Host '  Then open a new PowerShell window so odoo-mcp resolves correctly.'
+        Write-Host "  Added '$localBin' to your User PATH."
+        Write-Host '  Open a new PowerShell window before using odoo-mcp commands.'
+    }
+    if (-not (Have-Cmd 'odoo-mcp')) {
+        Write-Host "  Warning: 'odoo-mcp' is not on PATH after install." -ForegroundColor Yellow
     }
 } finally {
     Pop-Location

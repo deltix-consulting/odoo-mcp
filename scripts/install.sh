@@ -71,8 +71,51 @@ fi
 # ----------------------------------------------------------------------
 step 3 "Checking for gh CLI and authentication"
 if ! command -v gh >/dev/null 2>&1; then
-    fail "gh CLI is required to install from a private repo." \
-         "Install it and authenticate: brew install gh && gh auth login"
+    # gh missing. Most macs that don't have gh also don't have brew (we
+    # used to assume brew was always there — it isn't on a fresh OS).
+    # Detect both, and offer to bootstrap brew from the official installer
+    # only with explicit consent: the brew installer modifies the user's
+    # system (writes to /opt/homebrew, edits shell rc files), so we never
+    # run it silently.
+    if ! command -v brew >/dev/null 2>&1; then
+        echo "  Neither gh nor Homebrew is installed."
+        if [ -t 0 ]; then
+            printf '  Install Homebrew now? This runs the official installer\n'
+            printf '  from https://brew.sh and may modify your shell config. [y/N] '
+            read -r reply
+            case "$reply" in
+                y|Y|yes|YES) ;;
+                *)
+                    fail "Homebrew is required to install gh." \
+                         "Install Homebrew first from https://brew.sh, then re-run this installer."
+                    ;;
+            esac
+        else
+            fail "Homebrew is required to install gh, and this is a non-interactive shell." \
+                 "Install Homebrew first from https://brew.sh, then re-run this installer."
+        fi
+        echo "  Installing Homebrew via the official installer..."
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        # The brew installer prints which `eval` line to add. Apple Silicon
+        # uses /opt/homebrew, Intel /usr/local. Source whichever exists so
+        # the current shell sees brew.
+        if [ -x /opt/homebrew/bin/brew ]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+        elif [ -x /usr/local/bin/brew ]; then
+            eval "$(/usr/local/bin/brew shellenv)"
+        fi
+        if ! command -v brew >/dev/null 2>&1; then
+            fail "Homebrew was installed but is not on PATH." \
+                 "Open a new shell and re-run this installer."
+        fi
+        echo "  Homebrew installed: $(command -v brew)"
+    fi
+    echo "  Installing gh via Homebrew..."
+    brew install gh
+    if ! command -v gh >/dev/null 2>&1; then
+        fail "gh installed but is not on PATH." \
+             "Open a new shell and re-run this installer."
+    fi
 fi
 if ! gh auth status >/dev/null 2>&1; then
     fail "gh CLI is not authenticated." \
@@ -134,13 +177,17 @@ if [ "$FETCHED_VIA_RELEASE" = "1" ]; then
     else
         # `gh attestation verify` distinguishes hard verification failure
         # (signature mismatch) from environmental failure (offline, gh
-        # not authed, attestation not yet published) only via exit code
-        # plus context. We treat the situation pragmatically: if
-        # `gh auth status` succeeds we already know gh is wired up, so
-        # any non-zero exit from `gh attestation verify` is treated as a
-        # hard failure. If gh auth is broken, we treat the whole step
-        # as environmental — same soft-fail policy as
-        # `odoo-mcp update`.
+        # not authed, attestation absent, attestation server 404'd) only
+        # via exit code plus context. We err on the lenient side: if
+        # `gh auth status` is OK we still treat several known-environmental
+        # message patterns as soft-fails (warn + interactive prompt). The
+        # only case that hard-fails is exit-code-1 with output that
+        # matches NONE of those patterns — which is what a real signature
+        # mismatch looks like. Trade-off: a tampered tarball whose
+        # attestation server happens to 404 would slip past, which is
+        # extremely unlikely; in exchange, releases made while the repo
+        # was private (no attestation ever published) install cleanly.
+        # See pilot blocker B2 (v0.13.1) for the rationale.
         if gh auth status >/dev/null 2>&1; then
             VERIFY_OUTPUT=""
             if VERIFY_OUTPUT="$(gh attestation verify \
@@ -149,13 +196,17 @@ if [ "$FETCHED_VIA_RELEASE" = "1" ]; then
                     "$TARBALL" 2>&1)"; then
                 echo "  Attestation verified."
             else
-                # Distinguish: if the message mentions "no attestations
-                # found" we treat it as environmental (free-tier orgs
-                # may have attestations disabled per 0.6.1). Anything
-                # else is a hard failure.
-                if printf '%s' "$VERIFY_OUTPUT" | grep -qi "no attestations"; then
-                    printf '\n  \033[33mWarning:\033[0m no attestations found for %s.\n' "$LATEST_TAG"
-                    printf '  This can happen on free-tier GitHub orgs.\n'
+                # Patterns that mean "no attestation could be retrieved"
+                # (rather than "the attestation says this tarball is
+                # tampered"). Case-insensitive grep across all known
+                # variants we've seen from gh / GitHub's API: missing,
+                # 404, generic fetch failure.
+                if printf '%s' "$VERIFY_OUTPUT" | grep -qiE 'no[[:space:]].*attestation|404|not found|failed to fetch'; then
+                    printf '\n  \033[33mWarning:\033[0m no attestation available for %s.\n' "$LATEST_TAG"
+                    printf '  Reason: %s\n' "$(printf '%s' "$VERIFY_OUTPUT" | head -n 1)"
+                    printf '  This can happen on free-tier GitHub orgs, for releases\n'
+                    printf '  cut while the repo was private, or when GitHub'\''s attestation\n'
+                    printf '  service is unreachable.\n'
                     if [ -t 0 ]; then
                         printf '  Proceed anyway? [y/N] '
                         read -r reply
@@ -203,17 +254,33 @@ step 8 "Installing odoo-mcp on PATH (uv tool)"
 # without re-running `uv tool install`.
 uv tool install --editable . --force >/dev/null
 echo "  odoo-mcp CLI installed (run 'odoo-mcp --help' to verify)"
-# Make sure ~/.local/bin is on PATH for the current shell session.
+
+# Make ~/.local/bin available NOW (so the setup wizard launched below
+# can resolve `odoo-mcp` without a shell restart) AND persist it for
+# future shells. The persisted line is appended only if it isn't
+# already present, so re-running the installer doesn't pile up
+# duplicates.
+LOCAL_BIN="$HOME/.local/bin"
 case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ;;
-    *)
-        echo
-        echo "  NOTE: '$HOME/.local/bin' is not on your PATH yet."
-        echo "  Add this line to ~/.zshrc (or ~/.bash_profile):"
-        echo "      export PATH=\"\$HOME/.local/bin:\$PATH\""
-        echo "  Then open a new terminal so 'odoo-mcp' resolves correctly."
-        ;;
+    *":$LOCAL_BIN:"*) ;;
+    *) export PATH="$LOCAL_BIN:$PATH" ;;
 esac
+PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+case "${SHELL:-}" in
+    */zsh)  RC="$HOME/.zshrc" ;;
+    */bash) RC="$HOME/.bashrc" ;;
+    *)      RC="$HOME/.zshrc" ;;  # macOS default
+esac
+if ! command -v odoo-mcp >/dev/null 2>&1; then
+    echo "  Warning: 'odoo-mcp' is not on PATH after install."
+fi
+if [ -f "$RC" ] && grep -Fxq "$PATH_LINE" "$RC" 2>/dev/null; then
+    : # already present
+else
+    printf '\n# Added by odoo-mcp installer\n%s\n' "$PATH_LINE" >> "$RC"
+    echo "  Added '$LOCAL_BIN' to PATH in $RC."
+    echo "  Run 'source $RC' (or restart your terminal) before using odoo-mcp commands."
+fi
 
 # ----------------------------------------------------------------------
 step 9 "Launching setup wizard"

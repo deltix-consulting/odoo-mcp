@@ -27,6 +27,71 @@ breaking change explicitly in this file.
   into the new cross-platform keyring schema on first successful read, so
   older users do not need to re-enter API keys after updating.
 
+## [0.13.1] - 2026-05-05
+
+Pilot-blocker pass after Timon's fresh-Mac install run, plus four
+operator-facing tweaks. No security model changes; the `mail.message`
+read default is loosened but a new hard write-blocklist closes the
+side-door it would otherwise open.
+
+### Fixed
+
+- **Installer survives a Mac without Homebrew (B1).** `install.sh` now
+  detects missing `brew` *and* missing `gh`, prompts before running the
+  official Homebrew installer, sources the right `brew shellenv` for
+  Apple Silicon vs. Intel, and falls back to a clear "install Homebrew
+  from https://brew.sh first" message on refusal or non-interactive
+  shells.
+- **Attestation verification is more lenient against environmental
+  failures (B2).** `gh attestation verify` failures whose output matches
+  any of `no.*attestation`, `404`, `not found`, or `failed to fetch`
+  (case-insensitive) now soft-fail with a y/N prompt instead of
+  hard-failing. A real signature mismatch (exit 1, none of those
+  patterns) still aborts. Same lenience applied to `install.ps1`.
+- **`odoo-mcp` resolvable in the same shell after install (B3).**
+  `install.sh` now exports `~/.local/bin` to `$PATH` for the running
+  process AND appends the export line to `~/.zshrc` / `~/.bashrc` (per
+  `$SHELL`) — only if not already present. `install.ps1` mirrors this:
+  prepends `%USERPROFILE%\.local\bin` to the current `$env:Path` and
+  persists it on the User PATH idempotently.
+- **`odoo-mcp doctor` finds Keychain credentials (B4).**
+  `run_doctor` now calls `setup_wizard.load_credentials_into_os()` at
+  the top of the run (after config load, before per-instance checks).
+  Credstore failures are caught and surfaced as a `!` warning rather
+  than aborting doctor — the per-instance "missing env var" check is
+  still the loud signal if creds are genuinely absent.
+
+### Changed
+
+- **`mail.message` body / subject / author / email fields are readable
+  by default (F1).** Removed from `_DEFAULT_HIDDEN["mail.message"]`.
+  The cross-model side-door concern is now addressed by a separate hard
+  invariant: a new `MODEL_WRITE_BLOCKLIST` in
+  `odoo_mcp.security.allowlist` covering `mail.message`, `mail.followers`,
+  `mail.notification`. Every write-path handler (`_create`, `_write`,
+  `_archive_or_delete`) refuses these models BEFORE prod-guard runs, so
+  even an unlocked prod-write window cannot be used to send messages,
+  post log notes, or impersonate authors via the MCP. Like
+  `MODEL_DENYLIST`, the new blocklist is non-overrideable from config.
+  Existing callers that pass `allow_sensitive_fields=["body"]` continue
+  to work — the argument is simply a no-op for these now-readable fields.
+- **Error hints no longer coach toward workarounds (F2).**
+  `ModelNotAllowedError.hint` becomes "Contact your MCP administrator
+  if this model should be available." `ProdGuardError.hint` becomes
+  "Production writes require explicit unlock by the operator."
+  Other hints (capability enumeration, naming discovery, troubleshooting)
+  are unchanged because they don't suggest workarounds.
+- **API key rotation reminder (F3).** `_credstore.set_secret` now
+  writes a sibling timestamp entry (under `odoo-mcp/{instance}/_meta`,
+  ISO-8601 UTC) for every tracked secret (currently anything ending
+  in `_API_KEY`). `odoo-mcp doctor` reads that timestamp and emits a
+  `!` warning per instance whose key is older than
+  `rotation_warning_days` (new `[defaults]` key, default 90, range
+  0-3650). Instances with no recorded timestamp get a one-line nudge
+  to rotate-once and start tracking. `setup --rotate-key NAME` records
+  a fresh timestamp automatically. `SECURITY.md` user-responsibilities
+  section expanded with the rotation policy.
+
 ## [0.13.0] - 2026-05-05
 
 Portability + safety pass before public publication.

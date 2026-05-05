@@ -8,6 +8,7 @@ from odoo_mcp.errors import ModelNotAllowedError, OperationNotAllowedError
 from odoo_mcp.security.allowlist import (
     ALLOWLIST_WILDCARD,
     MODEL_DENYLIST,
+    MODEL_WRITE_BLOCKLIST,
     Operation,
     check_model,
     check_operation,
@@ -245,3 +246,21 @@ def test_denylist_contents_are_locked_in() -> None:
     }
     missing = required - MODEL_DENYLIST
     assert not missing, f"MODEL_DENYLIST is missing: {sorted(missing)}"
+
+
+def test_write_blocklist_contents_are_locked_in() -> None:
+    """Pin the write-blocklist contents.
+
+    Like the denylist, this is a hard safety invariant. Adding entries
+    tightens; removing should be very rare and reviewed. The blocklist
+    closes the side-door that opens when ``mail.message`` and friends
+    are made readable by default (v0.13.1 F1) — without it, a write
+    path could be used to send messages or post log notes via the MCP.
+    """
+    required = {
+        "mail.message",
+        "mail.followers",
+        "mail.notification",
+    }
+    missing = required - MODEL_WRITE_BLOCKLIST
+    assert not missing, f"MODEL_WRITE_BLOCKLIST is missing: {sorted(missing)}"

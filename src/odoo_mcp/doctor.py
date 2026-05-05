@@ -19,6 +19,7 @@ Specifically checks:
 
 from __future__ import annotations
 
+import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,10 +27,12 @@ from pathlib import Path
 from . import __version__
 from .audit import AuditLog
 from .client import OdooClient
-from .config import DEFAULT_CONFIG_PATH, load_config
+from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from .credentials import load_credentials
 from .errors import CredentialsError, OdooMcpError
 from .update_check import check_for_update
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -84,6 +87,27 @@ def run_doctor(config_path: Path | None = None) -> int:
         report.print()
         return 1
     report.add("Load config", True, f"from {cfg.path}")
+
+    # --- Credentials from the OS credential store ------------------------
+    # Doctor used to read straight from ``os.environ``, which only worked
+    # when invoked under ``odoo-mcp launch`` (which calls
+    # ``load_credentials_into_os`` itself). Run via ``odoo-mcp doctor``
+    # the env vars are absent and every per-instance check fails with a
+    # bogus "missing env vars" before it can authenticate. Pull from the
+    # credstore here so doctor works standalone. Failures are non-fatal:
+    # if the credstore is broken, the per-instance "credentials" check
+    # below surfaces the missing-env error loudly with the existing
+    # message, which is fine — we don't want a credstore hiccup to abort
+    # doctor entirely.
+    try:
+        from . import setup_wizard
+
+        setup_wizard.load_credentials_into_os()
+    except Exception as exc:  # noqa: BLE001 — informational only, must not abort doctor
+        report.add_warning(
+            "Load credentials from credstore",
+            f"could not preload credentials ({type(exc).__name__}: {exc})",
+        )
 
     # --- Audit log --------------------------------------------------------
     try:
@@ -149,9 +173,55 @@ def run_doctor(config_path: Path | None = None) -> int:
             f"{len(fg)} fields",
         )
 
+    # --- Rotation reminders ----------------------------------------------
+    # Odoo does not enforce a TTL on API keys, so the MCP records the
+    # set-date locally (in the credstore) and surfaces a warning here for
+    # any key older than ``rotation_warning_days``. Best-effort: if the
+    # credstore lookup fails, we don't add a warning — the doctor's
+    # per-instance auth check is the real signal.
+    _check_rotation_warnings(report, cfg)
+
     report.print()
     _print_update_check()
     return 0 if report.ok else 1
+
+
+def _check_rotation_warnings(report: _Report, cfg: AppConfig) -> None:
+    """Warn for any instance whose API key was set too long ago.
+
+    Threshold comes from ``cfg.defaults.rotation_warning_days`` (default
+    90). Instances with no recorded set-time (keys created before the
+    set-time tracking landed) emit a low-volume "no rotation timestamp
+    on file" warning so operators know they can rotate to record one.
+    """
+    from datetime import UTC, datetime
+
+    from . import _credstore
+
+    threshold = cfg.defaults.rotation_warning_days
+    now = datetime.now(UTC)
+    for name, inst_cfg in cfg.instances.items():
+        prefix = inst_cfg.credentials_env_prefix
+        try:
+            set_at = _credstore.get_secret_set_at(name, f"{prefix}_API_KEY")
+        except Exception as exc:  # noqa: BLE001 — best-effort metadata lookup
+            logger.debug("rotation timestamp lookup failed for %s: %s", name, exc)
+            continue
+        if set_at is None:
+            report.add_warning(
+                f"[{name}] API key rotation",
+                "no rotation timestamp on file. Rotate via "
+                f"'odoo-mcp setup --rotate-key {name}' to start tracking.",
+            )
+            continue
+        age_days = (now - set_at).days
+        if age_days >= threshold:
+            report.add_warning(
+                f"[{name}] API key rotation",
+                f"API key was set {age_days} days ago "
+                f"(threshold {threshold}). "
+                f"Consider rotating: odoo-mcp setup --rotate-key {name}",
+            )
 
 
 _YELLOW = "\033[33m"

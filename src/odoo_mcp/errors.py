@@ -164,7 +164,7 @@ class ModelNotAllowedError(OdooMcpError):
 
     @property
     def hint(self) -> str:
-        return "Use odoo_list_instances to see which models are available, or ask your administrator to add this model to the config."
+        return "Contact your MCP administrator if this model should be available."
 
 
 class OperationNotAllowedError(OdooMcpError):
@@ -187,7 +187,7 @@ class ProdGuardError(OdooMcpError):
 
     @property
     def hint(self) -> str:
-        return "Call odoo_enable_prod_writes first to unlock writes for 15 minutes."
+        return "Production writes require explicit unlock by the operator."
 
 
 class DomainSandboxError(OdooMcpError):

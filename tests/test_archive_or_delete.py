@@ -358,6 +358,73 @@ def test_prod_commit_requires_unlock_and_token(tmp_path: Path) -> None:
     assert fake.write_calls == [("res.partner", [1], {"active": False})]
 
 
+# -- Write-blocklist (mail.message etc.) -------------------------------------
+
+
+def test_archive_mail_message_is_refused(tmp_path: Path) -> None:
+    """`mail.message` is in MODEL_WRITE_BLOCKLIST — even archive is refused."""
+    fields = {"id": {"type": "integer"}, "active": {"type": "boolean"}}
+    app, fake = _build_app(tmp_path, fields=fields)
+    dispatcher = Dispatcher(app)
+    payload = _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "model": "mail.message",
+            "ids": [1],
+            "mode": "archive",
+        },
+    )
+    assert payload["ok"] is False
+    assert payload["error_code"] == "model_not_allowed"
+    assert "read-only via the MCP" in payload["error"]
+    # Hint is the new no-suggestion variant, not the old workaround text.
+    assert "ask your administrator" not in payload.get("hint", "")
+    assert fake.write_calls == []
+
+
+def test_delete_mail_message_is_refused(tmp_path: Path) -> None:
+    app, fake = _build_app(tmp_path)
+    dispatcher = Dispatcher(app)
+    payload = _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "model": "mail.message",
+            "ids": [1],
+            "mode": "delete",
+        },
+    )
+    assert payload["ok"] is False
+    assert payload["error_code"] == "model_not_allowed"
+    assert fake.unlink_calls == []
+
+
+def test_blocklist_refusal_runs_before_prod_guard(tmp_path: Path) -> None:
+    """Even with prod writes unlocked, mail.message is refused.
+
+    This is the security invariant for F1: the write-blocklist is a
+    hard refusal that runs before prod-guard, so an unlocked prod
+    window cannot be used to send messages.
+    """
+    fields = {"id": {"type": "integer"}, "active": {"type": "boolean"}}
+    app, fake = _build_app(tmp_path, production=True, fields=fields)
+    app.prod_guard.unlock("prod", production=True)
+    dispatcher = Dispatcher(app)
+    payload = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "model": "mail.message",
+            "ids": [1],
+            "mode": "delete",
+        },
+    )
+    assert payload["ok"] is False
+    assert payload["error_code"] == "model_not_allowed"
+    assert fake.unlink_calls == []
+
+
 # -- Audit --------------------------------------------------------------------
 
 
