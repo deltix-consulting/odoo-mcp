@@ -7,7 +7,8 @@ Invoked via::
     odoo-mcp setup --remove  # remove an instance
 
 All prompts use stdlib ``input()`` / ``getpass.getpass()``. Credentials are
-stored in the macOS Keychain via ``security(1)``. No external dependencies.
+stored in the OS credential store (macOS Keychain / Windows Credential Manager
+/ Linux libsecret) via the cross-platform ``keyring`` package.
 """
 
 from __future__ import annotations
@@ -17,7 +18,9 @@ import getpass
 import json
 import logging
 import os
+import platform
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,19 +28,41 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from . import _credstore
 from .config import _DEFAULT_ALLOWED_MODELS, DEFAULT_CONFIG_PATH, _check_file_permissions
 
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
+
+def _claude_desktop_config_path() -> Path:
+    """Return the platform-specific path to ``claude_desktop_config.json``.
+
+    - macOS: ``~/Library/Application Support/Claude/claude_desktop_config.json``
+    - Windows: ``%APPDATA%\\Claude\\claude_desktop_config.json``
+      (= ``~/AppData/Roaming/Claude/claude_desktop_config.json``)
+    - Linux / other: ``~/.config/Claude/claude_desktop_config.json`` (XDG)
+    """
+    system = platform.system()
+    if system == "Darwin":
+        return Path("~/Library/Application Support/Claude/claude_desktop_config.json").expanduser()
+    if system == "Windows":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path("~/AppData/Roaming").expanduser()
+        return base / "Claude" / "claude_desktop_config.json"
+    # Linux + everything else: XDG
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path("~/.config").expanduser()
+    return base / "Claude" / "claude_desktop_config.json"
+
+
 _CONFIG_DIR: Path = DEFAULT_CONFIG_PATH.parent
 _LAUNCH_SH: Path = _CONFIG_DIR / "launch.sh"
-_CLAUDE_DESKTOP_CONFIG: Path = Path(
-    "~/Library/Application Support/Claude/claude_desktop_config.json"
-).expanduser()
+_CLAUDE_DESKTOP_CONFIG: Path = _claude_desktop_config_path()
 _KEYCHAIN_ACCOUNT_PREFIX = "odoo-mcp-"
 
 
@@ -140,65 +165,29 @@ def _load_raw_config() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
 
 
 # ---------------------------------------------------------------------------
-# Keychain helpers
+# Credential-store helpers
 # ---------------------------------------------------------------------------
+#
+# These are thin wrappers around :mod:`odoo_mcp._credstore` (which itself
+# wraps the cross-platform ``keyring`` package). They are kept as wizard-
+# private names so that tests which monkeypatch ``setup_wizard._keychain_*``
+# continue to work, and so the rest of the wizard reads the same regardless
+# of platform.
 
 
 def _keychain_set(instance_name: str, service: str, value: str) -> None:
-    """Store a value in the macOS Keychain (create or update)."""
-    account = f"{_KEYCHAIN_ACCOUNT_PREFIX}{instance_name}"
-    subprocess.run(  # noqa: S603, S607 — intentional call to macOS security(1)
-        [
-            "/usr/bin/security",
-            "add-generic-password",
-            "-U",
-            "-a",
-            account,
-            "-s",
-            service,
-            "-w",
-            value,
-        ],
-        check=True,
-        capture_output=True,
-    )
+    """Store a value in the OS credential store (create or update)."""
+    _credstore.set_secret(instance_name, service, value)
 
 
 def _keychain_delete(instance_name: str, service: str) -> None:
-    """Delete a Keychain entry. Silently ignores 'not found' errors."""
-    account = f"{_KEYCHAIN_ACCOUNT_PREFIX}{instance_name}"
-    subprocess.run(  # noqa: S603, S607 — intentional call to macOS security(1)
-        [
-            "/usr/bin/security",
-            "delete-generic-password",
-            "-a",
-            account,
-            "-s",
-            service,
-        ],
-        capture_output=True,
-    )
+    """Delete an entry from the OS credential store. 'Not found' is ignored."""
+    _credstore.delete_secret(instance_name, service)
 
 
 def _keychain_get(instance_name: str, service: str) -> str | None:
-    """Read a value from the macOS Keychain. Returns None on failure."""
-    account = f"{_KEYCHAIN_ACCOUNT_PREFIX}{instance_name}"
-    result = subprocess.run(  # noqa: S603, S607 — intentional call to macOS security(1)
-        [
-            "/usr/bin/security",
-            "find-generic-password",
-            "-a",
-            account,
-            "-s",
-            service,
-            "-w",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
+    """Read a value from the OS credential store. ``None`` on failure."""
+    return _credstore.get_secret(instance_name, service)
 
 
 # ---------------------------------------------------------------------------
@@ -283,13 +272,14 @@ def print_launch_env() -> int:
     return 1 if errors and not env else 0
 
 
-def load_launch_env_into_os() -> int:
-    """Resolve Keychain credentials and set them in ``os.environ``.
+def load_credentials_into_os() -> int:
+    """Resolve credentials from the OS credential store into ``os.environ``.
 
-    Returns 0 on success, 1 if config is missing, 2 if any Keychain entry
-    is missing. Warnings are written to stderr but do not abort — the
-    server itself will surface a clearer error when the affected instance
-    is touched.
+    Replaces the legacy ``load_launch_env_into_os`` (kept as an alias below
+    for backward compat). Returns 0 on success, 1 if config is missing,
+    2 if any credential entry is missing. Warnings are written to stderr
+    but do not abort — the server itself will surface a clearer error when
+    the affected instance is touched.
     """
     try:
         env, errors = _collect_launch_env()
@@ -305,6 +295,12 @@ def load_launch_env_into_os() -> int:
     if errors and not env:
         return 2
     return 0
+
+
+# Backward-compat alias. ``load_launch_env_into_os`` was the v0.7.0 public
+# name; v0.13.0 renames it because the implementation no longer goes via
+# a launch-env shell hop.
+load_launch_env_into_os = load_credentials_into_os
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +413,29 @@ def _delete_credentials(instance_name: str, prefix: str) -> None:
     print(f"  Removed credentials from Keychain for {instance_name}")
 
 
+def _resolve_odoo_mcp_command() -> str:
+    """Return the absolute path to the ``odoo-mcp`` CLI for Claude Desktop.
+
+    Prefers the entry point installed by ``uv tool install`` (on PATH as
+    ``odoo-mcp`` / ``odoo-mcp.exe``). Falls back to ``sys.executable -m
+    odoo_mcp`` form is NOT used here because Claude Desktop's ``command``
+    only takes one program — for that fallback we'd need an installed
+    launcher script. If we cannot find ``odoo-mcp`` on PATH we still
+    register the bare name and let the user fix their PATH; the wizard
+    prints a hint in that case.
+    """
+    found = shutil.which("odoo-mcp")
+    if found:
+        return found
+    # Last-resort: register the name and trust the user's PATH at runtime.
+    print(
+        "  Warning: 'odoo-mcp' not found on PATH. Registering by name; "
+        "ensure ~/.local/bin (POSIX) or %USERPROFILE%\\.local\\bin (Windows) "
+        "is on your PATH before launching Claude Desktop."
+    )
+    return "odoo-mcp"
+
+
 def _register_claude_desktop() -> None:
     """Add odoo-mcp to Claude Desktop config (atomic write)."""
     config: dict[str, Any] = {}
@@ -430,8 +449,8 @@ def _register_claude_desktop() -> None:
         config["mcpServers"] = {}
 
     config["mcpServers"]["odoo-mcp"] = {
-        "command": str(_LAUNCH_SH),
-        "args": [],
+        "command": _resolve_odoo_mcp_command(),
+        "args": ["launch"],
     }
 
     _atomic_write_text(
@@ -512,7 +531,6 @@ def _instance_block(info: dict[str, str | bool], prefix: str) -> dict[str, Any]:
 def _print_setup_summary(name: str, url: str) -> None:
     print("\n--- Setup complete ---")
     print(f"  Config:       {DEFAULT_CONFIG_PATH}")
-    print(f"  Launcher:     {_LAUNCH_SH}")
     print(f"  Instance:     {name} ({url})")
     print("\nNext steps:")
     print("  1. Restart Claude Desktop to pick up the new MCP.")
@@ -539,10 +557,6 @@ def _cmd_setup() -> int:
     print("\nGenerating config.toml...")
     _write_config(_default_defaults(), {name: _instance_block(info, prefix)})
     print(f"  Written to {DEFAULT_CONFIG_PATH} (chmod 600)")
-
-    print("\nGenerating launch.sh...")
-    _write_launch_sh()
-    print(f"  Written to {_LAUNCH_SH} (chmod 700)")
 
     print("\nRegistering in Claude Desktop...")
     _register_claude_desktop()

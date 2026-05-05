@@ -75,31 +75,57 @@ def _has_local_changes(project_dir: Path) -> bool:
 
 
 def _maybe_migrate_launcher() -> None:
-    """Regenerate ``~/.odoo-mcp/launch.sh`` if it still uses the legacy template.
+    """Migrate from a legacy ``~/.odoo-mcp/launch.sh`` to direct ``odoo-mcp launch``.
 
-    The legacy template called the ``launch-env`` subcommand in a separate
-    ``uv run`` invocation; the v0.7.0 template uses a single ``launch``
-    subcommand. We detect by substring — if ``launch-env`` appears, the
-    file is from the old template. Untouched custom launchers (no
-    ``launch-env`` reference) are left alone.
+    Pre-v0.13.0 installs registered Claude Desktop with a wrapper shell
+    script that loaded Keychain creds and exec'd the server. v0.13.0
+    drops the wrapper entirely: Claude Desktop calls the ``odoo-mcp``
+    CLI directly with ``args: ["launch"]``, and the cross-platform
+    credential store handles credential resolution in-process.
+
+    On update we detect a stale ``launch.sh``, rewrite the Claude Desktop
+    registration to the new direct-CLI form, and unlink the script. If
+    the user has hand-edited the registration to point somewhere else we
+    leave it alone — the migration only fires when the registered command
+    still equals the legacy launch.sh path.
     """
-    from .setup_wizard import _LAUNCH_SH, _write_launch_sh
+    import json
+
+    from .setup_wizard import _CLAUDE_DESKTOP_CONFIG, _LAUNCH_SH, _register_claude_desktop
 
     if not _LAUNCH_SH.exists():
         return
+
+    rewrote_registration = False
+    if _CLAUDE_DESKTOP_CONFIG.exists():
+        try:
+            data = json.loads(_CLAUDE_DESKTOP_CONFIG.read_text())
+        except (OSError, ValueError):
+            data = None
+        if isinstance(data, dict):
+            servers = data.get("mcpServers")
+            if isinstance(servers, dict):
+                entry = servers.get("odoo-mcp")
+                if isinstance(entry, dict) and entry.get("command") == str(_LAUNCH_SH):
+                    try:
+                        _register_claude_desktop()
+                        rewrote_registration = True
+                    except OSError as exc:
+                        print(f"Warning: could not migrate Claude Desktop registration ({exc}).")
+
     try:
-        content = _LAUNCH_SH.read_text()
-    except OSError:
-        return
-    if "launch-env" not in content:
-        return
-    try:
-        _write_launch_sh()
-        print(f"Migrated launcher to faster v0.7.0 template: {_LAUNCH_SH}")
+        _LAUNCH_SH.unlink()
     except OSError as exc:
+        print(f"Warning: could not remove legacy {_LAUNCH_SH} ({exc}).")
+        return
+
+    if rewrote_registration:
         print(
-            f"Warning: could not migrate launcher ({exc}); run 'odoo-mcp setup --regenerate-launcher'."
+            f"Migrated launcher: removed {_LAUNCH_SH} and updated Claude "
+            f"Desktop registration to call 'odoo-mcp launch' directly."
         )
+    else:
+        print(f"Migrated launcher: removed legacy {_LAUNCH_SH}.")
 
 
 def _print_check(current_version: str) -> int:

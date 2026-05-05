@@ -10,9 +10,62 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
-- README rewritten — tighter, no industry-template promotion (onboarding wizard generates a per-instance suggestions file instead).
-
 <!-- Add new entries here. -->
+
+## [0.13.0] - 2026-05-05
+
+Portability + safety pass before public publication.
+
+### Added
+
+- **Cross-platform credential storage.** New `src/odoo_mcp/_credstore.py`
+  wraps the standard `keyring` package; macOS Keychain, Windows Credential
+  Manager, and Linux libsecret are now all supported transparently.
+  `keyring>=25.0` added as a runtime dependency.
+- **Platform-aware Claude Desktop config path.** New
+  `_claude_desktop_config_path()` resolves the correct location on macOS
+  (`~/Library/Application Support/Claude/...`), Windows
+  (`%APPDATA%\Claude\...`), and Linux (`~/.config/Claude/...` per XDG).
+- **Windows installer.** New `scripts/install.ps1` mirrors `install.sh`
+  step-for-step with PowerShell idiom (winget for `gh` and `uv`,
+  `gh attestation verify` with the same soft-fail policy, `--SkipVerification`
+  flag).
+- **`LICENSE`** at repo root with MIT terms.
+- **`SECURITY.md` user-responsibilities section** listing what the
+  operator still owns (Odoo ACL configuration, suggestions review, key
+  rotation, host hygiene). New "Limitations of liability" section
+  pointing at the LICENSE disclaimer.
+- **README disclaimer block** at top of file ("As-is software, no
+  external audit, supported on macOS / Windows 10+ / Linux with libsecret").
+- **README "Not your responsibility either" line** linking to the new
+  user-responsibilities section.
+
+### Changed
+
+- **License switched from "Proprietary" to MIT.** README license section
+  updated to a single line pointing at `LICENSE`.
+- **Claude Desktop registration** now invokes the `odoo-mcp` CLI directly
+  (`command: <abs path to odoo-mcp>, args: ["launch"]`) instead of going
+  through a `~/.odoo-mcp/launch.sh` shell wrapper. The wrapper was a
+  macOS-only intermediate that loaded Keychain creds via `security(1)`;
+  with cross-platform credential storage it no longer earns its keep.
+  `setup_wizard.load_credentials_into_os()` (the rename of
+  `load_launch_env_into_os`; the old name is kept as an alias for one
+  release) loads creds in-process at `odoo-mcp launch`.
+- **`odoo-mcp update` migration.** When an update detects a legacy
+  `~/.odoo-mcp/launch.sh` it rewrites the Claude Desktop registration
+  to the direct-CLI form and removes the script. Hand-edited
+  registrations pointing elsewhere are left alone.
+
+### Removed
+
+- **`subprocess` calls to `/usr/bin/security`** in `setup_wizard.py`.
+  All credential-store access now goes through the keyring wrapper.
+- **Default generation of `launch.sh`** in `_cmd_setup`. The legacy
+  template (`_write_launch_sh`, accessible via
+  `setup --regenerate-launcher`) is kept for one release as a fallback
+  for users with old launchers still referenced in Claude Desktop config
+  who haven't run `odoo-mcp update` yet.
 
 ## [0.12.0] - 2026-05-05
 

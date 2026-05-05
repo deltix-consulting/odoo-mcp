@@ -2,9 +2,13 @@
 
 Local MCP server that exposes a security-gated slice of [Odoo](https://www.odoo.com) to Claude Desktop and Claude Code over stdio. 12 tools, server-enforced guardrails, no telemetry.
 
+> **As-is software.** No external security audit has been performed.
+> Review [SECURITY.md](SECURITY.md) before deploying. The MCP runs on
+> macOS, Windows 10+, and Linux (with libsecret).
+
 ## Quick start
 
-Requires macOS, Claude Desktop or Claude Code, and an Odoo user account.
+Requires Claude Desktop or Claude Code, and an Odoo user account. Supported on macOS, Windows 10+, and Linux (with libsecret).
 
 1. **Generate an API key in Odoo.** Profile photo → My Profile → Account Security → New API Key. Name it `claude-mcp-yourname`. Copy it — Odoo only shows it once.
 
@@ -28,6 +32,8 @@ For a guided first run including a scan of the live instance, run `odoo-mcp onbo
 - **No source-code upload.** Custom modules are discovered at runtime via `ir.model` / `ir.model.fields`. Source stays in your repo.
 - **Credentials never on disk.** Username and API key live in macOS Keychain, are scrubbed from errors, and are deleted from `os.environ` after auth.
 - **Audit log stays local.** `~/.odoo-mcp/audit.jsonl` records metadata only — no field values, no queries, no results.
+- **Not your responsibility either.** See [SECURITY.md](SECURITY.md#user-responsibilities)
+  for what the operator must still own.
 
 See [SECURITY.md](SECURITY.md) for the threat model.
 
@@ -130,4 +136,4 @@ Email `security@deltix.pro` and expect a response within five business days. See
 
 ## License
 
-Proprietary. Copyright deltix consulting. Not for redistribution.
+MIT — see [LICENSE](LICENSE).

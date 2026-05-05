@@ -46,9 +46,9 @@ def main() -> int:
     # both ``launch.sh`` (no args -> server) and ``launch.sh doctor``
     # (env-load + doctor) through the same single ``uv run`` invocation.
     if argv and argv[0] == "launch":
-        from .setup_wizard import load_launch_env_into_os
+        from .setup_wizard import load_credentials_into_os
 
-        load_launch_env_into_os()
+        load_credentials_into_os()
         argv = argv[1:]
         sys.argv = [sys.argv[0], *argv]
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -62,13 +63,16 @@ def test_list_without_config_errors(
 
 @pytest.mark.usefixtures("fake_config")
 def test_regenerate_launcher_writes_file(capsys: pytest.CaptureFixture[str]) -> None:
+    """Legacy fallback: ``setup --regenerate-launcher`` still writes a
+    runnable ``launch.sh`` for users who haven't migrated yet (v0.13.0
+    keeps the template alive for one release as a fallback)."""
+    if os.name != "posix":
+        pytest.skip("launch.sh fallback is posix-only")
     rc = setup_wizard.main(["--regenerate-launcher"])
     assert rc == 0
     launch_path = setup_wizard._LAUNCH_SH
     assert launch_path.exists()
     content = launch_path.read_text()
-    # Regression guard for the v0.7.0 launcher template: must call the new
-    # `launch` subcommand and must NOT use the old two-process `launch-env`.
     assert "python -m odoo_mcp launch" in content
     assert "launch-env" not in content
     out = capsys.readouterr().out
@@ -423,6 +427,60 @@ def test_collect_launch_env_refuses_loose_permissions(
 
     with pytest.raises(ConfigError, match="loose permissions"):
         setup_wizard._collect_launch_env()
+
+
+def test_claude_desktop_config_path_per_platform(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`_claude_desktop_config_path` returns the right OS-specific path."""
+    import platform as _platform
+
+    # macOS
+    monkeypatch.setattr(_platform, "system", lambda: "Darwin")
+    p = setup_wizard._claude_desktop_config_path()
+    assert "Library/Application Support/Claude/claude_desktop_config.json" in p.as_posix()
+
+    # Windows
+    monkeypatch.setattr(_platform, "system", lambda: "Windows")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    p = setup_wizard._claude_desktop_config_path()
+    assert p.name == "claude_desktop_config.json"
+    assert "Claude" in p.parts
+    assert "Roaming" in p.parts
+
+    # Linux
+    monkeypatch.setattr(_platform, "system", lambda: "Linux")
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    p = setup_wizard._claude_desktop_config_path()
+    assert ".config/Claude/claude_desktop_config.json" in p.as_posix()
+
+
+def test_credstore_set_get_delete_via_wizard_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wizard's ``_keychain_*`` names are credstore-backed in v0.13.0."""
+    from odoo_mcp import _credstore
+
+    store: dict[tuple[str, str], str] = {}
+
+    def fake_set(inst: str, svc: str, val: str) -> None:
+        store[(inst, svc)] = val
+
+    def fake_get(inst: str, svc: str) -> str | None:
+        return store.get((inst, svc))
+
+    def fake_del(inst: str, svc: str) -> None:
+        store.pop((inst, svc), None)
+
+    monkeypatch.setattr(_credstore, "set_secret", fake_set)
+    monkeypatch.setattr(_credstore, "get_secret", fake_get)
+    monkeypatch.setattr(_credstore, "delete_secret", fake_del)
+
+    setup_wizard._keychain_set("main", "API_KEY", "v")
+    assert setup_wizard._keychain_get("main", "API_KEY") == "v"
+    setup_wizard._keychain_delete("main", "API_KEY")
+    assert setup_wizard._keychain_get("main", "API_KEY") is None
 
 
 def test_toml_value_escapes_carriage_return() -> None:
