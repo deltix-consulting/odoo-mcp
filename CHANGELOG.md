@@ -10,6 +10,8 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+- README rewritten — tighter, no industry-template promotion (onboarding wizard generates a per-instance suggestions file instead).
+
 <!-- Add new entries here. -->
 
 ## [0.12.0] - 2026-05-05
