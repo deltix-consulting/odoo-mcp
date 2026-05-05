@@ -60,9 +60,23 @@ def _claude_desktop_config_path() -> Path:
     return base / "Claude" / "claude_desktop_config.json"
 
 
+def _codex_config_path() -> Path:
+    """Return Codex's user config path.
+
+    Codex uses ``$CODEX_HOME/config.toml`` when set, otherwise
+    ``~/.codex/config.toml``. This path is intentionally simpler than
+    Claude's platform-specific JSON path because Codex keeps the same
+    home-directory convention across platforms.
+    """
+    home = os.environ.get("CODEX_HOME")
+    base = Path(home).expanduser() if home else Path("~/.codex").expanduser()
+    return base / "config.toml"
+
+
 _CONFIG_DIR: Path = DEFAULT_CONFIG_PATH.parent
 _LAUNCH_SH: Path = _CONFIG_DIR / "launch.sh"
 _CLAUDE_DESKTOP_CONFIG: Path = _claude_desktop_config_path()
+_CODEX_CONFIG: Path = _codex_config_path()
 _KEYCHAIN_ACCOUNT_PREFIX = "odoo-mcp-"
 
 
@@ -187,7 +201,45 @@ def _keychain_delete(instance_name: str, service: str) -> None:
 
 def _keychain_get(instance_name: str, service: str) -> str | None:
     """Read a value from the OS credential store. ``None`` on failure."""
-    return _credstore.get_secret(instance_name, service)
+    value = _credstore.get_secret(instance_name, service)
+    if value is not None:
+        return value
+    legacy = _legacy_macos_keychain_get(instance_name, service)
+    if legacy is not None:
+        _credstore.set_secret(instance_name, service, legacy)
+    return legacy
+
+
+def _legacy_macos_keychain_get(instance_name: str, service: str) -> str | None:
+    """Read pre-v0.13.0 macOS Keychain entries and migrate on access.
+
+    Old installs stored entries with service names like
+    ``ODOO_MCP_PROD_USERNAME`` and account ``odoo-mcp-prod``. v0.13.0 moved
+    to the cross-platform keyring layout ``odoo-mcp/<instance>``. This
+    fallback lets existing users update without re-entering API keys.
+    """
+    if platform.system() != "Darwin":
+        return None
+    try:
+        result = subprocess.run(  # noqa: S603, S607 — fixed argv, no shell
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-s",
+                service,
+                "-a",
+                f"{_KEYCHAIN_ACCOUNT_PREFIX}{instance_name}",
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.rstrip("\n")
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +513,94 @@ def _register_claude_desktop() -> None:
     print(f"  Registered in Claude Desktop config: {_CLAUDE_DESKTOP_CONFIG}")
 
 
+def _replace_toml_table(content: str, table: str, values: dict[str, object]) -> str:
+    """Replace or append a flat TOML table while preserving the rest of the file."""
+    header = f"[{table}]"
+    lines = content.splitlines()
+    out: list[str] = []
+    i = 0
+    replaced = False
+
+    while i < len(lines):
+        if lines[i].strip() == header:
+            replaced = True
+            first = True
+            while i < len(lines):
+                stripped = lines[i].strip()
+                if not first and stripped.startswith("[") and stripped.endswith("]"):
+                    break
+                first = False
+                i += 1
+            if out and out[-1].strip():
+                out.append("")
+            out.extend(_render_toml_table(header, values))
+            if i < len(lines) and lines[i].strip():
+                out.append("")
+            continue
+        out.append(lines[i])
+        i += 1
+
+    if not replaced:
+        while out and not out[-1].strip():
+            out.pop()
+        if out:
+            out.append("")
+            out.append("")
+        out.extend(_render_toml_table(header, values))
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+def _render_toml_table(header: str, values: dict[str, object]) -> list[str]:
+    lines = [header]
+    for key, value in values.items():
+        lines.append(f"{key} = {_toml_value(value)}")
+    return lines
+
+
+def _codex_available() -> bool:
+    """Return True when this machine appears to use Codex."""
+    return _CODEX_CONFIG.exists() or bool(shutil.which("codex"))
+
+
+def _register_codex() -> bool:
+    """Add odoo-mcp to Codex config.toml (atomic write).
+
+    Returns True when a registration was written. If Codex is not installed
+    and no config exists, this is a no-op so Claude-only users are not given
+    an unexpected ``~/.codex`` directory.
+    """
+    if not _codex_available():
+        return False
+    content = ""
+    if _CODEX_CONFIG.exists():
+        try:
+            content = _CODEX_CONFIG.read_text()
+        except OSError as exc:
+            print(f"  Warning: could not read {_CODEX_CONFIG}; skipping Codex registration ({exc}).")
+            return False
+
+    updated = _replace_toml_table(
+        content,
+        "mcp_servers.odoo-mcp",
+        {
+            "command": _resolve_odoo_mcp_command(),
+            "args": ["launch"],
+        },
+    )
+    _atomic_write_text(_CODEX_CONFIG, updated, mode=0o600)
+    print(f"  Registered in Codex config: {_CODEX_CONFIG}")
+    return True
+
+
+def _register_clients() -> None:
+    print("\nRegistering in Claude Desktop...")
+    _register_claude_desktop()
+    print("\nRegistering in Codex...")
+    if not _register_codex():
+        print("  Codex not detected; skipped Codex registration.")
+
+
 def _run_doctor() -> None:
     """Run doctor checks inline."""
     print("\nRunning doctor checks...")
@@ -533,7 +673,7 @@ def _print_setup_summary(name: str, url: str) -> None:
     print(f"  Config:       {DEFAULT_CONFIG_PATH}")
     print(f"  Instance:     {name} ({url})")
     print("\nNext steps:")
-    print("  1. Restart Claude Desktop to pick up the new MCP.")
+    print("  1. Restart Claude Desktop / Cowork and Codex to pick up the new MCP.")
     print("  2. Run 'odoo-mcp doctor' any time to verify connectivity.")
     print("  3. Use 'odoo-mcp setup --add' to add more instances.")
 
@@ -765,6 +905,45 @@ def _remove_odoo_mcp_from_claude_desktop() -> bool:
     return True
 
 
+def _remove_odoo_mcp_from_codex() -> bool:
+    """Strip the ``odoo-mcp`` entry from Codex config.toml (atomic)."""
+    if not _CODEX_CONFIG.exists():
+        return False
+    try:
+        content = _CODEX_CONFIG.read_text()
+    except OSError:
+        print(f"  Warning: could not read {_CODEX_CONFIG}; leaving it alone.")
+        return False
+
+    header = "[mcp_servers.odoo-mcp]"
+    lines = content.splitlines()
+    out: list[str] = []
+    i = 0
+    removed = False
+    while i < len(lines):
+        if lines[i].strip() == header:
+            removed = True
+            first = True
+            while i < len(lines):
+                stripped = lines[i].strip()
+                if not first and stripped.startswith("[") and stripped.endswith("]"):
+                    break
+                first = False
+                i += 1
+            while out and not out[-1].strip():
+                out.pop()
+            if i < len(lines) and out:
+                out.append("")
+            continue
+        out.append(lines[i])
+        i += 1
+
+    if not removed:
+        return False
+    _atomic_write_text(_CODEX_CONFIG, "\n".join(out).rstrip() + "\n", mode=0o600)
+    return True
+
+
 def _remove_audit_logs() -> list[Path]:
     """Delete the active audit log + any rotated audit-log files."""
     removed: list[Path] = []
@@ -791,6 +970,7 @@ def _cmd_uninstall() -> int:
     print(f"  - All Keychain entries under '{_KEYCHAIN_ACCOUNT_PREFIX}*'")
     print(f"  - {_CONFIG_DIR} (config.toml, launch.sh, audit logs, fields cache)")
     print(f"  - The 'odoo-mcp' entry in {_CLAUDE_DESKTOP_CONFIG}")
+    print(f"  - The 'odoo-mcp' entry in {_CODEX_CONFIG}")
     print("  - The 'odoo-mcp' uv tool installation")
     print()
     print(f"It will NOT remove the project checkout at {project_dir}.")
@@ -816,6 +996,12 @@ def _cmd_uninstall() -> int:
     print("\nRemoving Claude Desktop registration...")
     if _remove_odoo_mcp_from_claude_desktop():
         print(f"  Removed odoo-mcp entry from {_CLAUDE_DESKTOP_CONFIG}")
+    else:
+        print("  No odoo-mcp entry found (already gone).")
+
+    print("\nRemoving Codex registration...")
+    if _remove_odoo_mcp_from_codex():
+        print(f"  Removed odoo-mcp entry from {_CODEX_CONFIG}")
     else:
         print("  No odoo-mcp entry found (already gone).")
 
@@ -852,7 +1038,7 @@ def _cmd_uninstall() -> int:
     print()
     print("--- Uninstall complete ---")
     print(f"To finish: rm -rf '{project_dir}'  (your project checkout)")
-    print("Restart Claude Desktop to drop the now-stale MCP entry.")
+    print("Restart Claude Desktop / Cowork and Codex to drop now-stale MCP entries.")
     return 0
 
 

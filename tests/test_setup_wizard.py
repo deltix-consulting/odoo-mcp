@@ -192,6 +192,62 @@ def test_claude_desktop_config_temp_file_cleaned_up_on_error(
     assert leftovers == []
 
 
+def test_register_codex_preserves_existing_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "config.toml"
+    target.write_text(
+        'personality = "pragmatic"\n\n'
+        '[plugins."github@openai-curated"]\n'
+        "enabled = true\n"
+    )
+    monkeypatch.setattr(setup_wizard, "_CODEX_CONFIG", target)
+    monkeypatch.setattr(setup_wizard, "_resolve_odoo_mcp_command", lambda: "/bin/odoo-mcp")
+
+    assert setup_wizard._register_codex() is True
+
+    content = target.read_text()
+    assert 'personality = "pragmatic"' in content
+    assert '[plugins."github@openai-curated"]' in content
+    assert "[mcp_servers.odoo-mcp]" in content
+    assert 'command = "/bin/odoo-mcp"' in content
+    assert 'args = ["launch"]' in content
+
+
+def test_register_codex_replaces_existing_odoo_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "config.toml"
+    target.write_text(
+        "[mcp_servers.odoo-mcp]\n"
+        'command = "/old"\n'
+        'args = ["old"]\n\n'
+        "[projects.foo]\n"
+        'trust_level = "trusted"\n'
+    )
+    monkeypatch.setattr(setup_wizard, "_CODEX_CONFIG", target)
+    monkeypatch.setattr(setup_wizard, "_resolve_odoo_mcp_command", lambda: "/new/odoo-mcp")
+
+    assert setup_wizard._register_codex() is True
+
+    content = target.read_text()
+    assert 'command = "/old"' not in content
+    assert 'args = ["old"]' not in content
+    assert 'command = "/new/odoo-mcp"' in content
+    assert "[projects.foo]" in content
+
+
+def test_register_codex_skips_when_codex_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "missing" / "config.toml"
+    monkeypatch.setattr(setup_wizard, "_CODEX_CONFIG", target)
+    monkeypatch.setattr(setup_wizard.shutil, "which", lambda _name: None)
+
+    assert setup_wizard._register_codex() is False
+    assert not target.exists()
+
+
 def test_write_config_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     target = tmp_path / "config.toml"
     target.write_text("[defaults]\noriginal = true\n")
@@ -253,6 +309,16 @@ def uninstall_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, 
     monkeypatch.setattr(setup_wizard, "_CONFIG_DIR", tmp_path)
     monkeypatch.setattr(setup_wizard, "_LAUNCH_SH", tmp_path / "launch.sh")
     monkeypatch.setattr(setup_wizard, "_CLAUDE_DESKTOP_CONFIG", claude_cfg)
+    codex_cfg = tmp_path / "codex_config.toml"
+    codex_cfg.write_text(
+        'personality = "pragmatic"\n\n'
+        "[mcp_servers.odoo-mcp]\n"
+        'command = "/x"\n'
+        'args = ["launch"]\n\n'
+        "[mcp_servers.other-mcp]\n"
+        'command = "/y"\n'
+    )
+    monkeypatch.setattr(setup_wizard, "_CODEX_CONFIG", codex_cfg)
     (tmp_path / "launch.sh").write_text("#!/bin/bash\n")
     (tmp_path / "fields-cache.db").write_bytes(b"sqlite-stub")
     (tmp_path / "audit.jsonl").write_text("{}\n")
@@ -275,6 +341,7 @@ def uninstall_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, 
         "tmp_path": tmp_path,
         "config": cfg,
         "claude_config": claude_cfg,
+        "codex_config": codex_cfg,
         "deleted": deleted,
     }
 
@@ -301,6 +368,17 @@ def test_uninstall_removes_claude_desktop_entry(
     data = _json.loads(claude_cfg.read_text())
     assert "odoo-mcp" not in data["mcpServers"]
     assert "other-mcp" in data["mcpServers"]
+
+
+def test_uninstall_removes_codex_entry(
+    uninstall_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("builtins.input", lambda _p="": "y")
+    setup_wizard._cmd_uninstall()
+    codex_cfg: Path = uninstall_env["codex_config"]
+    content = codex_cfg.read_text()
+    assert "[mcp_servers.odoo-mcp]" not in content
+    assert "[mcp_servers.other-mcp]" in content
 
 
 def test_uninstall_aborts_on_n_confirmation(
@@ -454,6 +532,38 @@ def test_claude_desktop_config_path_per_platform(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
     p = setup_wizard._claude_desktop_config_path()
     assert ".config/Claude/claude_desktop_config.json" in p.as_posix()
+
+
+def test_codex_config_path_uses_codex_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    assert setup_wizard._codex_config_path() == tmp_path / "codex-home" / "config.toml"
+
+
+def test_keychain_get_migrates_legacy_macos_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_mcp import _credstore
+
+    stored: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr(_credstore, "get_secret", lambda _inst, _svc: None)
+    monkeypatch.setattr(_credstore, "set_secret", lambda inst, svc, val: stored.append((inst, svc, val)))
+    monkeypatch.setattr(setup_wizard.platform, "system", lambda: "Darwin")
+
+    def fake_run(*_args: Any, **_kwargs: Any) -> Any:
+        return __import__("subprocess").CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="legacy-secret\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(setup_wizard.subprocess, "run", fake_run)
+
+    assert setup_wizard._keychain_get("prod", "ODOO_MCP_PROD_API_KEY") == "legacy-secret"
+    assert stored == [("prod", "ODOO_MCP_PROD_API_KEY", "legacy-secret")]
 
 
 def test_credstore_set_get_delete_via_wizard_aliases(

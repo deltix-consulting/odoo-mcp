@@ -1,7 +1,7 @@
 # Onboarding a colleague to the Odoo MCP
 
 This guide covers the steps to get a deltix consultant — or anyone else with
-their own Odoo user — connected to Claude Cowork via the MCP. The whole
+their own Odoo user — connected to Claude Cowork and Codex via the MCP. The whole
 process takes about ten minutes per person if everything is in place.
 
 The MCP is **per-user, local-first**: each colleague runs their own copy on
@@ -75,7 +75,7 @@ Take the `--toml` output, review each entry, and paste the resulting
 `custom_sensitive_field_patterns` + `sensitive_fields` blocks into the
 klant's instance section of `~/.odoo-mcp/config.toml`. UNCERTAIN
 findings warrant a manual look — they fall through to the safe default
-(no opt-in needed for Claude to read them) but might still be klant-
+(no opt-in needed for the MCP client to read them) but might still be klant-
 sensitive in context.
 
 ### 5. Confirm GitHub access
@@ -101,7 +101,7 @@ colleague. They run it on their own machine.
 ### Prerequisites
 
 - macOS (Apple Silicon or Intel).
-- Claude Cowork installed.
+- Claude Cowork and/or Codex installed.
 - Homebrew available (`brew --version` should work). If not, install from
   https://brew.sh.
 
@@ -132,7 +132,7 @@ coming from you — your record rules and field permissions apply directly.
 2. Click your profile picture (top right) → **My Profile**.
 3. Open the **Account Security** tab.
 4. Click **New API Key**.
-5. Name it something recognisable, e.g. `claude-mcp-firstname`. Copy the key
+5. Name it something recognisable, e.g. `odoo-mcp-firstname`. Copy the key
    immediately — Odoo only shows it once.
 
 Treat this string the same way you treat your password.
@@ -167,24 +167,22 @@ The wizard then:
 - Stores your username and API key in the macOS Keychain (no plaintext
   files anywhere).
 - Generates `~/.odoo-mcp/config.toml` (chmod 600).
-- Generates `~/.odoo-mcp/launch.sh` that pulls credentials from Keychain
-  on each launch.
-- Registers the MCP in Claude Cowork's config.
+- Registers the MCP in Claude Cowork's config and, when Codex is installed,
+  in Codex's config.
 - Runs a health check (`doctor`) end-to-end.
 
 If `doctor` ends with `OK` you are done with the install. If you see
 `FAILED`, capture the output and contact your deltix admin.
 
-### Step 4 — Restart Claude Cowork
+### Step 4 — Restart Claude Cowork and Codex
 
-The MCP is loaded by Claude Cowork only at start-up. Quit it fully
+The MCP is loaded by Claude Cowork and Codex at start-up. Quit the app fully
 (**Cmd+Q**, not just close the window) and re-open it. Tools named
-`odoo_*` should now appear when you type `/mcp` or when Claude offers
-them.
+`odoo_*` should then be available.
 
 ### Step 5 — Verify
 
-In a fresh Cowork session, ask Claude:
+In a fresh Cowork or Codex session, ask:
 
 > Use `odoo_help` to show what this MCP can do.
 
@@ -226,12 +224,12 @@ Run these from Terminal whenever you need them:
 
 Writes to a production instance are blocked by default. To make changes:
 
-1. Tell Claude what you want.
-2. Claude calls `odoo_enable_prod_writes(instance="...")` to unlock for
+1. Tell Claude or Codex what you want.
+2. The client calls `odoo_enable_prod_writes(instance="...")` to unlock for
    15 minutes.
-3. Claude attempts the write; you receive a **dry-run preview** with a
+3. The client attempts the write; you receive a **dry-run preview** with a
    one-time confirmation token.
-4. Review the preview. If you agree, tell Claude to commit. Claude calls
+4. Review the preview. If you agree, tell the client to commit. It calls
    the write again with `dry_run=false` and the token.
 5. Within one unlock window you have a budget of 10 commits by default
    (configurable via `max_commits_per_unlock`). Dry-runs do not count.
@@ -274,14 +272,14 @@ Use sparingly and only when you trust the source.
 When a colleague leaves the team or rotates roles:
 
 1. **Revoke the API key in Odoo** — *My Profile → Account Security →
-   delete the `claude-mcp-…` key*. This is the single source of truth
+   delete the `odoo-mcp-…` key*. This is the single source of truth
    for "this person can no longer access via the MCP". Do this first.
 2. On their machine, run a single command to clean everything up:
 
        odoo-mcp uninstall
 
    This removes Keychain entries for every configured instance, the
-   `odoo-mcp` entry in Claude Desktop / Cowork, the local config and
+   `odoo-mcp` entry in Claude Desktop / Cowork and Codex, the local config and
    launcher (`~/.odoo-mcp/`), the persistent fields cache, all audit
    logs, and the `uv tool` installation of `odoo-mcp` itself. The
    project checkout at `~/odoo-mcp` is intentionally left alone — the
@@ -328,13 +326,18 @@ guard, redaction, burst limits) still apply.
 
 ## Part 7 — Troubleshooting
 
-**Claude says "no Odoo tools available" after install.**
+**Claude or Codex says "no Odoo tools available" after install.**
 
-Cmd+Q Claude Cowork and re-open. Tools load only at process start. If
-they still do not appear after a full restart, check
+Cmd+Q the app and re-open. Tools load only at process start. If they still
+do not appear after a full restart, check the relevant config:
+
+Claude:
 `~/Library/Application Support/Claude/claude_desktop_config.json` —
-the wizard adds an `odoo-mcp` entry under `mcpServers`. If it is
-missing, run `odoo-mcp setup --regenerate-launcher` and restart Cowork.
+the wizard adds an `odoo-mcp` entry under `mcpServers`.
+
+Codex:
+`~/.codex/config.toml` — the wizard adds an `odoo-mcp` entry under
+`[mcp_servers.odoo-mcp]` when Codex is detected.
 
 **doctor reports `! admin check`.**
 
@@ -362,7 +365,7 @@ The field name matched a built-in or per-instance redaction pattern
 `bonus`, `payroll`). For the always-redacted built-ins this is a hard
 block. For default-hidden fields (VAT, IBAN, employee birthday, etc.)
 you can opt in per call by passing `allow_sensitive_fields=["fieldname"]`
-to the tool — Claude will surface this in the tool arguments so you can
+to the tool — Claude or Codex will surface this in the tool arguments so you can
 review before approving.
 
 **`odoo-mcp update` warns about no attestation.**

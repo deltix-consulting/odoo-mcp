@@ -1,6 +1,6 @@
 # odoo-mcp
 
-Local MCP server that exposes a security-gated slice of [Odoo](https://www.odoo.com) to Claude Desktop and Claude Code over stdio. 12 tools, server-enforced guardrails, no telemetry.
+Local MCP server that exposes a security-gated slice of [Odoo](https://www.odoo.com) to Claude Desktop, Claude Code, and Codex over stdio. 12 tools, server-enforced guardrails, no telemetry.
 
 > **As-is software.** No external security audit has been performed.
 > Review [SECURITY.md](SECURITY.md) before deploying. The MCP runs on
@@ -8,9 +8,9 @@ Local MCP server that exposes a security-gated slice of [Odoo](https://www.odoo.
 
 ## Quick start
 
-Requires Claude Desktop or Claude Code, and an Odoo user account. Supported on macOS, Windows 10+, and Linux (with libsecret).
+Requires Claude Desktop, Claude Code, or Codex, plus an Odoo user account. Supported on macOS, Windows 10+, and Linux (with libsecret).
 
-1. **Generate an API key in Odoo.** Profile photo → My Profile → Account Security → New API Key. Name it `claude-mcp-yourname`. Copy it — Odoo only shows it once.
+1. **Generate an API key in Odoo.** Profile photo → My Profile → Account Security → New API Key. Name it `odoo-mcp-yourname`. Copy it — Odoo only shows it once.
 
 2. **Run the installer.**
 
@@ -21,7 +21,7 @@ Requires Claude Desktop or Claude Code, and an Odoo user account. Supported on m
 
    The installer verifies the release attestation, asks for Odoo URL / database / email / API key, and stores credentials in macOS Keychain.
 
-3. **Restart Claude Cowork** (Cmd+Q, reopen). Ask Claude: *"use odoo_help to show what you can do with my Odoo"*.
+3. **Restart Claude Cowork / Claude Desktop and Codex** so they load the MCP. Ask: *"use odoo_help to show what you can do with my Odoo"*.
 
 For a guided first run including a scan of the live instance, run `odoo-mcp onboarding`. See [ONBOARDING.md](ONBOARDING.md).
 
@@ -61,13 +61,13 @@ No `execute_kw`. No workflow buttons. No `copy`, `name_search`, `fields_view_get
 | Command | Purpose |
 |---|---|
 | `odoo-mcp onboarding` | Guided first run: setup wizard + doctor + scan, writes `~/.odoo-mcp/suggestions.toml` |
-| `odoo-mcp setup` | First-time wizard (config, credentials, launcher, Claude Desktop registration) |
+| `odoo-mcp setup` | First-time wizard (config, credentials, Claude Desktop + Codex registration) |
 | `odoo-mcp setup --add` | Add another instance |
 | `odoo-mcp setup --remove` | Remove an instance and its Keychain entries |
 | `odoo-mcp setup --list` | List configured instances |
 | `odoo-mcp setup --rotate-key NAME` | Rotate the API key for one instance |
 | `odoo-mcp setup --regenerate-launcher` | Rewrite `launch.sh` |
-| `odoo-mcp uninstall` | Remove config, Keychain entries, launcher, Claude Desktop registration, and the `uv tool` install |
+| `odoo-mcp uninstall` | Remove config, Keychain entries, launcher, Claude Desktop + Codex registration, and the `uv tool` install |
 | `odoo-mcp doctor` | Pre-flight: config perms, audit log, TLS, auth, smoke call |
 | `odoo-mcp status` | Live status: auth, unlock state, rate-limit budget |
 | `odoo-mcp audit` | Audit log inspector |
@@ -102,7 +102,7 @@ On non-production instances, writes commit directly.
 
 ## Updating
 
-Run `odoo-mcp update`. This runs `git pull` in the install directory followed by `uv sync`. It does not touch `~/.odoo-mcp/config.toml`, Keychain entries, or Claude Desktop registration. Existing installs auto-migrate to the current launcher template, which loads Keychain credentials and starts the server in a single Python process.
+Run `odoo-mcp update`. This runs `git pull` in the install directory followed by `uv sync`. It does not touch `~/.odoo-mcp/config.toml` or Keychain entries. Existing installs auto-migrate Claude Desktop to the direct `odoo-mcp launch` registration and add the same registration to Codex when Codex is installed.
 
 Releases are signed via Sigstore using GitHub Actions Build Provenance Attestations. The installer verifies attestations before extracting; verify a downloaded tarball manually with `gh attestation verify`. See "Verifying releases" in [SECURITY.md](SECURITY.md).
 

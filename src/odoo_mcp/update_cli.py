@@ -128,6 +128,16 @@ def _maybe_migrate_launcher() -> None:
         print(f"Migrated launcher: removed legacy {_LAUNCH_SH}.")
 
 
+def _maybe_register_codex() -> None:
+    """Register the MCP in Codex when Codex is present on this machine."""
+    from .setup_wizard import _register_codex
+
+    try:
+        _register_codex()
+    except OSError as exc:
+        print(f"Warning: could not update Codex registration ({exc}).")
+
+
 def _print_check(current_version: str) -> int:
     result = check_for_update(current_version)
     if result is None:
@@ -289,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
     # in-process. Existing users get the speed boost without manual
     # action.
     _maybe_migrate_launcher()
+    _maybe_register_codex()
 
     # Refresh the user-installed CLI shim so `odoo-mcp` on PATH points at
     # the new version. `uv tool install --editable` resolves to a wrapper
@@ -324,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor.main([])
 
     print()
-    print("Update complete. Restart Claude Desktop / Cowork to use the new version.")
+    print("Update complete. Restart Claude Desktop / Cowork and Codex to use the new version.")
     return 0 if tests_ok else 1
 
 

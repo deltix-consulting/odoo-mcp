@@ -10,7 +10,22 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
-<!-- Add new entries here. -->
+### Added
+
+- **Codex registration.** The setup wizard now registers `odoo-mcp` in
+  `~/.codex/config.toml` under `[mcp_servers.odoo-mcp]` when Codex is
+  installed, using the same direct `odoo-mcp launch` stdio command as
+  Claude Desktop. `odoo-mcp update` also refreshes this registration for
+  existing installs.
+
+### Changed
+
+- **Uninstall cleans up Codex too.** `odoo-mcp uninstall` now removes the
+  Codex MCP registration while preserving unrelated Codex config sections.
+- **Legacy macOS Keychain migration.** Launch-time credential loading now
+  falls back to the pre-v0.13.0 macOS Keychain layout and writes the value
+  into the new cross-platform keyring schema on first successful read, so
+  older users do not need to re-enter API keys after updating.
 
 ## [0.13.0] - 2026-05-05
 
