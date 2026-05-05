@@ -7,6 +7,7 @@ Usage::
     python -m odoo_mcp status                   # runtime visibility report
     python -m odoo_mcp audit [--tail N]         # inspect the audit log
                   [--errors] [--instance NAME] [--since MINUTES]
+    python -m odoo_mcp onboarding               # guided first-run: setup + doctor + scan
     python -m odoo_mcp setup                    # first-time setup wizard
     python -m odoo_mcp setup --add              # add an Odoo instance
     python -m odoo_mcp setup --remove           # remove an Odoo instance
@@ -70,6 +71,11 @@ def main() -> int:
         from . import setup_wizard
 
         return setup_wizard.main(argv[1:])
+
+    if argv and argv[0] == "onboarding":
+        from . import onboarding_cli
+
+        return onboarding_cli.main(argv[1:])
 
     if argv and argv[0] == "config":
         from . import config_cli

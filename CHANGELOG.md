@@ -12,6 +12,30 @@ breaking change explicitly in this file.
 
 <!-- Add new entries here. -->
 
+## [0.12.0] - 2026-05-05
+
+First-time onboarding pass for public users. Someone who finds the GitHub
+repo and runs `install.sh` should be able to get a working Odoo connection
+without consultant hand-holding.
+
+### Added
+
+- **`odoo-mcp onboarding` command.** Single guided flow that wraps setup
+  wizard → doctor → scan-custom. On a fresh machine it prompts for URL /
+  database / username / API key, registers in Claude Desktop, runs doctor,
+  scans the instance, and writes a paste-ready `~/.odoo-mcp/suggestions.toml`
+  (chmod 600). On a machine that already has a config it asks whether to
+  add a new instance or just re-scan the existing primary. Doctor failures
+  abort before the scan with a clear "fix this and re-run" message. New
+  module `src/odoo_mcp/onboarding_cli.py`; new tests in
+  `tests/test_onboarding_cli.py`.
+- **README "Quick start" section.** Three-step onboarding for end users
+  (generate API key, run installer, restart Cowork) at the top of the
+  README, before the consultant-facing reference material.
+- **"What we never see" privacy section.** Explicit, blunt statement of
+  what the MCP does and does not transmit. Added to both README and
+  SECURITY.md so each audience sees it.
+
 ## [0.11.0] - 2026-05-04
 
 Token-budget pass on every tool response. Our MCP doesn't make LLM calls

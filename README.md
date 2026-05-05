@@ -1,5 +1,63 @@
 # odoo-mcp — Security-first MCP server for Odoo
 
+## Quick start (for end users)
+
+You need:
+
+- macOS
+- An Odoo instance you have a user account on
+- 5 minutes
+
+### 1. Generate your own Odoo API key
+
+In your Odoo, click your profile photo → My Profile → Account Security
+→ New API Key. Name it something like `claude-mcp-yourname`. Copy the
+key — Odoo only shows it once.
+
+This is **your** API key, tied to **your** Odoo user. Your Odoo
+permissions are what Claude will see — no more, no less.
+
+### 2. Install
+
+In Terminal:
+
+    brew install gh && gh auth login
+    curl -fsSL https://raw.githubusercontent.com/deltix-consulting/odoo-mcp/main/scripts/install.sh | bash
+
+The installer asks for your Odoo URL, database name, your email,
+and the API key you just generated. Credentials go straight to
+macOS Keychain — never to a file, never to git, never to deltix.
+
+### 3. Restart Claude Cowork
+
+Cmd+Q, reopen. Ask Claude: *"use odoo_help to show what you can
+do with my Odoo"*. You're done.
+
+For a guided first run including a scan of what's in your Odoo:
+`odoo-mcp onboarding`.
+
+## What we never see
+
+The MCP runs entirely on your machine. Specifically:
+
+- **No telemetry.** The MCP makes no outbound HTTP calls except to
+  your Odoo and (during `odoo-mcp update`) to GitHub for releases.
+- **No phone-home.** deltix-consulting (the publisher) does not
+  receive your URL, database name, queries, results, audit log,
+  or anything else.
+- **No source-code upload.** If you have custom Odoo modules, the
+  MCP discovers them by reading your live Odoo's `ir.model` /
+  `ir.model.fields` at runtime. Your module source code stays in
+  your repo; we never ask for it.
+- **Credentials never on disk.** Your Odoo username and API key
+  live in macOS Keychain (encrypted at rest, gated by your login).
+  They are not written to `config.toml`, `audit.jsonl`, error
+  messages, or anywhere else.
+- **Audit log stays local.** Every tool call is logged to
+  `~/.odoo-mcp/audit.jsonl` on your machine. It records metadata
+  (timestamp, tool name, instance, count, duration) but never
+  field values, never queries, never results.
+
 ## What it does
 
 odoo-mcp is a local Model Context Protocol server that exposes a
@@ -225,6 +283,7 @@ goes through the full prod-guard + dry-run + confirmation-token flow.
 
 | Command | What it does |
 |---|---|
+| `odoo-mcp onboarding` | Guided first run: setup wizard + doctor + scan, writes a `~/.odoo-mcp/suggestions.toml` snippet |
 | `odoo-mcp setup` | First-time wizard: config, credentials, launcher, Claude Desktop registration |
 | `odoo-mcp setup --add` | Add another instance to an existing config |
 | `odoo-mcp setup --remove` | Remove an instance and its Keychain entries |

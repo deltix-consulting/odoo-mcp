@@ -192,6 +192,28 @@ checkout, or a compromised maintainer machine. `odoo-mcp update`
 performs the same check automatically before applying an update; pass
 `--skip-verification` only if you have a specific reason to bypass it.
 
+## What we never see
+
+The MCP runs entirely on your machine. Specifically:
+
+- **No telemetry.** The MCP makes no outbound HTTP calls except to
+  your Odoo and (during `odoo-mcp update`) to GitHub for releases.
+- **No phone-home.** deltix-consulting (the publisher) does not
+  receive your URL, database name, queries, results, audit log,
+  or anything else.
+- **No source-code upload.** If you have custom Odoo modules, the
+  MCP discovers them by reading your live Odoo's `ir.model` /
+  `ir.model.fields` at runtime. Your module source code stays in
+  your repo; we never ask for it.
+- **Credentials never on disk.** Your Odoo username and API key
+  live in macOS Keychain (encrypted at rest, gated by your login).
+  They are not written to `config.toml`, `audit.jsonl`, error
+  messages, or anywhere else.
+- **Audit log stays local.** Every tool call is logged to
+  `~/.odoo-mcp/audit.jsonl` on your machine. It records metadata
+  (timestamp, tool name, instance, count, duration) but never
+  field values, never queries, never results.
+
 ## Reporting vulnerabilities
 
 Email `security@deltix.pro`. PGP is available on request.
