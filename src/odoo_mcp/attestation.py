@@ -119,4 +119,51 @@ def verify_release_attestation(
     stderr = (result.stderr or "").strip()
     stdout = (result.stdout or "").strip()
     detail = stderr or stdout or f"exit code {result.returncode}"
+    combined = f"{stderr}\n{stdout}".lower()
+
+    # Hard-fail signals: explicit tampering. These patterns indicate gh
+    # successfully retrieved an attestation but the signature/identity
+    # check rejected it. Anything matching here is a real verification
+    # failure and the update must be refused.
+    _TAMPERING_PATTERNS = (
+        "signature does not match",
+        "signature mismatch",
+        "tampered",
+        "invalid signature",
+        "does not match the expected",
+        "unexpected signer",
+        "wrong owner",
+    )
+    if any(pat in combined for pat in _TAMPERING_PATTERNS):
+        return (False, f"verification failed: {detail}")
+
+    # Environmental signals: gh failed for reasons unrelated to artifact
+    # integrity. Sigstore issuer quirks, TUF refresh hiccups, network
+    # blips, missing-attestation responses. Treat as soft-fail (warn +
+    # prompt) rather than hard-fail (refuse update).
+    #
+    # The cost of being permissive: a tampered tarball whose Sigstore
+    # lookup happens to fail (very rare) would slip through the soft-fail
+    # path. The cost of being strict: every legitimate sigstore issuer
+    # quirk hard-fails the install. We choose permissive — the
+    # dispatcher's allowlist + denylist + write-blocklist are the real
+    # defense. This verifier is a defense-in-depth layer, not a
+    # singular gate.
+    _ENVIRONMENTAL_PATTERNS = (
+        "no attestation",
+        "no attestations",
+        "404",
+        "not found",
+        "failed to fetch",
+        "sigstore",
+        "issuer",
+        "tuf",
+        "network",
+        "connection refused",
+        "timeout",
+        "timed out",
+    )
+    if any(pat in combined for pat in _ENVIRONMENTAL_PATTERNS):
+        return (False, f"environment: {detail}")
+
     return (False, f"verification failed: {detail}")

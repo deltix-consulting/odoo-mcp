@@ -197,9 +197,7 @@ def test_register_codex_preserves_existing_config(
 ) -> None:
     target = tmp_path / "config.toml"
     target.write_text(
-        'personality = "pragmatic"\n\n'
-        '[plugins."github@openai-curated"]\n'
-        "enabled = true\n"
+        'personality = "pragmatic"\n\n[plugins."github@openai-curated"]\nenabled = true\n'
     )
     monkeypatch.setattr(setup_wizard, "_CODEX_CONFIG", target)
     monkeypatch.setattr(setup_wizard, "_resolve_odoo_mcp_command", lambda: "/bin/odoo-mcp")
@@ -534,9 +532,7 @@ def test_claude_desktop_config_path_per_platform(
     assert ".config/Claude/claude_desktop_config.json" in p.as_posix()
 
 
-def test_codex_config_path_uses_codex_home(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_codex_config_path_uses_codex_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     assert setup_wizard._codex_config_path() == tmp_path / "codex-home" / "config.toml"
 
@@ -549,7 +545,9 @@ def test_keychain_get_migrates_legacy_macos_entry(
     stored: list[tuple[str, str, str]] = []
 
     monkeypatch.setattr(_credstore, "get_secret", lambda _inst, _svc: None)
-    monkeypatch.setattr(_credstore, "set_secret", lambda inst, svc, val: stored.append((inst, svc, val)))
+    monkeypatch.setattr(
+        _credstore, "set_secret", lambda inst, svc, val: stored.append((inst, svc, val))
+    )
     monkeypatch.setattr(setup_wizard.platform, "system", lambda: "Darwin")
 
     def fake_run(*_args: Any, **_kwargs: Any) -> Any:

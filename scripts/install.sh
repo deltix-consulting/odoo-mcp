@@ -201,7 +201,7 @@ if [ "$FETCHED_VIA_RELEASE" = "1" ]; then
                 # tampered"). Case-insensitive grep across all known
                 # variants we've seen from gh / GitHub's API: missing,
                 # 404, generic fetch failure.
-                if printf '%s' "$VERIFY_OUTPUT" | grep -qiE 'no[[:space:]].*attestation|404|not found|failed to fetch'; then
+                if printf '%s' "$VERIFY_OUTPUT" | grep -qiE 'no[[:space:]].*attestation|404|not found|failed to fetch|sigstore|issuer|tuf|network|connection refused|timeout|timed out'; then
                     printf '\n  \033[33mWarning:\033[0m no attestation available for %s.\n' "$LATEST_TAG"
                     printf '  Reason: %s\n' "$(printf '%s' "$VERIFY_OUTPUT" | head -n 1)"
                     printf '  This can happen on free-tier GitHub orgs, for releases\n'

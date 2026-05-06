@@ -10,6 +10,34 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-05-06
+
+### Fixed
+
+- **Launcher migration no longer leaves Claude Desktop pointing at a
+  deleted file.** `odoo-mcp update`'s migration of the legacy
+  `~/.odoo-mcp/launch.sh` wrapper now rewrites the Claude Desktop
+  registration BEFORE deleting the script, uses a substring match
+  (`"launch.sh" in command`) so symlink-resolved or otherwise
+  non-identical paths are still detected as legacy entries, verifies
+  the rewrite landed by re-reading the config, and aborts the
+  migration (leaving `launch.sh` in place) if any step fails. If a
+  legacy script is found with no matching registration, a warning is
+  printed and nothing is touched. This fixes a real-world install run
+  where the migration deleted `launch.sh` but left Claude Desktop
+  pointing at the missing file, producing
+  `Failed to spawn process: No such file or directory` on the next
+  Claude Desktop restart.
+- **Sigstore issuer quirks no longer hard-fail the installer.**
+  `verify_release_attestation` and the bash mirror in `scripts/install.sh`
+  now treat a wider set of patterns as environmental (soft-fail with a
+  prompt) — `sigstore`, `issuer`, `tuf`, `network`, `connection refused`,
+  `timeout` — and reserve hard-fail for explicit tampering signals
+  (`signature does not match`, `signature mismatch`, `tampered`,
+  `invalid signature`, `unexpected signer`, `wrong owner`). Public-good
+  Sigstore issues no longer force users to install with
+  `--skip-verification`.
+
 ### Added
 
 - **Codex registration.** The setup wizard now registers `odoo-mcp` in

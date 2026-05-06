@@ -83,11 +83,17 @@ def _maybe_migrate_launcher() -> None:
     CLI directly with ``args: ["launch"]``, and the cross-platform
     credential store handles credential resolution in-process.
 
-    On update we detect a stale ``launch.sh``, rewrite the Claude Desktop
-    registration to the new direct-CLI form, and unlink the script. If
-    the user has hand-edited the registration to point somewhere else we
-    leave it alone — the migration only fires when the registered command
-    still equals the legacy launch.sh path.
+    Migration order matters: we MUST rewrite the Claude Desktop
+    registration BEFORE deleting ``launch.sh``. If we delete first and
+    the rewrite fails, Claude Desktop is left pointing at a missing
+    file — broken until the user manually edits the JSON.
+
+    Detection is loose: if the registered ``command`` references
+    ``launch.sh`` ANYWHERE (substring match), we treat it as a legacy
+    entry and force a rewrite. This handles symlink-resolved paths,
+    relative paths, and other quirks the strict equality check missed.
+    If no matching registration is found we log a warning and leave
+    launch.sh in place — better a stale script than a broken config.
     """
     import json
 
@@ -96,22 +102,74 @@ def _maybe_migrate_launcher() -> None:
     if not _LAUNCH_SH.exists():
         return
 
-    rewrote_registration = False
+    legacy_entry_found = False
+    config_data: dict[str, object] | None = None
     if _CLAUDE_DESKTOP_CONFIG.exists():
         try:
-            data = json.loads(_CLAUDE_DESKTOP_CONFIG.read_text())
+            loaded = json.loads(_CLAUDE_DESKTOP_CONFIG.read_text())
         except (OSError, ValueError):
-            data = None
-        if isinstance(data, dict):
-            servers = data.get("mcpServers")
+            loaded = None
+        if isinstance(loaded, dict):
+            config_data = loaded
+            servers = loaded.get("mcpServers")
             if isinstance(servers, dict):
                 entry = servers.get("odoo-mcp")
-                if isinstance(entry, dict) and entry.get("command") == str(_LAUNCH_SH):
-                    try:
-                        _register_claude_desktop()
-                        rewrote_registration = True
-                    except OSError as exc:
-                        print(f"Warning: could not migrate Claude Desktop registration ({exc}).")
+                if isinstance(entry, dict):
+                    command = entry.get("command")
+                    if isinstance(command, str) and "launch.sh" in command:
+                        legacy_entry_found = True
+
+    if not legacy_entry_found:
+        print(
+            f"Warning: legacy {_LAUNCH_SH} found but no matching Claude "
+            f"Desktop registration references it. Leaving the script in "
+            f"place — remove it manually if no longer needed."
+        )
+        return
+
+    # Rewrite Claude Desktop registration BEFORE deleting launch.sh.
+    try:
+        _register_claude_desktop()
+    except OSError as exc:
+        print(
+            f"{_RED}ERROR: could not rewrite Claude Desktop registration "
+            f"({exc}).{_RESET}\n"
+            f"Aborting launcher migration; {_LAUNCH_SH} left in place so "
+            f"Claude Desktop continues to work."
+        )
+        return
+
+    # Verify the rewrite landed: re-read the config and confirm command no
+    # longer references launch.sh. If verification fails, do NOT delete the
+    # script — the user is better off with a working stale launcher than a
+    # config pointing at a missing file.
+    try:
+        verify = json.loads(_CLAUDE_DESKTOP_CONFIG.read_text())
+    except (OSError, ValueError) as exc:
+        print(
+            f"{_RED}ERROR: could not re-read Claude Desktop config after "
+            f"rewrite ({exc}).{_RESET}\n"
+            f"Aborting launcher migration; {_LAUNCH_SH} left in place."
+        )
+        return
+    new_command = ""
+    if isinstance(verify, dict):
+        new_servers = verify.get("mcpServers")
+        if isinstance(new_servers, dict):
+            new_entry = new_servers.get("odoo-mcp")
+            if isinstance(new_entry, dict):
+                cmd = new_entry.get("command")
+                if isinstance(cmd, str):
+                    new_command = cmd
+    if "launch.sh" in new_command:
+        print(
+            f"{_RED}ERROR: Claude Desktop registration rewrite did not take "
+            f"effect — command still references launch.sh.{_RESET}\n"
+            f"Aborting launcher migration; {_LAUNCH_SH} left in place."
+        )
+        # Reference config_data so static analyzers see it's load-bearing.
+        del config_data
+        return
 
     try:
         _LAUNCH_SH.unlink()
@@ -119,13 +177,10 @@ def _maybe_migrate_launcher() -> None:
         print(f"Warning: could not remove legacy {_LAUNCH_SH} ({exc}).")
         return
 
-    if rewrote_registration:
-        print(
-            f"Migrated launcher: removed {_LAUNCH_SH} and updated Claude "
-            f"Desktop registration to call 'odoo-mcp launch' directly."
-        )
-    else:
-        print(f"Migrated launcher: removed legacy {_LAUNCH_SH}.")
+    print(
+        "Migrated launcher: Claude Desktop config now registers "
+        "'odoo-mcp launch' directly; legacy launch.sh removed."
+    )
 
 
 def _maybe_register_codex() -> None:

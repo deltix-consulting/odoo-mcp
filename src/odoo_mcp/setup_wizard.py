@@ -577,7 +577,9 @@ def _register_codex() -> bool:
         try:
             content = _CODEX_CONFIG.read_text()
         except OSError as exc:
-            print(f"  Warning: could not read {_CODEX_CONFIG}; skipping Codex registration ({exc}).")
+            print(
+                f"  Warning: could not read {_CODEX_CONFIG}; skipping Codex registration ({exc})."
+            )
             return False
 
     updated = _replace_toml_table(

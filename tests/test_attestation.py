@@ -78,6 +78,80 @@ def test_verify_returns_false_on_nonzero_exit_with_reason():
     assert "signature mismatch" in reason
 
 
+def test_sigstore_issuer_failure_is_environmental():
+    """Public-good sigstore issuer quirks must be treated as soft-fail."""
+    with (
+        patch("odoo_mcp.attestation.shutil.which", return_value="/usr/local/bin/gh"),
+        patch("odoo_mcp.attestation._download"),
+        patch(
+            "odoo_mcp.attestation.subprocess.run",
+            return_value=_completed(1, stderr='verifying with issuer "sigstore.dev"'),
+        ),
+    ):
+        verified, reason = attestation.verify_release_attestation("v0.13.1")
+    assert verified is False
+    assert reason.startswith("environment:")
+    assert not reason.startswith("verification failed")
+
+
+def test_signature_mismatch_is_hard_failure():
+    """Explicit tampering signal must hard-fail (not be soft-failed)."""
+    with (
+        patch("odoo_mcp.attestation.shutil.which", return_value="/usr/local/bin/gh"),
+        patch("odoo_mcp.attestation._download"),
+        patch(
+            "odoo_mcp.attestation.subprocess.run",
+            return_value=_completed(1, stderr="signature does not match the expected value"),
+        ),
+    ):
+        verified, reason = attestation.verify_release_attestation("v0.13.1")
+    assert verified is False
+    assert reason.startswith("verification failed")
+
+
+def test_existing_no_attestations_pattern_still_works():
+    """Regression: 'no attestations' must remain an environmental soft-fail."""
+    with (
+        patch("odoo_mcp.attestation.shutil.which", return_value="/usr/local/bin/gh"),
+        patch("odoo_mcp.attestation._download"),
+        patch(
+            "odoo_mcp.attestation.subprocess.run",
+            return_value=_completed(1, stderr="no attestations found for this artifact"),
+        ),
+    ):
+        verified, reason = attestation.verify_release_attestation("v0.13.1")
+    assert verified is False
+    assert reason.startswith("environment:")
+
+
+def test_tuf_failure_is_environmental():
+    with (
+        patch("odoo_mcp.attestation.shutil.which", return_value="/usr/local/bin/gh"),
+        patch("odoo_mcp.attestation._download"),
+        patch(
+            "odoo_mcp.attestation.subprocess.run",
+            return_value=_completed(1, stderr="TUF metadata refresh failed"),
+        ),
+    ):
+        verified, reason = attestation.verify_release_attestation("v0.13.1")
+    assert verified is False
+    assert reason.startswith("environment:")
+
+
+def test_network_timeout_is_environmental():
+    with (
+        patch("odoo_mcp.attestation.shutil.which", return_value="/usr/local/bin/gh"),
+        patch("odoo_mcp.attestation._download"),
+        patch(
+            "odoo_mcp.attestation.subprocess.run",
+            return_value=_completed(1, stderr="connection refused"),
+        ),
+    ):
+        verified, reason = attestation.verify_release_attestation("v0.13.1")
+    assert verified is False
+    assert reason.startswith("environment:")
+
+
 def test_verify_returns_false_when_gh_missing():
     with patch("odoo_mcp.attestation.shutil.which", return_value=None):
         verified, reason = attestation.verify_release_attestation("v0.6.0")
