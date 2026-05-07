@@ -192,9 +192,7 @@ def test_override_replaces_smart_default(tmp_path: Path) -> None:
         "useless": {"type": "char"},
     }
     fake = _FakeClient(fields_meta)
-    cfg = _instance_with_override(
-        {"account.move": ("id", "name", "partner_id", "amount_total")}
-    )
+    cfg = _instance_with_override({"account.move": ("id", "name", "partner_id", "amount_total")})
     app = _build(tmp_path, fake, cfg)
     payload = _call(Dispatcher(app), {"instance": "dev", "model": "account.move"})
     assert payload["ok"] is True

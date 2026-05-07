@@ -190,8 +190,7 @@ _PROMPTS: Final[list[Prompt]] = [
     Prompt(
         name="odoo_top_revenue_customers",
         description=(
-            "List top N customers by posted invoice revenue in a given "
-            "date range. Read-only."
+            "List top N customers by posted invoice revenue in a given date range. Read-only."
         ),
         arguments=[
             PromptArgument(name="instance", description="Instance name.", required=True),
@@ -347,11 +346,7 @@ def _recent_changes(instance: str) -> str:
 
 
 def _low_stock(instance: str, warehouse_id: str | None) -> str:
-    wh_clause = (
-        f" Filter to warehouse_id={warehouse_id} where supported."
-        if warehouse_id
-        else ""
-    )
+    wh_clause = f" Filter to warehouse_id={warehouse_id} where supported." if warehouse_id else ""
     return (
         f"Find low-stock products on Odoo instance '{instance}'.{wh_clause}\n"
         "1. odoo_describe_model on product.product to confirm the qty fields "
@@ -385,11 +380,7 @@ def _open_manufacturing(instance: str) -> str:
 
 
 def _hr_leave(instance: str, department_id: str | None) -> str:
-    dept = (
-        f"['department_id','=',{department_id}], "
-        if department_id
-        else ""
-    )
+    dept = f"['department_id','=',{department_id}], " if department_id else ""
     return (
         f"Review HR leave on Odoo instance '{instance}'.\n"
         "1. odoo_search_read hr.leave with domain "
@@ -433,9 +424,7 @@ def _unposted_journals(instance: str) -> str:
     )
 
 
-def _top_revenue_customers(
-    instance: str, days_back: str | None, top_n: str | None
-) -> str:
+def _top_revenue_customers(instance: str, days_back: str | None, top_n: str | None) -> str:
     days = days_back or "90"
     top = top_n or "10"
     return (
@@ -527,9 +516,7 @@ def get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptResult:
     elif name == "odoo_unposted_journal_entries":
         body = _unposted_journals(instance)
     elif name == "odoo_top_revenue_customers":
-        body = _top_revenue_customers(
-            instance, args.get("days_back"), args.get("top_n")
-        )
+        body = _top_revenue_customers(instance, args.get("days_back"), args.get("top_n"))
     elif name == "odoo_my_changes_today":
         body = _my_changes_today(instance)
     elif name == "odoo_diagnose_permissions":

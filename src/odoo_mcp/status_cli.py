@@ -161,9 +161,7 @@ def _status_payload(app: OdooMcpApp) -> dict[str, Any]:
         except OdooMcpError:
             rate_info = None
         writes_unlocked = (
-            True
-            if not rt.config.production
-            else app.prod_guard.is_unlocked(name, now=now_mono)
+            True if not rt.config.production else app.prod_guard.is_unlocked(name, now=now_mono)
         )
         commits_remaining = app.prod_guard.commits_remaining(name, now=now_mono)
         instances.append(

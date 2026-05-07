@@ -78,12 +78,8 @@ class _Report:
         """Machine-readable view for ``--json``."""
         return {
             "ok": self.ok,
-            "steps": [
-                {"name": s.name, "ok": s.ok, "detail": s.detail} for s in self.steps
-            ],
-            "warnings": [
-                {"name": w.name, "detail": w.detail} for w in self.warnings
-            ],
+            "steps": [{"name": s.name, "ok": s.ok, "detail": s.detail} for s in self.steps],
+            "warnings": [{"name": w.name, "detail": w.detail} for w in self.warnings],
         }
 
 

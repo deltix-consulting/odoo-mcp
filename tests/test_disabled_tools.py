@@ -23,17 +23,11 @@ def test_env_parses_comma_list(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_env_tolerates_whitespace_and_empties(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(
-        "ODOO_MCP_DISABLE_TOOLS", " odoo_create , , odoo_archive_or_delete  "
-    )
-    assert server._disabled_tools() == frozenset(
-        {"odoo_create", "odoo_archive_or_delete"}
-    )
+    monkeypatch.setenv("ODOO_MCP_DISABLE_TOOLS", " odoo_create , , odoo_archive_or_delete  ")
+    assert server._disabled_tools() == frozenset({"odoo_create", "odoo_archive_or_delete"})
 
 
-def test_disable_filters_tools_list(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:  # type: ignore[no-untyped-def]
+def test_disable_filters_tools_list(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("ODOO_MCP_DISABLE_TOOLS", "odoo_create,odoo_write")
 
     # Build a minimal app — most fields are unused for tools/list filtering.
@@ -135,7 +129,9 @@ def test_unknown_disable_names_are_logged_not_fatal(
         audit=AuditLog(tmp_path / "audit.jsonl"),
         prod_guard=ProdGuard(),
         rate_limiter=RateLimiter(),
-        instances={cfg.name: InstanceRuntime(config=cfg, client=OdooClient(cfg, credentials=creds))},
+        instances={
+            cfg.name: InstanceRuntime(config=cfg, client=OdooClient(cfg, credentials=creds))
+        },
     )
     server.build_server(app)
     msgs = " ".join(r.message for r in caplog.records)

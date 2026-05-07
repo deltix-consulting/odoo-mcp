@@ -132,9 +132,7 @@ def test_read_only_blocks_archive_or_delete(tmp_path: Path, read_only_env: None)
 
 def test_read_only_blocks_enable_prod_writes(tmp_path: Path, read_only_env: None) -> None:
     app = _build(tmp_path, production=True)
-    payload = _call(
-        Dispatcher(app), "odoo_enable_prod_writes", {"instance": "dev"}
-    )
+    payload = _call(Dispatcher(app), "odoo_enable_prod_writes", {"instance": "dev"})
     assert payload["ok"] is False
     assert "read-only" in payload["error"].lower()
 

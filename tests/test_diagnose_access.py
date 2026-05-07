@@ -96,9 +96,7 @@ def test_diagnose_access_registered() -> None:
 
 
 def test_diagnose_access_returns_four_rights(tmp_path: Path) -> None:
-    fake = _FakeClient(
-        {"read": True, "write": True, "create": False, "unlink": False}
-    )
+    fake = _FakeClient({"read": True, "write": True, "create": False, "unlink": False})
     app = _build(tmp_path, fake)
     payload = _call(Dispatcher(app), {"instance": "dev", "model": "res.partner"})
     assert payload["ok"] is True

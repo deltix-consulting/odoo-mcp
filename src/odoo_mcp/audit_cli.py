@@ -191,9 +191,7 @@ def _stats_payload(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_tool: dict[str, dict[str, Any]] = {}
     for e in entries:
         tool = str(e.get("tool", "-"))
-        bucket = by_tool.setdefault(
-            tool, {"calls": 0, "ok": 0, "err": 0, "durations": []}
-        )
+        bucket = by_tool.setdefault(tool, {"calls": 0, "ok": 0, "err": 0, "durations": []})
         bucket["calls"] += 1
         if str(e.get("result", "")) == "ok":
             bucket["ok"] += 1
@@ -229,9 +227,7 @@ def _render_stats(entries: list[dict[str, Any]]) -> str:
     by_tool: dict[str, dict[str, Any]] = {}
     for e in entries:
         tool = str(e.get("tool", "-"))
-        bucket = by_tool.setdefault(
-            tool, {"calls": 0, "ok": 0, "err": 0, "durations": []}
-        )
+        bucket = by_tool.setdefault(tool, {"calls": 0, "ok": 0, "err": 0, "durations": []})
         bucket["calls"] += 1
         if str(e.get("result", "")) == "ok":
             bucket["ok"] += 1

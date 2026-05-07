@@ -34,6 +34,10 @@ packages = ["src/odoo_mcp"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# The odoo_addon/ subtree is Odoo module code — it follows Odoo's own
+# conventions (no type annotations, server-side framework methods) and
+# is shipped untested. Don't lint it with our strict Python config.
+extend-exclude = ["odoo_addon"]
 
 [tool.ruff.lint]
 select = [
@@ -62,6 +66,7 @@ warn_unreachable = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 show_error_codes = true
+exclude = ["odoo_addon/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

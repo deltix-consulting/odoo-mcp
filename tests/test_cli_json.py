@@ -33,9 +33,7 @@ def test_cache_info_json_emits_machine_payload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db = tmp_path / "fc.db"
-    PersistentFieldsCache(db).put(
-        "dev", "res.partner", {"id": {"type": "integer"}}
-    )
+    PersistentFieldsCache(db).put("dev", "res.partner", {"id": {"type": "integer"}})
     monkeypatch.setattr(cache_cli, "_resolve_cache_path", lambda: db)
 
     rc, out = _capture(cache_cli.main, "--info", "--json")

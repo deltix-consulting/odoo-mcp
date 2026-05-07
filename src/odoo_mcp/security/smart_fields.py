@@ -22,9 +22,7 @@ from .fields import is_always_redacted_with_extra, is_default_hidden
 # Field types we drop from smart defaults. Binary and HTML payloads bloat
 # every record; one2many / many2many expand to ID lists that are usually
 # not what the caller wants without an explicit ask.
-_HEAVY_TYPES: Final[frozenset[str]] = frozenset(
-    {"binary", "html", "one2many", "many2many"}
-)
+_HEAVY_TYPES: Final[frozenset[str]] = frozenset({"binary", "html", "one2many", "many2many"})
 
 # Audit / housekeeping fields Odoo adds to every model. Always skipped.
 _AUDIT_FIELDS: Final[frozenset[str]] = frozenset(

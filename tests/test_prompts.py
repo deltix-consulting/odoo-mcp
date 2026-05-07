@@ -56,9 +56,7 @@ def test_get_prompt_overdue_default_days() -> None:
 
 def test_get_prompt_overdue_custom_days() -> None:
     text = _body(
-        prompts.get_prompt(
-            "odoo_overdue_invoices", {"instance": "dev", "days_overdue": "60"}
-        )
+        prompts.get_prompt("odoo_overdue_invoices", {"instance": "dev", "days_overdue": "60"})
     )
     assert "60 days" in text
 
@@ -86,9 +84,7 @@ def test_get_prompt_dup_partners_invalid_field_falls_back_to_vat() -> None:
 
 def test_get_prompt_pipeline_uses_stalled_days() -> None:
     text = _body(
-        prompts.get_prompt(
-            "odoo_pipeline_review", {"instance": "dev", "stalled_days": "21"}
-        )
+        prompts.get_prompt("odoo_pipeline_review", {"instance": "dev", "stalled_days": "21"})
     )
     assert "21 days" in text
 
@@ -112,17 +108,13 @@ def test_get_prompt_low_stock_includes_relevant_models(_marker: None = None) -> 
 
 def test_get_prompt_low_stock_with_warehouse() -> None:
     text = _body(
-        prompts.get_prompt(
-            "odoo_low_stock_check", {"instance": "dev", "warehouse_id": "3"}
-        )
+        prompts.get_prompt("odoo_low_stock_check", {"instance": "dev", "warehouse_id": "3"})
     )
     assert "warehouse_id=3" in text
 
 
 def test_get_prompt_open_manufacturing() -> None:
-    text = _body(
-        prompts.get_prompt("odoo_open_manufacturing_orders", {"instance": "dev"})
-    )
+    text = _body(prompts.get_prompt("odoo_open_manufacturing_orders", {"instance": "dev"}))
     assert "mrp.production" in text
 
 
@@ -140,26 +132,20 @@ def test_get_prompt_hr_leave_filters_department() -> None:
 
 def test_get_prompt_timesheet_uses_weeks() -> None:
     text = _body(
-        prompts.get_prompt(
-            "odoo_timesheet_review", {"instance": "dev", "weeks_back": "4"}
-        )
+        prompts.get_prompt("odoo_timesheet_review", {"instance": "dev", "weeks_back": "4"})
     )
     assert "4 week" in text
     assert "account.analytic.line" in text
 
 
 def test_get_prompt_unposted_journals() -> None:
-    text = _body(
-        prompts.get_prompt("odoo_unposted_journal_entries", {"instance": "dev"})
-    )
+    text = _body(prompts.get_prompt("odoo_unposted_journal_entries", {"instance": "dev"}))
     assert "account.move" in text
     assert "draft" in text
 
 
 def test_get_prompt_top_revenue_default_args() -> None:
-    text = _body(
-        prompts.get_prompt("odoo_top_revenue_customers", {"instance": "dev"})
-    )
+    text = _body(prompts.get_prompt("odoo_top_revenue_customers", {"instance": "dev"}))
     assert "Top 10" in text
     assert "90 days" in text
 
@@ -200,9 +186,7 @@ def test_my_changes_today_registered_and_renders() -> None:
 
 
 def test_get_prompt_diagnose_without_model() -> None:
-    text = _body(
-        prompts.get_prompt("odoo_diagnose_permissions", {"instance": "dev"})
-    )
+    text = _body(prompts.get_prompt("odoo_diagnose_permissions", {"instance": "dev"}))
     assert "odoo_list_instances" in text
 
 

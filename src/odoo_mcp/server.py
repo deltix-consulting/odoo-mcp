@@ -54,6 +54,7 @@ def _disabled_tools() -> frozenset[str]:
     names = {n.strip() for n in raw.split(",") if n.strip()}
     return frozenset(names)
 
+
 __all__ = [
     "Dispatcher",
     "InstanceRuntime",
@@ -143,9 +144,7 @@ def build_server(app: OdooMcpApp) -> Server:
         return prompt_lib.list_prompts()
 
     @server.get_prompt()  # type: ignore[no-untyped-call, untyped-decorator]
-    async def _get_prompt(
-        name: str, arguments: dict[str, str] | None
-    ) -> GetPromptResult:
+    async def _get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptResult:
         return prompt_lib.get_prompt(name, arguments)
 
     return server

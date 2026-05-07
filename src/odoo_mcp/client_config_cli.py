@@ -85,11 +85,7 @@ def _block_for(client: str, command: str) -> str:
 
     if client == "codex":
         # Codex uses TOML, not JSON.
-        toml = (
-            "[mcp_servers.odoo-mcp]\n"
-            f'command = "{command}"\n'
-            'args = ["launch"]\n'
-        )
+        toml = f'[mcp_servers.odoo-mcp]\ncommand = "{command}"\nargs = ["launch"]\n'
         return f"{toml}\nPath: ~/.codex/config.toml"
 
     if client == "cursor":
@@ -100,9 +96,7 @@ def _block_for(client: str, command: str) -> str:
         }
         return _json_block(
             body,
-            footer=(
-                "Path: ~/.cursor/mcp.json (global) or .cursor/mcp.json (per-project)"
-            ),
+            footer=("Path: ~/.cursor/mcp.json (global) or .cursor/mcp.json (per-project)"),
         )
 
     if client == "windsurf":

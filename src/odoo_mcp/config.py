@@ -368,9 +368,7 @@ def _parse_sensitive_fields(raw: Any, instance_name: str) -> dict[str, frozenset
     return out
 
 
-def _parse_smart_fields_overrides(
-    raw: Any, instance_name: str
-) -> dict[str, tuple[str, ...]]:
+def _parse_smart_fields_overrides(raw: Any, instance_name: str) -> dict[str, tuple[str, ...]]:
     """Parse ``[instances.NAME.smart_fields_overrides]`` into a model -> tuple map.
 
     Order matters here (unlike :func:`_parse_sensitive_fields`): the configured

@@ -100,6 +100,7 @@ def _read_only_session() -> bool:
     raw = os.environ.get("ODOO_MCP_READ_ONLY", "")
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
+
 # ---------------------------------------------------------------------------
 # Shared application state
 # ---------------------------------------------------------------------------
