@@ -8,6 +8,7 @@ not trigger any tool calls).
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from datetime import UTC, datetime
@@ -144,14 +145,69 @@ def _render(app: OdooMcpApp) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _status_payload(app: OdooMcpApp) -> dict[str, Any]:
+    """Machine-readable equivalent of :func:`_render` for ``--json``."""
+    now_mono = time.monotonic()
+    instances: list[dict[str, Any]] = []
+    for name, rt in app.instances.items():
+        uid = rt.client._uid  # noqa: SLF001 — same lazy-state read as the human render
+        try:
+            tokens = app.rate_limiter.peek(name, now=now_mono)
+            capacity = app.rate_limiter.capacity(name)
+            rate_info: dict[str, Any] | None = {
+                "tokens_available": round(tokens, 2),
+                "capacity_per_minute": int(capacity),
+            }
+        except OdooMcpError:
+            rate_info = None
+        writes_unlocked = (
+            True
+            if not rt.config.production
+            else app.prod_guard.is_unlocked(name, now=now_mono)
+        )
+        commits_remaining = app.prod_guard.commits_remaining(name, now=now_mono)
+        instances.append(
+            {
+                "name": name,
+                "url": rt.config.url,
+                "database": rt.config.database,
+                "production": rt.config.production,
+                "uid": uid,
+                "rate_limit": rate_info,
+                "writes_unlocked": writes_unlocked,
+                "commits_remaining": commits_remaining,
+            }
+        )
+    return {
+        "version": __version__,
+        "config_path": str(app.config.path),
+        "audit_log_path": str(app.config.audit_log_path),
+        "instances": instances,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
-    _ = argv  # no flags currently
+    args = list(argv or [])
+    as_json = False
+    for arg in args:
+        if arg == "--json":
+            as_json = True
+        else:
+            print(f"Unknown argument: {arg!r}", file=sys.stderr)
+            print("Usage: odoo-mcp status [--json]", file=sys.stderr)
+            return 2
     try:
         app = build_app()
     except OdooMcpError as exc:
-        print(f"Cannot build status: {exc.user_message}", file=sys.stderr)
+        if as_json:
+            print(json.dumps({"ok": False, "error": exc.user_message}))
+        else:
+            print(f"Cannot build status: {exc.user_message}", file=sys.stderr)
         return 1
-    print(_render(app), end="")
+    if as_json:
+        print(json.dumps(_status_payload(app), separators=(",", ":")))
+    else:
+        print(_render(app), end="")
     return 0
 
 

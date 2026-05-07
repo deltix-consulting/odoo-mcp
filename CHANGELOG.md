@@ -10,6 +10,211 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-05-07
+
+### Added
+
+- **``ODOO_MCP_TOOL_LATENCY_BUDGET_MS`` env var.** Set to a positive
+  integer to make the dispatcher emit a ``WARNING`` log line tagged
+  ``slow_tool_call`` whenever a successful tool call exceeds the
+  budget. Pure observability — never alters call results. Doctor
+  surfaces the configured budget so you can spot it in pre-flight.
+
+- **``--json`` on ``odoo-mcp cache --info`` and ``odoo-mcp status``.**
+  Cache emits the same dict ``cache.info()`` returns; status emits a
+  new compact payload (``version``, ``config_path``,
+  ``audit_log_path``, plus per-instance ``uid`` / ``rate_limit`` /
+  ``writes_unlocked`` / ``commits_remaining``). All four CLIs that
+  matter for CI ingestion — ``doctor``, ``audit``, ``cache``,
+  ``status`` — now have a stable JSON mode.
+
+- **``odoo_my_changes_today`` prompt.** End-of-day recap workflow:
+  queries records with ``write_uid = <current uid>`` and
+  ``write_date >= today midnight`` across the common business models.
+  Read-only.
+
+- **Optional Odoo-side companion addon (skeleton).** ``odoo_addon/``
+  ships a minimal Odoo module (``odoo_mcp_companion``) that adds two
+  security groups (MCP Read Only / MCP Read+Write) and a
+  ``mcp.access.profile`` model so an Odoo admin can centralize
+  server-side scoping for whichever user the MCP authenticates as.
+  **Marked as untested by maintainers** — see ``odoo_addon/README.md``.
+  Treat it as a starting point for defense-in-depth, not a drop-in
+  module.
+
+### Changed
+
+- ``odoo-mcp doctor`` now surfaces ``ODOO_MCP_DISABLE_TOOLS`` and
+  ``ODOO_MCP_TOOL_LATENCY_BUDGET_MS`` alongside the existing
+  ``ODOO_MCP_READ_ONLY`` warning, so all three observability /
+  scoping env vars are visible in pre-flight.
+
+## [0.15.1] - 2026-05-07
+
+### Added
+
+- **``ODOO_MCP_DISABLE_TOOLS`` env var.** Comma-separated list of tool
+  names that are filtered out of the ``tools/list`` advertisement so a
+  well-behaved MCP client never sees them. Complements
+  ``ODOO_MCP_READ_ONLY``: where read-only refuses every write call,
+  this hides specific tools entirely. Useful for handing a junior
+  consultant access to ``odoo_search_read`` / ``odoo_read`` without
+  also exposing ``odoo_archive_or_delete``. Unknown names are logged
+  and ignored — they don't fail the server.
+
+- **``has_more`` flag on ``odoo_search_read`` responses.** When the
+  returned page is at the limit, the response now includes
+  ``has_more: true`` plus ``next_offset`` so Claude knows to paginate
+  or narrow the domain. Costs no extra round trip — purely derived
+  from existing data. When fewer records than the limit come back,
+  ``has_more`` is ``false`` and ``next_offset`` is omitted.
+
+- **``--json`` output on ``odoo-mcp doctor`` and ``odoo-mcp audit``.**
+  Doctor emits ``{"ok": bool, "steps": [...], "warnings": [...]}``,
+  ready for CI gating. Audit emits the filtered entries (or, with
+  ``--stats``, a per-tool array of latency / count rows). Both modes
+  suppress the human-formatted output so the JSON line is the only
+  thing on stdout.
+
+## [0.15.0] - 2026-05-07
+
+This release widens the MCP's audience beyond Claude Desktop / Claude
+Code by shipping ready-to-paste config snippets for every popular MCP
+client, and fleshes out the prompts library with industry-tied
+workflows aimed at the deltix consulting base.
+
+### Added
+
+- **``odoo-mcp client-config`` CLI.** Prints config snippets for the
+  popular MCP clients with the absolute ``odoo-mcp`` binary path
+  pre-resolved (so consultants don't have to figure out where ``uv
+  tool install`` placed it). Supported: Claude Desktop, Claude Code,
+  OpenAI Codex CLI, Cursor, Windsurf, Continue.dev, Zed, plus a
+  generic stdio fallback for any MCP-compliant client. Modes:
+  ``--list`` enumerates supported clients; ``--client NAME`` prints
+  one block; ``--detect`` scans the local machine and prints blocks
+  for clients whose config dirs exist; no flag prints all blocks. The
+  command is informational — it never writes any client config files
+  itself (``odoo-mcp setup`` still does the Claude Desktop / Codex
+  registration).
+
+- **Six industry-tied prompts.** Round out the prompts library with
+  workflows mapped to our four industry templates:
+  ``odoo_low_stock_check`` (wholesale), ``odoo_open_manufacturing_orders``
+  (manufacturing), ``odoo_hr_leave_overview`` (HR),
+  ``odoo_timesheet_review`` (professional services),
+  ``odoo_unposted_journal_entries`` (accounting), and
+  ``odoo_top_revenue_customers`` (cross-industry sales review). Each
+  prompt accepts an ``instance`` argument plus optional scoping
+  parameters (``warehouse_id``, ``department_id``, ``weeks_back``, ...).
+
+## [0.14.2] - 2026-05-07
+
+### Added
+
+- **L2 fields cache schema versioning.** The persistent SQLite cache
+  payload now embeds a ``_v`` marker; rows written by older versions
+  are silently treated as a miss and re-fetched. This was the missing
+  piece for v0.14.1's ``store`` attribute — without it deployed
+  installs would have used stale cache entries (without ``store``) for
+  up to 24 hours, defeating the new computed-field skip in smart
+  selection.
+
+- **Per-model ``smart_fields_overrides`` in instance config.** A new
+  ``[instances.NAME.smart_fields_overrides]`` table maps a model to an
+  ordered list of fields. When the caller omits ``fields`` on
+  ``odoo_search_read`` / ``odoo_read``, the override replaces smart
+  selection for that model. Sensitive-field redaction still applies on
+  the response — overrides cannot leak passwords / VAT / etc. Lets
+  consultants tune what a klant's ``account.move`` returns by default
+  without touching code.
+
+- **``odoo-mcp audit --stats``.** Per-tool call counts, ok/error split,
+  and p50/p95/max latency in ms, sorted by busiest tool. Helps
+  operators spot slow models, runaway loops, or unhealthy instances.
+  Combines with ``--instance`` and ``--since`` filters; ignores
+  ``--tail`` because percentiles need the full sample.
+
+- **Doctor surfaces ``ODOO_MCP_READ_ONLY``.** When the env var is set,
+  ``odoo-mcp doctor`` emits a warning line so a consultant who flipped
+  the gate for a demo doesn't later wonder why every write fails.
+
+## [0.14.1] - 2026-05-07
+
+### Added
+
+- **Read-only session toggle.** Setting the env var
+  ``ODOO_MCP_READ_ONLY=1`` (or ``true`` / ``yes`` / ``on``) refuses
+  every write-path tool — ``odoo_create``, ``odoo_write``,
+  ``odoo_archive_or_delete``, ``odoo_enable_prod_writes`` —
+  irrespective of per-instance ``production`` flags or unlock state.
+  Reads remain unaffected. ``odoo_list_instances`` surfaces
+  ``session_read_only: true`` so Claude knows the gate is on. Useful
+  for demos, training sessions, and external consultants.
+
+- **Studio / custom field markers in ``odoo_describe_model``.** Fields
+  whose name starts with ``x_`` get ``_custom: true``; fields whose
+  name starts with ``x_studio_`` get both ``_custom: true`` and
+  ``_studio: true``. Lets Claude tell client-specific custom fields
+  apart from standard Odoo fields without an extra ``scan-custom``
+  invocation. Audit log records ``custom_field_count`` /
+  ``studio_field_count`` per call.
+
+- **Smart-field selection now skips non-stored computed fields.** The
+  client's ``fields_get`` call requests the ``store`` attribute, and
+  ``select_smart_fields`` excludes any field where ``store=False``.
+  Cuts further response noise on models with many computed
+  display-only fields. Falls back conservatively (keep the field) when
+  ``store`` is missing — older L2-cache entries still work.
+
+- ``OdooClient.username`` public property — diagnostic-friendly
+  alternative to the previous private ``_get_credentials()`` access in
+  the dispatcher. Returns ``None`` if credentials haven't been loaded
+  yet.
+
+## [0.14.0] - 2026-05-07
+
+This release closes the most visible feature gaps with the other Odoo MCP
+projects on GitHub (notably tuanle96/mcp-odoo and hachecito/odoo-mcp-improved)
+without compromising our security position. Three additions:
+
+### Added
+
+- **`odoo_diagnose_access` tool.** Reports `read` / `write` / `create` /
+  `unlink` rights for the authenticated Odoo user on a given model, plus
+  the user's `uid`, `login`, and admin status. Read-only and goes through
+  the same allowlist + rate-limit pipeline as every other tool. Useful
+  when a `search_read` returns fewer records than expected, or before
+  attempting a write to a model the API user may not have rights on.
+  Backed by Odoo's `check_access_rights(op, raise_exception=False)`.
+
+- **Smart-default fields on `odoo_search_read` and `odoo_read`.** The
+  `fields` argument is now optional. When omitted, the dispatcher
+  computes a curated default: priority columns (`id`, `name`,
+  `display_name`, `state`, `partner_id`, ...) followed by an
+  alphabetical fill, capped at 25 fields. Binary, HTML, one2many,
+  many2many, audit fields (`create_uid`, `__last_update`,
+  `message_*`, `activity_*`), and any sensitive field (always-redacted
+  or default-hidden) are excluded. Sensitive-field policy still applies
+  in full — smart selection never bypasses redaction. Responses include
+  a `smart_fields_used` array so the caller can see what was selected.
+  Explicit `fields=[...]` still works unchanged.
+
+- **MCP prompts library.** Six pre-canned prompts surface in clients
+  like Claude Desktop as slash-commands: `odoo_month_end_check`,
+  `odoo_overdue_invoices`, `odoo_find_duplicate_partners`,
+  `odoo_pipeline_review`, `odoo_recent_changes`,
+  `odoo_diagnose_permissions`. Each prompt requires an `instance`
+  argument and emits a short instruction message that nudges Claude
+  into running the right sequence of existing tools. Prompts never
+  call Odoo themselves — they're just templates.
+
+### Changed
+
+- `odoo_help` tool list now includes `odoo_diagnose_access`.
+- `Operation` enum gains `DIAGNOSE_ACCESS` (read-side). No write paths
+  added.
+
 ## [0.13.2] - 2026-05-06
 
 ### Fixed

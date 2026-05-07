@@ -170,6 +170,7 @@ class Operation(StrEnum):
     ARCHIVE = "archive"
     UNLINK = "unlink"
     FIELDS_GET = "fields_get"  # used only by odoo_describe_model
+    DIAGNOSE_ACCESS = "diagnose_access"  # used only by odoo_diagnose_access
     HELP = "help"  # used only by odoo_help (no Odoo round-trip)
     LIST_INSTANCES = "list_instances"  # used only by odoo_list_instances
 
@@ -182,6 +183,7 @@ _READ_OPS: Final[frozenset[Operation]] = frozenset(
         Operation.READ_GROUP,
         Operation.LOOKUP,
         Operation.FIELDS_GET,
+        Operation.DIAGNOSE_ACCESS,
         Operation.HELP,
         Operation.LIST_INSTANCES,
     }

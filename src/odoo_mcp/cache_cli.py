@@ -16,6 +16,7 @@ falls back to the default constant.
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -43,8 +44,11 @@ def _format_ts(value: float | None) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(value))
 
 
-def _print_info(cache: PersistentFieldsCache) -> int:
+def _print_info(cache: PersistentFieldsCache, *, as_json: bool = False) -> int:
     info = cache.info()
+    if as_json:
+        print(json.dumps(info, separators=(",", ":"), default=str))
+        return 0
     print(f"path:       {info['path']}")
     print(f"file size:  {info['file_size_bytes']} bytes")
     print(f"rows:       {info['row_count']}")
@@ -68,6 +72,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Restrict --clear to one instance (otherwise drops everything).",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON for --info instead of the formatted lines.",
+    )
     ns = parser.parse_args(argv)
 
     cache_path = _resolve_cache_path()
@@ -77,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cache = PersistentFieldsCache(cache_path)
     if ns.info:
-        return _print_info(cache)
+        return _print_info(cache, as_json=ns.json)
 
     # --clear path:
     if ns.instance:

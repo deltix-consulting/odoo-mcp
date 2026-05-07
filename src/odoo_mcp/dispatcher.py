@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import Callable
@@ -35,6 +36,7 @@ from typing import Any
 from mcp.types import TextContent
 
 from . import __version__
+from ._scan_heuristics import is_custom_field_name, is_studio_field_name
 from .audit import AuditEvent, AuditLog
 from .client import OdooClient
 from .config import AppConfig, InstanceConfig
@@ -64,8 +66,39 @@ from .security.fields import (
 )
 from .security.limits import RateLimiter, clamp_limit
 from .security.prod_guard import ProdGuard
+from .security.smart_fields import select_smart_fields
 
 logger = logging.getLogger(__name__)
+
+
+def _latency_budget_ms() -> int | None:
+    """Return the per-tool latency budget in ms, or ``None`` if unset.
+
+    Driven by ``ODOO_MCP_TOOL_LATENCY_BUDGET_MS``. When a successful call
+    exceeds the budget, the dispatcher emits a WARNING log line tagged
+    ``slow_tool_call``. Pure observability — never fails the call. Set
+    to a non-positive integer to disable; absent / unparseable values
+    also disable.
+    """
+    raw = os.environ.get("ODOO_MCP_TOOL_LATENCY_BUDGET_MS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _read_only_session() -> bool:
+    """True iff ``ODOO_MCP_READ_ONLY`` is set to a truthy value at process start.
+
+    Read each call (cheap) so tests can set/unset the env var dynamically.
+    Truthy values are ``"1"``, ``"true"``, ``"yes"``, ``"on"`` (case-insensitive).
+    Anything else — including unset — disables the gate.
+    """
+    raw = os.environ.get("ODOO_MCP_READ_ONLY", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 # ---------------------------------------------------------------------------
 # Shared application state
@@ -165,6 +198,17 @@ class Dispatcher:
             return [
                 _text({"ok": False, "error_code": "internal_error", "error": wrapped.user_message})
             ]
+        elapsed = _elapsed_ms(started)
+        budget = _latency_budget_ms()
+        if budget is not None and elapsed > budget:
+            instance_str = instance if isinstance(instance, str) else "-"
+            logger.warning(
+                "slow_tool_call: tool=%s instance=%s elapsed_ms=%d budget_ms=%d",
+                name,
+                instance_str,
+                elapsed,
+                budget,
+            )
         return [_text({"ok": True, **result}, default=str)]
 
     def _dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -257,11 +301,14 @@ class Dispatcher:
             for name, rt in self.app.instances.items()
         ]
         self._audit("odoo_list_instances", Operation.LIST_INSTANCES, None, None, 0, False, {})
-        return {
+        result: dict[str, Any] = {
             "mcp_version": __version__,
             "denylist_size": len(MODEL_DENYLIST),
             "instances": out,
         }
+        if _read_only_session():
+            result["session_read_only"] = True
+        return result
 
     def _describe_model(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_describe_model", args, Operation.FIELDS_GET)
@@ -301,7 +348,27 @@ class Dispatcher:
                 }
                 for fname, meta in raw.items()
             }
-        self._audit_ok(ctx, {"field_count": len(filtered)}, args)
+        # Tag custom and Studio-origin fields so Claude knows they're not part
+        # of standard Odoo. Cheap heuristic via name prefix; matches the same
+        # logic used by the scan-custom CLI. Only emit truthy markers — keeps
+        # the response tight when there are no custom fields on the model.
+        custom_count = 0
+        studio_count = 0
+        for fname, meta in filtered.items():
+            if is_studio_field_name(fname):
+                meta["_studio"] = True
+                meta["_custom"] = True
+                custom_count += 1
+                studio_count += 1
+            elif is_custom_field_name(fname):
+                meta["_custom"] = True
+                custom_count += 1
+        details: dict[str, Any] = {"field_count": len(filtered)}
+        if custom_count:
+            details["custom_field_count"] = custom_count
+        if studio_count:
+            details["studio_field_count"] = studio_count
+        self._audit_ok(ctx, details, args)
         return {"model": ctx.model, "fields": filtered}
 
     def _lookup(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -365,14 +432,41 @@ class Dispatcher:
         fields_meta = rt.client.fields_get(model)
         known = frozenset(fields_meta.keys())
         overrides = rt.config.sensitive_fields
-        fields = validate_requested_fields(
-            model,
-            _require_list_of_str(args, "fields"),
-            known,
-            allow_sensitive=allow_sensitive,
-            instance_overrides=overrides,
-            extra_redacted=rt.extra_redacted,
-        )
+        smart = False
+        raw_fields = args.get("fields")
+        if raw_fields is None:
+            override = rt.config.smart_fields_overrides.get(model)
+            if override is not None:
+                # Validate the override against the live schema and the
+                # sensitive-field policy. Trusted source (config.toml,
+                # chmod 600) but we still apply the same checks so a typo
+                # surfaces clearly and a sensitive field can't be opened
+                # via override + omitted ``allow_sensitive_fields``.
+                fields = validate_requested_fields(
+                    model,
+                    list(override),
+                    known,
+                    allow_sensitive=allow_sensitive,
+                    instance_overrides=overrides,
+                    extra_redacted=rt.extra_redacted,
+                )
+            else:
+                fields = select_smart_fields(
+                    model,
+                    fields_meta,
+                    instance_overrides=overrides,
+                    extra_redacted=rt.extra_redacted,
+                )
+            smart = True
+        else:
+            fields = validate_requested_fields(
+                model,
+                _require_list_of_str(args, "fields"),
+                known,
+                allow_sensitive=allow_sensitive,
+                instance_overrides=overrides,
+                extra_redacted=rt.extra_redacted,
+            )
         domain = sandbox_domain(args.get("domain") or [], known)
         limit = clamp_limit(
             args.get("limit"), rt.config.max_records_default, rt.config.max_records_hard_cap
@@ -401,15 +495,29 @@ class Dispatcher:
                 "offset": offset,
                 "field_count": len(fields),
                 "domain_leaves": sum(1 for e in domain if not isinstance(e, str)),
+                "smart_fields": smart,
             },
             args,
         )
-        return {
+        result: dict[str, Any] = {
             "instance": ctx.instance,
             "model": model,
             "records": redacted,
             "count": len(redacted),
         }
+        # If the page came back full, signal there may be more so Claude
+        # knows to either bump ``offset`` or narrow the domain. Doesn't
+        # cost a round trip — purely a flag based on what we already have.
+        # When we returned fewer records than the limit, ``has_more`` is
+        # known false; when equal, we don't know — keep it as a hint.
+        if len(redacted) >= limit:
+            result["has_more"] = True
+            result["next_offset"] = offset + limit
+        else:
+            result["has_more"] = False
+        if smart:
+            result["smart_fields_used"] = fields
+        return result
 
     def _search_count(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_search_count", args, Operation.SEARCH_COUNT)
@@ -500,15 +608,38 @@ class Dispatcher:
             raise OdooMcpError(f"Cannot read more than {cap} ids at once.")
 
         fields_meta = rt.client.fields_get(model)
+        known = frozenset(fields_meta.keys())
         overrides = rt.config.sensitive_fields
-        fields = validate_requested_fields(
-            model,
-            _require_list_of_str(args, "fields"),
-            frozenset(fields_meta.keys()),
-            allow_sensitive=allow_sensitive,
-            instance_overrides=overrides,
-            extra_redacted=rt.extra_redacted,
-        )
+        smart = False
+        raw_fields = args.get("fields")
+        if raw_fields is None:
+            override = rt.config.smart_fields_overrides.get(model)
+            if override is not None:
+                fields = validate_requested_fields(
+                    model,
+                    list(override),
+                    known,
+                    allow_sensitive=allow_sensitive,
+                    instance_overrides=overrides,
+                    extra_redacted=rt.extra_redacted,
+                )
+            else:
+                fields = select_smart_fields(
+                    model,
+                    fields_meta,
+                    instance_overrides=overrides,
+                    extra_redacted=rt.extra_redacted,
+                )
+            smart = True
+        else:
+            fields = validate_requested_fields(
+                model,
+                _require_list_of_str(args, "fields"),
+                known,
+                allow_sensitive=allow_sensitive,
+                instance_overrides=overrides,
+                extra_redacted=rt.extra_redacted,
+            )
         redacted = redact_response(
             model,
             rt.client.read(model, ids, fields),
@@ -522,17 +653,26 @@ class Dispatcher:
         redacted = _strip_extra_fields(redacted, fields)
         self._audit_ok(
             ctx,
-            {"record_count": len(redacted), "field_count": len(fields), "id_count": len(ids)},
+            {
+                "record_count": len(redacted),
+                "field_count": len(fields),
+                "id_count": len(ids),
+                "smart_fields": smart,
+            },
             args,
         )
-        return {
+        result: dict[str, Any] = {
             "instance": ctx.instance,
             "model": model,
             "records": redacted,
             "count": len(redacted),
         }
+        if smart:
+            result["smart_fields_used"] = fields
+        return result
 
     def _create(self, args: dict[str, Any]) -> dict[str, Any]:
+        _refuse_if_read_only_session()
         ctx = self._begin("odoo_create", args, Operation.CREATE)
         assert ctx.model is not None
         rt, model = ctx.rt, ctx.model
@@ -574,6 +714,7 @@ class Dispatcher:
         return result
 
     def _write(self, args: dict[str, Any]) -> dict[str, Any]:
+        _refuse_if_read_only_session()
         ctx = self._begin("odoo_write", args, Operation.WRITE)
         assert ctx.model is not None
         rt, model = ctx.rt, ctx.model
@@ -631,6 +772,7 @@ class Dispatcher:
         mode = args.get("mode")
         if mode not in ("archive", "delete"):
             raise OdooMcpError("mode must be 'archive' or 'delete'.")
+        _refuse_if_read_only_session()
         op = Operation.ARCHIVE if mode == "archive" else Operation.UNLINK
         ctx = self._begin("odoo_archive_or_delete", args, op)
         assert ctx.model is not None
@@ -720,7 +862,42 @@ class Dispatcher:
         assert ctx.model is not None
         self.app.prod_guard.consume_pending(token, ctx.instance, ctx.op.value, ctx.model)
 
+    def _diagnose_access(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Report Odoo ACL info for the authenticated user on one model.
+
+        Calls ``check_access_rights(op, raise_exception=False)`` for the four
+        canonical operations. The model still has to pass the MCP allowlist
+        — diagnose is read-only but operates inside our security envelope.
+        Pure introspection: no record reads, no writes.
+        """
+        ctx = self._begin("odoo_diagnose_access", args, Operation.DIAGNOSE_ACCESS)
+        assert ctx.model is not None
+        rt, model = ctx.rt, ctx.model
+        rights: dict[str, bool] = {}
+        for op in ("read", "write", "create", "unlink"):
+            try:
+                rights[f"can_{op}"] = rt.client.check_access_rights(model, op)
+            except OdooMcpError:
+                # If Odoo refuses to even tell us (rare), report False rather
+                # than failing the whole tool. The audit log still captures it.
+                rights[f"can_{op}"] = False
+        self._audit_ok(
+            ctx,
+            {"can_read_field": rights["can_read"]},
+            args,
+        )
+        return {
+            "instance": ctx.instance,
+            "model": model,
+            "uid": rt.client.uid,
+            "login": rt.client.username,
+            "is_admin": rt.client.is_admin,
+            "admin_reason": rt.client.admin_reason,
+            **rights,
+        }
+
     def _enable_prod_writes(self, args: dict[str, Any]) -> dict[str, Any]:
+        _refuse_if_read_only_session()
         instance_name = _require_str(args, "instance")
         rt = self.app.instance(instance_name)
         expiry = self.app.prod_guard.unlock(
@@ -841,6 +1018,7 @@ _HANDLERS: dict[str, Callable[[Dispatcher, dict[str, Any]], dict[str, Any]]] = {
     "odoo_write": Dispatcher._write,
     "odoo_archive_or_delete": Dispatcher._archive_or_delete,
     "odoo_enable_prod_writes": Dispatcher._enable_prod_writes,
+    "odoo_diagnose_access": Dispatcher._diagnose_access,
 }
 
 
@@ -896,6 +1074,22 @@ def _text(payload: dict[str, Any], *, default: Callable[[Any], Any] | None = Non
 
 def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
+
+
+def _refuse_if_read_only_session() -> None:
+    """Refuse any write-path entry point if the session is read-only.
+
+    The check is independent of per-instance ``production`` flags and the
+    prod-guard unlock state. Setting ``ODOO_MCP_READ_ONLY=1`` in the
+    process environment turns the entire MCP into a strict read-only
+    surface — useful for demos, training sessions, or external
+    consultants who should never be able to commit anything.
+    """
+    if _read_only_session():
+        raise ProdGuardError(
+            "Session is read-only (ODOO_MCP_READ_ONLY=1). All write paths "
+            "are refused regardless of instance, prod-guard state, or unlock."
+        )
 
 
 def _refuse_write_blocklisted(model: str) -> None:
@@ -970,6 +1164,7 @@ _HELP_TOOLS_TERSE: list[dict[str, str]] = [
         "purpose": "Archive (reversible) or delete (permanent). Always ask user which.",
     },
     {"name": "odoo_enable_prod_writes", "purpose": "Unlock prod writes for 15 minutes."},
+    {"name": "odoo_diagnose_access", "purpose": "Read/write/create/unlink rights on a model."},
 ]
 
 

@@ -67,6 +67,7 @@ _VALID_INSTANCE_KEYS: Final[frozenset[str]] = frozenset(
         "refuse_admin_on_production",
         "custom_sensitive_field_patterns",
         "max_commits_per_unlock",
+        "smart_fields_overrides",
     }
 )
 
@@ -106,6 +107,13 @@ class InstanceConfig:
     refuse_admin_on_production: bool = True
     custom_sensitive_field_patterns: tuple[str, ...] = ()
     max_commits_per_unlock: int = 10
+    # Per-model override of the smart-default field list used by
+    # ``odoo_search_read`` / ``odoo_read`` when the caller omits ``fields``.
+    # Keys are model strings, values are tuples of field names. When a model
+    # is present here the smart-selection heuristic is bypassed entirely
+    # for that model and the configured list is returned as-is (sensitive
+    # field redaction still applies on the response side).
+    smart_fields_overrides: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +309,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
     custom_patterns = tuple(raw_patterns)
 
     max_commits = _require_int(entry, "max_commits_per_unlock", 10, minimum=1, maximum=1000)
+    smart_overrides = _parse_smart_fields_overrides(entry.get("smart_fields_overrides"), name)
 
     return InstanceConfig(
         name=name,
@@ -318,6 +327,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         refuse_admin_on_production=refuse_admin_on_production,
         custom_sensitive_field_patterns=custom_patterns,
         max_commits_per_unlock=max_commits,
+        smart_fields_overrides=smart_overrides,
     )
 
 
@@ -355,6 +365,50 @@ def _parse_sensitive_fields(raw: Any, instance_name: str) -> dict[str, frozenset
                     f"be non-empty strings, got {fname!r}"
                 )
         out[model] = frozenset(fields_list)
+    return out
+
+
+def _parse_smart_fields_overrides(
+    raw: Any, instance_name: str
+) -> dict[str, tuple[str, ...]]:
+    """Parse ``[instances.NAME.smart_fields_overrides]`` into a model -> tuple map.
+
+    Order matters here (unlike :func:`_parse_sensitive_fields`): the configured
+    field list is returned to Claude in the order the consultant wrote it. An
+    explicit empty list is rejected — if you don't want a smart default for a
+    model, just don't add an override for it.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"[instances.{instance_name}.smart_fields_overrides] must be a table, "
+            f"got {type(raw).__name__}"
+        )
+    out: dict[str, tuple[str, ...]] = {}
+    for model, fields_list in raw.items():
+        if not isinstance(model, str) or not model:
+            raise ConfigError(
+                f"[instances.{instance_name}.smart_fields_overrides] keys must be "
+                f"non-empty model strings, got {model!r}"
+            )
+        if not isinstance(fields_list, list) or not fields_list:
+            raise ConfigError(
+                f"[instances.{instance_name}.smart_fields_overrides.{model}] must be "
+                f"a non-empty list of field names"
+            )
+        for fname in fields_list:
+            if not isinstance(fname, str) or not fname:
+                raise ConfigError(
+                    f"[instances.{instance_name}.smart_fields_overrides.{model}] "
+                    f"entries must be non-empty strings, got {fname!r}"
+                )
+            if "." in fname:
+                raise ConfigError(
+                    f"[instances.{instance_name}.smart_fields_overrides.{model}] "
+                    f"may not contain dotted field traversals: {fname!r}"
+                )
+        out[model] = tuple(fields_list)
     return out
 
 

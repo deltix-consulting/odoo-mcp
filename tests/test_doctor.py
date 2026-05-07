@@ -332,3 +332,56 @@ def test_prod_guard_hint_no_workaround() -> None:
     # Old hint named the verb to call (odoo_enable_prod_writes); drop it.
     assert "odoo_enable_prod_writes" not in hint
     assert "operator" in hint.lower()
+
+
+# -----------------------------------------------------------------------------
+# --json output
+# -----------------------------------------------------------------------------
+
+
+def test_doctor_json_emits_machine_readable_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+
+    cfg = _write_min_config(tmp_path)
+    _stub_loader(monkeypatch)
+    _stub_set_at(monkeypatch, None)
+    monkeypatch.delenv("ODOO_MCP_DEV_USERNAME", raising=False)
+    monkeypatch.delenv("ODOO_MCP_DEV_API_KEY", raising=False)
+    doctor.run_doctor(cfg, as_json=True)
+    out = capsys.readouterr().out.strip()
+    payload = json.loads(out)
+    assert "ok" in payload
+    assert "steps" in payload
+    assert isinstance(payload["steps"], list)
+    assert all("name" in s and "ok" in s for s in payload["steps"])
+
+
+def test_doctor_main_accepts_json_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+
+    cfg = _write_min_config(tmp_path)
+    _stub_loader(monkeypatch)
+    _stub_set_at(monkeypatch, None)
+    monkeypatch.delenv("ODOO_MCP_DEV_USERNAME", raising=False)
+    monkeypatch.delenv("ODOO_MCP_DEV_API_KEY", raising=False)
+    doctor.main(["--config", str(cfg), "--json"])
+    out = capsys.readouterr().out.strip()
+    payload = json.loads(out)
+    assert isinstance(payload.get("ok"), bool)
+
+
+def test_doctor_main_unknown_arg_returns_2(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = doctor.main(["--bogus"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "Unknown" in err or "Usage" in err

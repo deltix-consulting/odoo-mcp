@@ -96,17 +96,19 @@ _TOOL_LOOKUP = Tool(
 _TOOL_SEARCH_READ = Tool(
     name="odoo_search_read",
     description=(
-        "Run Odoo search_read against an allowlisted model. You MUST pass an explicit "
-        "`fields` list — no wildcard reads. Domain filters are sandboxed: dotted field "
-        "traversal (e.g. 'create_uid.login') is rejected. Results have default-hidden "
-        "fields stripped unless you pass `allow_sensitive_fields`. Binary fields are "
+        "Run Odoo search_read against an allowlisted model. Pass an explicit "
+        "`fields` list, OR omit it to get a curated default (id + name + a few "
+        "business-relevant scalars, audit/binary/HTML/relation fields skipped). "
+        "Domain filters are sandboxed: dotted field traversal (e.g. "
+        "'create_uid.login') is rejected. Results have default-hidden fields "
+        "stripped unless you pass `allow_sensitive_fields`. Binary fields are "
         "replaced with a size placeholder unless you pass `include_binary=true`. "
         'Example: find active companies: domain=[["is_company","=",true],["active","=",true]], '
         'fields=["id","name","email"], limit=20.'
     ),
     inputSchema={
         "type": "object",
-        "required": ["instance", "model", "fields"],
+        "required": ["instance", "model"],
         "additionalProperties": False,
         "properties": {
             "instance": {"type": "string"},
@@ -123,7 +125,11 @@ _TOOL_SEARCH_READ = Tool(
                 "type": "array",
                 "items": {"type": "string"},
                 "minItems": 1,
-                "description": "Explicit list of fields to return. Required.",
+                "description": (
+                    "Explicit list of fields to return. Optional — omit to "
+                    "use the smart default (a curated subset of safe scalar "
+                    "fields, capped at 25)."
+                ),
             },
             "limit": {
                 "type": "integer",
@@ -247,13 +253,13 @@ _TOOL_READ = Tool(
     name="odoo_read",
     description=(
         "Fetch specific records by ID from an allowlisted model. Same field-level "
-        "policies as odoo_search_read: explicit fields required, sensitive fields "
-        "gated, binary fields stripped by default. "
+        "policies as odoo_search_read: pass `fields` explicitly OR omit for the "
+        "smart default; sensitive fields gated; binary fields stripped by default. "
         'Example: ids=[42, 47], fields=["name","email"] fetches two partners.'
     ),
     inputSchema={
         "type": "object",
-        "required": ["instance", "model", "ids", "fields"],
+        "required": ["instance", "model", "ids"],
         "additionalProperties": False,
         "properties": {
             "instance": {"type": "string"},
@@ -268,6 +274,10 @@ _TOOL_READ = Tool(
                 "type": "array",
                 "items": {"type": "string"},
                 "minItems": 1,
+                "description": (
+                    "Explicit list of fields to return. Optional — omit "
+                    "for the smart default (capped at 25 fields)."
+                ),
             },
             "allow_sensitive_fields": {
                 "type": "array",
@@ -405,6 +415,32 @@ _TOOL_ENABLE_PROD_WRITES = Tool(
 )
 
 
+_TOOL_DIAGNOSE_ACCESS = Tool(
+    name="odoo_diagnose_access",
+    description=(
+        "Diagnose what the authenticated Odoo user can do on a model. Returns "
+        "read/write/create/unlink booleans (Odoo's check_access_rights), the "
+        "user's uid and login, and admin-status. Useful when a search returns "
+        "fewer records than expected, or when planning a write to a model the "
+        "user may not have rights to. Read-only — does not modify anything. "
+        'Example: instance="prod", model="account.move" returns '
+        '{"can_read": true, "can_write": false, ...}.'
+    ),
+    inputSchema={
+        "type": "object",
+        "required": ["instance", "model"],
+        "additionalProperties": False,
+        "properties": {
+            "instance": {"type": "string"},
+            "model": {
+                "type": "string",
+                "description": "Odoo model to check (must pass the allowlist).",
+            },
+        },
+    },
+)
+
+
 _TOOL_HELP = Tool(
     name="odoo_help",
     description=(
@@ -443,4 +479,5 @@ def build_tools() -> list[Tool]:
         _TOOL_WRITE,
         _TOOL_ARCHIVE_OR_DELETE,
         _TOOL_ENABLE_PROD_WRITES,
+        _TOOL_DIAGNOSE_ACCESS,
     ]

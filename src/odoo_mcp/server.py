@@ -11,12 +11,15 @@ See :mod:`odoo_mcp.dispatcher` for the per-call security pipeline.
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import GetPromptResult, Prompt, TextContent, Tool
 
+from . import prompts as prompt_lib
 from .audit import AuditLog
 from .client import OdooClient
 from .config import load_config
@@ -33,6 +36,23 @@ from .security.fields import compile_extra_patterns
 from .security.limits import RateLimiter
 from .security.prod_guard import ProdGuard
 from .tools import build_tools
+
+_logger = logging.getLogger(__name__)
+
+
+def _disabled_tools() -> frozenset[str]:
+    """Return tool names hidden by ``ODOO_MCP_DISABLE_TOOLS``.
+
+    Comma-separated list (whitespace tolerated). Empty / unset → no tools
+    hidden. The env var only filters the ``tools/list`` advertisement —
+    direct calls to a hidden tool would still go through the dispatcher
+    and be answered as "Unknown tool", which is the desired effect: a
+    well-behaved client never sees the tool, and a misbehaving one cannot
+    invoke it.
+    """
+    raw = os.environ.get("ODOO_MCP_DISABLE_TOOLS", "")
+    names = {n.strip() for n in raw.split(",") if n.strip()}
+    return frozenset(names)
 
 __all__ = [
     "Dispatcher",
@@ -88,7 +108,24 @@ def build_app(config_path: Any = None) -> OdooMcpApp:
 def build_server(app: OdooMcpApp) -> Server:
     server: Server = Server("odoo-mcp")
     dispatcher = Dispatcher(app)
-    tools = build_tools()
+    all_tools = build_tools()
+    disabled = _disabled_tools()
+    if disabled:
+        unknown = disabled - {t.name for t in all_tools}
+        if unknown:
+            _logger.warning(
+                "ODOO_MCP_DISABLE_TOOLS contains names that aren't real tools "
+                "and will be ignored: %s",
+                sorted(unknown),
+            )
+        tools = [t for t in all_tools if t.name not in disabled]
+        _logger.info(
+            "Hiding %d tool(s) per ODOO_MCP_DISABLE_TOOLS: %s",
+            len(all_tools) - len(tools),
+            sorted(disabled & {t.name for t in all_tools}),
+        )
+    else:
+        tools = all_tools
 
     # The mcp SDK's decorators aren't typed; mypy --strict flags the
     # resulting wrapped function. We accept that at this single boundary
@@ -100,6 +137,16 @@ def build_server(app: OdooMcpApp) -> Server:
     @server.call_tool()  # type: ignore[untyped-decorator]
     async def _call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
         return await dispatcher.call(name, arguments or {})
+
+    @server.list_prompts()  # type: ignore[no-untyped-call, untyped-decorator]
+    async def _list_prompts() -> list[Prompt]:
+        return prompt_lib.list_prompts()
+
+    @server.get_prompt()  # type: ignore[no-untyped-call, untyped-decorator]
+    async def _get_prompt(
+        name: str, arguments: dict[str, str] | None
+    ) -> GetPromptResult:
+        return prompt_lib.get_prompt(name, arguments)
 
     return server
 

@@ -23,6 +23,7 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .audit import AuditLog
@@ -73,9 +74,25 @@ class _Report:
         print()
         print("OK" if self.ok else "FAILED")
 
+    def to_dict(self) -> dict[str, Any]:
+        """Machine-readable view for ``--json``."""
+        return {
+            "ok": self.ok,
+            "steps": [
+                {"name": s.name, "ok": s.ok, "detail": s.detail} for s in self.steps
+            ],
+            "warnings": [
+                {"name": w.name, "detail": w.detail} for w in self.warnings
+            ],
+        }
 
-def run_doctor(config_path: Path | None = None) -> int:
-    """Run the doctor checks and return a process exit code."""
+
+def run_doctor(config_path: Path | None = None, *, as_json: bool = False) -> int:
+    """Run the doctor checks and return a process exit code.
+
+    When ``as_json`` is set, suppresses the human report and emits a single
+    JSON object on stdout instead. Useful for CI / dashboards.
+    """
     report = _Report()
 
     # --- Config -----------------------------------------------------------
@@ -84,9 +101,40 @@ def run_doctor(config_path: Path | None = None) -> int:
         cfg = load_config(cfg_path)
     except OdooMcpError as exc:
         report.add("Load config", False, exc.user_message)
-        report.print()
+        _emit(report, as_json=as_json)
         return 1
     report.add("Load config", True, f"from {cfg.path}")
+
+    # --- Read-only session toggle ---------------------------------------
+    # Surface ODOO_MCP_READ_ONLY=1 so a consultant who set it for a demo
+    # doesn't later wonder why every write fails. Treated as informational
+    # — not a failure.
+    import os as _os
+
+    if _os.environ.get("ODOO_MCP_READ_ONLY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        report.add_warning(
+            "Read-only session",
+            "ODOO_MCP_READ_ONLY is set — every write-path tool will refuse.",
+        )
+    disabled = _os.environ.get("ODOO_MCP_DISABLE_TOOLS", "").strip()
+    if disabled:
+        report.add_warning(
+            "Disabled tools",
+            f"ODOO_MCP_DISABLE_TOOLS is set: {disabled} — those tools will "
+            f"be hidden from MCP clients.",
+        )
+    budget = _os.environ.get("ODOO_MCP_TOOL_LATENCY_BUDGET_MS", "").strip()
+    if budget:
+        report.add_warning(
+            "Latency budget",
+            f"ODOO_MCP_TOOL_LATENCY_BUDGET_MS={budget} — slow_tool_call "
+            f"warnings will fire above this threshold.",
+        )
 
     # --- Credentials from the OS credential store ------------------------
     # Doctor used to read straight from ``os.environ``, which only worked
@@ -181,9 +229,19 @@ def run_doctor(config_path: Path | None = None) -> int:
     # per-instance auth check is the real signal.
     _check_rotation_warnings(report, cfg)
 
-    report.print()
-    _print_update_check()
+    _emit(report, as_json=as_json)
+    if not as_json:
+        _print_update_check()
     return 0 if report.ok else 1
+
+
+def _emit(report: _Report, *, as_json: bool) -> None:
+    if as_json:
+        import json as _json
+
+        print(_json.dumps(report.to_dict(), separators=(",", ":")))
+    else:
+        report.print()
 
 
 def _check_rotation_warnings(report: _Report, cfg: AppConfig) -> None:
@@ -255,13 +313,25 @@ def _print_update_check() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
-    override = None
-    if args and args[0] == "--config":
-        if len(args) < 2:
-            print("Usage: odoo-mcp doctor [--config PATH]", file=sys.stderr)
-            return 2
-        override = Path(args[1]).expanduser()
-    return run_doctor(override)
+    override: Path | None = None
+    as_json = False
+    i = 0
+    while i < len(args):
+        if args[i] == "--config":
+            if i + 1 >= len(args):
+                print("Usage: odoo-mcp doctor [--config PATH] [--json]", file=sys.stderr)
+                return 2
+            override = Path(args[i + 1]).expanduser()
+            i += 2
+            continue
+        if args[i] == "--json":
+            as_json = True
+            i += 1
+            continue
+        print(f"Unknown argument: {args[i]!r}", file=sys.stderr)
+        print("Usage: odoo-mcp doctor [--config PATH] [--json]", file=sys.stderr)
+        return 2
+    return run_doctor(override, as_json=as_json)
 
 
 if __name__ == "__main__":

@@ -580,7 +580,7 @@ wheels = [
 
 [[package]]
 name = "odoo-mcp"
-version = "0.13.2"
+version = "0.15.2"
 source = { editable = "." }
 dependencies = [
     { name = "keyring" },

@@ -358,6 +358,18 @@ class OdooClient:
         return self._is_admin
 
     @property
+    def username(self) -> str | None:
+        """The Odoo login of the authenticated user, if credentials are loaded.
+
+        Returns ``None`` when credentials haven't been resolved yet (lazy
+        loader hasn't fired). Useful for diagnostics where leaking the API
+        key is forbidden but exposing the login is not.
+        """
+        if self._credentials is None:
+            return None
+        return self._credentials.username
+
+    @property
     def admin_reason(self) -> str | None:
         """Short human-readable explanation of why :attr:`is_admin` is True."""
         return self._admin_reason
@@ -420,7 +432,17 @@ class OdooClient:
             model,
             "fields_get",
             [],
-            {"attributes": ["type", "string", "required", "readonly", "help", "relation"]},
+            {
+                "attributes": [
+                    "type",
+                    "string",
+                    "required",
+                    "readonly",
+                    "help",
+                    "relation",
+                    "store",
+                ],
+            },
         )
         if not isinstance(result, dict):
             raise OdooRemoteError(
@@ -529,6 +551,21 @@ class OdooClient:
 
     def write(self, model: str, ids: list[int], values: dict[str, Any]) -> bool:
         result = self._execute(model, "write", [ids, values], {})
+        return bool(result)
+
+    def check_access_rights(self, model: str, operation: str) -> bool:
+        """Return whether the authenticated user has ``operation`` on ``model``.
+
+        Calls Odoo's ``check_access_rights(operation, raise_exception=False)``.
+        ``operation`` must be one of ``read``, ``write``, ``create``, ``unlink``.
+        Used only by ``odoo_diagnose_access`` — never controls a write path.
+        """
+        result = self._execute(
+            model,
+            "check_access_rights",
+            [operation],
+            {"raise_exception": False},
+        )
         return bool(result)
 
     def unlink(self, model: str, ids: list[int]) -> bool:

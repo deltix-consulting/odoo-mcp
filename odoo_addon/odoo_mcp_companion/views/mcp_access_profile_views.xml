@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="view_mcp_access_profile_tree" model="ir.ui.view">
+        <field name="name">mcp.access.profile.tree</field>
+        <field name="model">mcp.access.profile</field>
+        <field name="arch" type="xml">
+            <list string="MCP Access Profiles">
+                <field name="user_id"/>
+                <field name="access_level"/>
+                <field name="active"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_mcp_access_profile_form" model="ir.ui.view">
+        <field name="name">mcp.access.profile.form</field>
+        <field name="model">mcp.access.profile</field>
+        <field name="arch" type="xml">
+            <form string="MCP Access Profile">
+                <sheet>
+                    <group>
+                        <field name="user_id"/>
+                        <field name="access_level"/>
+                        <field name="active"/>
+                    </group>
+                    <group string="Optional partner-level scope">
+                        <field name="scope_partner_ids" widget="many2many_tags"/>
+                    </group>
+                    <group string="Notes">
+                        <field name="notes" nolabel="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_mcp_access_profile" model="ir.actions.act_window">
+        <field name="name">MCP Access Profiles</field>
+        <field name="res_model">mcp.access.profile</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <menuitem id="menu_mcp_root" name="MCP" sequence="100"
+              groups="base.group_system"/>
+    <menuitem id="menu_mcp_access_profile"
+              name="Access Profiles"
+              parent="menu_mcp_root"
+              action="action_mcp_access_profile"
+              groups="base.group_system"/>
+</odoo>

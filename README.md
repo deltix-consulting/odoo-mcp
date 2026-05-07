@@ -1,6 +1,6 @@
 # odoo-mcp
 
-Local MCP server that exposes a security-gated slice of [Odoo](https://www.odoo.com) to Claude Desktop, Claude Code, and Codex over stdio. 12 tools, server-enforced guardrails, no telemetry.
+Local MCP server that exposes a security-gated slice of [Odoo](https://www.odoo.com) to any MCP client (Claude Desktop, Claude Code, OpenAI Codex, Cursor, Windsurf, Continue.dev, Zed, ...) over stdio. 13 tools, 12 prompts, server-enforced guardrails, no telemetry.
 
 > **As-is software.** No external security audit has been performed.
 > Review [SECURITY.md](SECURITY.md) before deploying. The MCP runs on
@@ -24,6 +24,18 @@ Requires Claude Desktop, Claude Code, or Codex, plus an Odoo user account. Suppo
 3. **Restart Claude Cowork / Claude Desktop and Codex** so they load the MCP. Ask: *"use odoo_help to show what you can do with my Odoo"*.
 
 For a guided first run including a scan of the live instance, run `odoo-mcp onboarding`. See [ONBOARDING.md](ONBOARDING.md).
+
+### Other MCP clients
+
+The installer registers Claude Desktop and Codex automatically. For Cursor, Windsurf, Continue, Zed, or any other MCP-compliant client, run:
+
+```bash
+odoo-mcp client-config --client cursor      # or windsurf / continue / zed / claude-code / generic-stdio
+odoo-mcp client-config --detect             # print snippets for every client whose config dir is found locally
+odoo-mcp client-config --list               # see the full supported list
+```
+
+The command resolves the absolute `odoo-mcp` path on your machine and prints a paste-ready snippet plus the file it goes in.
 
 ## What this MCP never sees
 
@@ -53,6 +65,7 @@ See [SECURITY.md](SECURITY.md) for the threat model.
 | `odoo_write` | Update records (prod-gated) |
 | `odoo_archive_or_delete` | Archive or `unlink` records (prod-gated) |
 | `odoo_enable_prod_writes` | Unlock prod writes for 15 minutes |
+| `odoo_diagnose_access` | Report the user's read/write/create/unlink rights on a model |
 
 No `execute_kw`. No workflow buttons. No `copy`, `name_search`, `fields_view_get`. `unlink` is reachable only through `odoo_archive_or_delete`.
 
@@ -73,6 +86,7 @@ No `execute_kw`. No workflow buttons. No `copy`, `name_search`, `fields_view_get
 | `odoo-mcp audit` | Audit log inspector |
 | `odoo-mcp cache --info` / `--clear` | Persistent fields-cache stats / drop entries |
 | `odoo-mcp scan-custom INSTANCE` | Discover custom models and likely-sensitive fields, suggest TOML overrides |
+| `odoo-mcp client-config` | Print MCP client config snippets for Claude Desktop, Cursor, Windsurf, Continue, Zed, Codex, ... |
 | `odoo-mcp update` | `git pull` + `uv sync` against the install directory |
 
 ## Production write workflow

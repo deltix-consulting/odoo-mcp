@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <!-- Top-level category so the groups appear together in the user form. -->
+    <record id="module_category_mcp" model="ir.module.category">
+        <field name="name">MCP Integration</field>
+        <field name="description">Server-side ACLs for the odoo-mcp integration.</field>
+        <field name="sequence">30</field>
+    </record>
+
+    <record id="group_mcp_readonly" model="res.groups">
+        <field name="name">MCP Read Only</field>
+        <field name="category_id" ref="module_category_mcp"/>
+        <field name="comment">
+            Read access to a curated set of business models via the
+            odoo-mcp integration. Cannot create, write, or unlink.
+        </field>
+    </record>
+
+    <record id="group_mcp_readwrite" model="res.groups">
+        <field name="name">MCP Read and Write</field>
+        <field name="category_id" ref="module_category_mcp"/>
+        <field name="implied_ids" eval="[(4, ref('group_mcp_readonly'))]"/>
+        <field name="comment">
+            Includes MCP Read Only plus create/write/unlink rights on
+            the same model set. Add to a user only if you intend the
+            MCP integration to perform writes against this database.
+        </field>
+    </record>
+</odoo>

@@ -50,6 +50,15 @@ CREATE TABLE IF NOT EXISTS fields (
 )
 """
 
+# Bump when the wire shape of cached payloads changes — e.g. when we add or
+# remove an attribute requested from Odoo's ``fields_get``. Old rows then
+# read as a miss and are silently re-fetched on next access.
+#
+# History:
+#   1 — initial format (type/string/required/readonly/help/relation)
+#   2 — v0.14.1: adds ``store`` attribute for smart-field selection
+_PAYLOAD_SCHEMA_VERSION = 2
+
 
 class PersistentFieldsCache:
     """SQLite-backed L2 cache for ``fields_get`` payloads.
@@ -127,17 +136,29 @@ class PersistentFieldsCache:
             return None
         if not isinstance(decoded, dict):
             return None
+        # Schema-versioned wrapper: {"_v": N, "fields": {...}}. Pre-v0.14.2
+        # rows are bare ``fields`` dicts — those read as a miss now, so the
+        # next call re-fetches with the current attribute set.
+        if decoded.get("_v") != _PAYLOAD_SCHEMA_VERSION:
+            return None
+        fields = decoded.get("fields")
+        if not isinstance(fields, dict):
+            return None
         # Shallow type check — values must be dicts. Don't validate further;
         # the caller treats this exactly like a fresh ``fields_get`` result.
-        for value in decoded.values():
+        for value in fields.values():
             if not isinstance(value, dict):
                 return None
-        return decoded
+        return fields
 
     def put(self, instance: str, model: str, payload: dict[str, dict[str, Any]]) -> None:
         """UPSERT ``payload`` for ``(instance, model)``."""
         try:
-            encoded = json.dumps(payload, separators=(",", ":"), default=str)
+            encoded = json.dumps(
+                {"_v": _PAYLOAD_SCHEMA_VERSION, "fields": payload},
+                separators=(",", ":"),
+                default=str,
+            )
         except (TypeError, ValueError) as exc:
             logger.warning("fields cache: cannot encode %s/%s: %s", instance, model, exc)
             return

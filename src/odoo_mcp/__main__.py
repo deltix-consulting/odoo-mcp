@@ -23,6 +23,8 @@ Usage::
     python -m odoo_mcp update --check           # check for a newer release only
     python -m odoo_mcp scan-custom INSTANCE     # discover klant-custom models / fields
                   [--toml | --json]
+    python -m odoo_mcp client-config            # print MCP client config snippets
+                  [--list | --detect | --client NAME]
 """
 
 from __future__ import annotations
@@ -91,6 +93,11 @@ def main() -> int:
         from . import cache_cli
 
         return cache_cli.main(argv[1:])
+
+    if argv and argv[0] == "client-config":
+        from . import client_config_cli
+
+        return client_config_cli.main(argv[1:])
 
     if argv and argv[0] == "scan-custom":
         from . import scan_cli

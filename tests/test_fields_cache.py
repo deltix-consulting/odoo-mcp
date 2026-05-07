@@ -134,3 +134,50 @@ def test_corrupt_payload_treated_as_miss(tmp_path: Path) -> None:
         )
         conn.commit()
     assert cache.get("dev", "res.partner") is None
+
+
+def test_pre_v0_14_2_payload_treated_as_miss(tmp_path: Path) -> None:
+    """Bare-dict (unwrapped) rows from before the schema version bump miss.
+
+    Pre-v0.14.2 cache rows were stored as ``{...fields...}`` with no
+    schema marker. After the bump, those rows should read as a miss so
+    the next access re-fetches with the current attribute set (notably
+    ``store``).
+    """
+    import json
+    import sqlite3
+
+    cache = PersistentFieldsCache(tmp_path / "fc.db")
+    legacy = json.dumps({"id": {"type": "integer"}, "name": {"type": "char"}})
+    with sqlite3.connect(str(tmp_path / "fc.db")) as conn:
+        conn.execute(
+            "INSERT INTO fields(instance, model, payload, fetched_at) VALUES(?,?,?,?)",
+            ("dev", "res.partner", legacy, time.time()),
+        )
+        conn.commit()
+    assert cache.get("dev", "res.partner") is None
+
+
+def test_wrong_schema_version_treated_as_miss(tmp_path: Path) -> None:
+    """Wrapped row with an outdated ``_v`` reads as a miss."""
+    import json
+    import sqlite3
+
+    cache = PersistentFieldsCache(tmp_path / "fc.db")
+    stale = json.dumps({"_v": 1, "fields": {"id": {"type": "integer"}}})
+    with sqlite3.connect(str(tmp_path / "fc.db")) as conn:
+        conn.execute(
+            "INSERT INTO fields(instance, model, payload, fetched_at) VALUES(?,?,?,?)",
+            ("dev", "res.partner", stale, time.time()),
+        )
+        conn.commit()
+    assert cache.get("dev", "res.partner") is None
+
+
+def test_round_trip_uses_current_schema_version(tmp_path: Path) -> None:
+    """``put`` writes the wrapper; ``get`` decodes it transparently."""
+    cache = PersistentFieldsCache(tmp_path / "fc.db")
+    payload = {"id": {"type": "integer"}, "name": {"type": "char"}}
+    cache.put("dev", "res.partner", payload)
+    out = cache.get("dev", "res.partner")
+    assert out == payload
