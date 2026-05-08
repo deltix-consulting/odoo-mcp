@@ -127,18 +127,45 @@ domain never reaches Odoo.
 - Per-call XML-RPC timeout (`timeout_seconds`, default 30s).
 
 **6. Unauthorized method execution.** There is no `execute_kw`
-surface at the MCP boundary. The twelve operations in
+surface at the MCP boundary. The thirteen operations in
 `odoo_mcp.security.allowlist.Operation` are the only ones the client
 knows how to call: `search_read`, `search_count`, `read`,
 `read_group`, `lookup`, `create`, `write`, `archive`, `unlink`,
-`fields_get`, `help`, `list_instances`. `unlink` is reachable only
-via `odoo_archive_or_delete` with `mode='delete'`. No arbitrary
-methods. No workflow buttons. The client is a closed API, not a
-passthrough.
+`fields_get`, `diagnose_access`, `help`, `list_instances`. `unlink`
+is reachable only via `odoo_archive_or_delete` with `mode='delete'`.
+No arbitrary methods. No workflow buttons. The client is a closed
+API, not a passthrough.
 
 Model-level allowlist runs independently: even within the allowed
 operations, the server rejects any call targeting a model outside the
 per-instance `allowed_models` frozen set.
+
+**7. Read-only model enforcement.** A small hardcoded
+`MODEL_WRITE_BLOCKLIST` (`mail.message`, `mail.followers`,
+`mail.notification`) is exposed for *reading* — so Claude can answer
+"what was discussed on this lead" — but every write-path call against
+those models is refused before the prod-guard pipeline even runs. This
+closes the side door that would otherwise open when those models are
+made readable: a write path could be used to send messages or post log
+notes via the MCP. The blocklist is not config-overridable.
+
+**8. Optional runtime scoping (defense in depth).** Three env vars
+narrow the surface further without a code change:
+
+- `ODOO_MCP_READ_ONLY=1` refuses every write-path tool call regardless
+  of `production` flag or unlock state. Useful for demos, training,
+  external consultants.
+- `ODOO_MCP_DISABLE_TOOLS=odoo_create,odoo_write,...` filters tool
+  names out of the MCP `tools/list` advertisement so a well-behaved
+  client never sees them. Complements `ODOO_MCP_READ_ONLY`: that flag
+  *refuses*, this one *hides*.
+- `ODOO_MCP_TOOL_LATENCY_BUDGET_MS=2000` is observability — emits a
+  `slow_tool_call` warning whenever a successful call exceeds the
+  budget. Doesn't block anything; helps spot a runaway loop or a
+  pathological domain before it becomes a problem.
+
+`odoo-mcp doctor` surfaces all three so an operator with a misconfigured
+shell sees the active gates in pre-flight.
 
 ## What we do NOT defend against
 

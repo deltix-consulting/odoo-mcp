@@ -10,6 +10,38 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-05-07
+
+Audit-pass release. No new features — quality / cleanup / docs only.
+
+### Fixed
+
+- **`next_offset` on `odoo_search_read` now anchors on the actual
+  record count, not the requested limit.** If Odoo over-delivers
+  (third-party module returning more than ``limit`` rows), the buggy
+  formula ``offset + limit`` would have skipped records on the next
+  page. New regression test pins the behaviour.
+
+### Changed
+
+- **Better integration test for ``ODOO_MCP_DISABLE_TOOLS``.** Previous
+  test re-ran the filter logic in test code (the comment admitted as
+  much). Now it pulls the registered ``ListToolsRequest`` handler out
+  of the live MCP server and asserts on the actual advertised tool
+  list. Two new tests cover the no-env-var and unknown-name cases.
+
+- **README, SECURITY.md, and ONBOARDING.md document the runtime-scoping
+  env vars.** ``ODOO_MCP_READ_ONLY``, ``ODOO_MCP_DISABLE_TOOLS``, and
+  ``ODOO_MCP_TOOL_LATENCY_BUDGET_MS`` now appear in all three places
+  with what they do, when to use them, and the doctor surface.
+  ONBOARDING also gains a "Day-to-day commands" row for ``odoo-mcp
+  client-config`` and the four ``--json`` modes.
+
+- **Shared test fixtures in ``tests/conftest.py``** (``make_instance_config``
+  and ``make_app``) replace the boilerplate that was duplicated across
+  ~8 test files. ``test_disabled_tools.py`` migrated as the first
+  consumer; the rest will move opportunistically.
+
 ## [0.15.2] - 2026-05-07
 
 ### Added

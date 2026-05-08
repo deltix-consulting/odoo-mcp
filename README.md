@@ -131,6 +131,15 @@ Configuration lives at `~/.odoo-mcp/config.toml` (chmod 600 — the server refus
 - **Audit log.** One JSONL line per call to `~/.odoo-mcp/audit.jsonl`. Daily rotation, 30-day retention. No values, no domains, no record content. Server fails closed if the log becomes unwritable. Inspect with `odoo-mcp audit`.
 - **Caching.** L1 in-memory + L2 persistent SQLite (`~/.odoo-mcp/fields-cache.db`, 24h TTL) for `fields_get` only — never record values. Disable L2 with `fields_cache_path = ""`. Drop stale entries with `odoo-mcp cache --clear`.
 - **Debug logging.** Export `ODOO_MCP_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR` to stream to stderr. Credentials are scrubbed.
+- **Runtime scoping env vars** (all optional, all read at call time):
+
+  | Var | Effect |
+  |---|---|
+  | `ODOO_MCP_READ_ONLY=1` | Refuses every write-path tool (`odoo_create`, `odoo_write`, `odoo_archive_or_delete`, `odoo_enable_prod_writes`) regardless of per-instance `production` flag. Reads unaffected. Truthy values: `1` / `true` / `yes` / `on`. |
+  | `ODOO_MCP_DISABLE_TOOLS=odoo_write,odoo_create` | Filters tools out of the MCP `tools/list` advertisement. A well-behaved client never sees them. Comma-separated; whitespace tolerated; unknown names logged and ignored. |
+  | `ODOO_MCP_TOOL_LATENCY_BUDGET_MS=2000` | Pure observability. Dispatcher logs a `WARNING` tagged `slow_tool_call` whenever a successful call exceeds the budget. Set to a non-positive integer or unset to disable. |
+
+  All three surface in `odoo-mcp doctor` so they're visible in pre-flight.
 - **Industry templates.** `templates/` ships per-industry starting points for advanced operators. Most users should run `odoo-mcp onboarding`, which produces a per-instance `suggestions.toml` from the live schema. See [INDUSTRY_AUDIT.md](INDUSTRY_AUDIT.md).
 
 ## Development

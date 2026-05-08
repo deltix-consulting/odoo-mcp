@@ -513,7 +513,13 @@ class Dispatcher:
         # known false; when equal, we don't know — keep it as a hint.
         if len(redacted) >= limit:
             result["has_more"] = True
-            result["next_offset"] = offset + limit
+            # Use the actual count of records we received, not the requested
+            # limit. If Odoo defensively returned more than ``limit`` (shouldn't
+            # happen on stock Odoo, but a third-party module could) and we used
+            # ``offset + limit``, the next page would skip records. Anchoring
+            # on the live count is correct in both the normal and the over-
+            # delivery case.
+            result["next_offset"] = offset + len(redacted)
         else:
             result["has_more"] = False
         if smart:

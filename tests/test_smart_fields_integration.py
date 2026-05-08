@@ -187,6 +187,36 @@ def test_search_read_has_more_when_page_full(tmp_path: Path) -> None:
     assert payload["next_offset"] == 2
 
 
+def test_search_read_next_offset_anchors_on_actual_count(tmp_path: Path) -> None:
+    """next_offset must use len(records), not the requested limit.
+
+    Defensive: if Odoo returns more rows than the limit (third-party
+    module misbehaviour), anchoring on ``offset + limit`` would skip
+    records on the next page. Anchoring on the actual count is correct
+    in both the normal and the over-delivery case.
+    """
+    # 3 records returned with limit=2 — Odoo "over-delivered".
+    records = [{"id": i, "name": f"r{i}"} for i in range(3)]
+    fake = _FakeClient(_partner_meta(), records)
+    app = _build(tmp_path, fake)
+    payload = _call(
+        Dispatcher(app),
+        "odoo_search_read",
+        {
+            "instance": "dev",
+            "model": "res.partner",
+            "limit": 2,
+            "offset": 0,
+            "fields": ["id", "name"],
+        },
+    )
+    assert payload["has_more"] is True
+    # Must be 3 (len(records)), not 2 (the requested limit). With the
+    # buggy version this would have been 2 and the next page would skip
+    # the third record.
+    assert payload["next_offset"] == 3
+
+
 def test_search_read_has_more_false_when_partial_page(tmp_path: Path) -> None:
     records = [{"id": 1, "name": "only"}]
     fake = _FakeClient(_partner_meta(), records)

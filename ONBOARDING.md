@@ -219,6 +219,25 @@ Run these from Terminal whenever you need them:
 | `odoo-mcp update` | Pull and install the latest release (verifies attestation) |
 | `odoo-mcp setup --rotate-key NAME` | Rotate the API key for one instance |
 | `odoo-mcp setup --remove` | Tear down an instance (Keychain + config) |
+| `odoo-mcp client-config --detect` | Print MCP config snippets for every IDE / chat client found locally |
+| `odoo-mcp client-config --client cursor` | Snippet for one specific client (cursor / windsurf / continue / zed / codex / claude-desktop / claude-code / generic-stdio) |
+| `odoo-mcp audit --stats` | Per-tool call counts + p50/p95/max latency |
+| `odoo-mcp doctor --json` / `audit --json` / `cache --info --json` / `status --json` | Machine-readable output for CI / scripts |
+
+### Optional runtime scoping
+
+Three env vars tighten the MCP without touching code or config. Set them in
+the shell that launches the MCP (typically your IDE / Claude Desktop session,
+or `~/.zshrc` / `~/.bashrc`).
+
+| Env var | What it does |
+| --- | --- |
+| `ODOO_MCP_READ_ONLY=1` | Refuses every write tool. Reads still work. Useful for demos, training, external consultants. |
+| `ODOO_MCP_DISABLE_TOOLS=odoo_create,odoo_write,odoo_archive_or_delete` | Hides tools from the MCP client entirely (they don't show up in `tools/list`). |
+| `ODOO_MCP_TOOL_LATENCY_BUDGET_MS=2000` | Logs a warning whenever a successful tool call exceeds N ms — helps spot runaway loops or slow models. |
+
+`odoo-mcp doctor` surfaces these so a colleague who flipped one for a demo
+can see the active gates in pre-flight.
 
 ### Production write workflow
 
