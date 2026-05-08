@@ -10,7 +10,39 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
-## [0.15.3] - 2026-05-07
+## [0.15.4] - 2026-05-08
+
+Performance + code-quality pass. No behaviour change visible to MCP
+clients; same tools, same prompts, same security envelope.
+
+### Changed
+
+- **Audit log loading is now date-window aware.** ``_load_all_entries``
+  accepts ``since_minutes`` and skips rotated ``audit-YYYY-MM-DD.jsonl``
+  files dated before the cutoff. ``audit --since N`` and ``audit --errors``
+  now only open the files that could plausibly contain matching entries
+  instead of reading the entire 30-day rotation history. Real win on
+  installs that have been running for weeks. ``--stats`` over the full
+  history is unchanged (still loads everything by design).
+
+- **``odoo-mcp status`` only loads the last 24 hours of audit log.**
+  The "last call X ago" line and the "recent activity" tail only need
+  recent data; loading 30 days for five lines of output was waste.
+  Per-instance "last call" lines may now show ``no activity`` instead
+  of ``Xd ago`` for instances idle longer than 24h.
+
+- **DRY the field-resolution branch in ``_search_read`` / ``_read``.**
+  The 30-line "fields = override-or-smart-or-explicit" block was
+  duplicated. Now in ``Dispatcher._resolve_read_fields``. ~60 fewer
+  lines of dispatcher code, and any future tweak (e.g. read-specific
+  default) lands in one place.
+
+### Tests
+
+- ``test_audit_files_excludes_old_rotations_when_since_set`` pins the
+  date-filtering behaviour against accidental regression.
+
+
 
 Audit-pass release. No new features — quality / cleanup / docs only.
 

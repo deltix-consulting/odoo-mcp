@@ -20,6 +20,7 @@ from typing import Any
 from .config import DEFAULT_AUDIT_LOG
 
 _ROTATED_PATTERN = re.compile(r"audit-\d{4}-\d{2}-\d{2}\.jsonl$")
+_DATED_PATTERN = re.compile(r"audit-(\d{4}-\d{2}-\d{2})\.jsonl$")
 
 
 def _audit_dir() -> Path:
@@ -46,23 +47,56 @@ def _read_last_lines(path: Path, n: int) -> list[str]:
     return lines[-n:] if n > 0 else lines
 
 
-def _load_all_entries() -> list[dict[str, Any]]:
-    """Merge the current and rotated audit logs into a single list.
+def _audit_files(*, since_minutes: int | None = None) -> list[Path]:
+    """Return the audit log files to scan, newest-first by date.
 
-    Entries are parsed as JSON; malformed lines and open-markers are
-    silently skipped. Returns entries sorted by timestamp ascending.
+    The current ``audit.jsonl`` is always included (it holds today's
+    entries). Rotated ``audit-YYYY-MM-DD.jsonl`` files are filtered to
+    those whose date is within ``since_minutes`` of now — older ones
+    cannot contain matching entries, so opening them is wasted work.
+
+    With ``since_minutes=None`` every rotated file is included (the
+    pre-v0.15.4 behaviour, used by ``--stats`` over the full history).
     """
     files: list[Path] = []
     cur = _audit_current()
     if cur.exists():
         files.append(cur)
+
+    cutoff_date = None
+    if since_minutes is not None and since_minutes >= 0:
+        cutoff = datetime.now(tz=UTC) - timedelta(minutes=since_minutes)
+        cutoff_date = cutoff.date()
+
     try:
         for entry in sorted(_audit_dir().iterdir()):
-            if _ROTATED_PATTERN.match(entry.name):
-                files.append(entry)
+            m = _DATED_PATTERN.match(entry.name)
+            if not m:
+                continue
+            if cutoff_date is not None:
+                try:
+                    file_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if file_date < cutoff_date:
+                    continue
+            files.append(entry)
     except OSError:
         pass
+    return files
 
+
+def _load_all_entries(*, since_minutes: int | None = None) -> list[dict[str, Any]]:
+    """Merge the current and rotated audit logs into a single list.
+
+    When ``since_minutes`` is set, rotated files older than that window
+    are skipped — a real win on installs that have been running for
+    weeks. Entries within the kept files are still returned in full;
+    final ``--since`` filtering happens in :func:`_filter`. Entries are
+    parsed as JSON; malformed lines and open-markers are silently
+    skipped. Returns entries sorted by timestamp ascending.
+    """
+    files = _audit_files(since_minutes=since_minutes)
     entries: list[dict[str, Any]] = []
     for f in files:
         for line in _read_last_lines(f, 0):
@@ -308,7 +342,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     ns = parser.parse_args(argv)
 
-    entries = _load_all_entries()
+    # Performance: when --errors (24h window) or --since N is set, skip
+    # rotated audit files older than the window. Loading 30 days of
+    # history just to throw it away costs real time on a long-running
+    # install. Stats / unfiltered queries still load everything.
+    since_minutes: int | None = None
+    if ns.since is not None and ns.since >= 0:
+        since_minutes = ns.since
+    elif ns.errors:
+        since_minutes = 24 * 60
+
+    entries = _load_all_entries(since_minutes=since_minutes)
     filtered = _filter(
         entries,
         errors_only=ns.errors,

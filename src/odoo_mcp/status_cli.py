@@ -58,8 +58,12 @@ def _render(app: OdooMcpApp) -> str:
     now_mono = time.monotonic()
     now_utc = datetime.now(tz=UTC)
 
-    # Map instance -> last audit entry for "last call Xs ago".
-    all_entries = _load_all_entries()
+    # Map instance -> last audit entry for "last call Xs ago". We only
+    # need the most recent activity, so cap the load at the last 24
+    # hours rather than reading the entire 30-day rotation history.
+    # Per-instance "last call" lines may show "no activity" instead of
+    # "Xd ago" for instances idle longer than 24h — acceptable trade.
+    all_entries = _load_all_entries(since_minutes=24 * 60)
     last_by_instance: dict[str, dict[str, Any]] = {}
     for e in all_entries:
         inst = str(e.get("instance", ""))

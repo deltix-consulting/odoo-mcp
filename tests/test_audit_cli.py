@@ -196,3 +196,51 @@ def test_stats_payload_sorted_by_calls_desc() -> None:
     payload = audit_cli._stats_payload(entries)
     assert payload[0]["tool"] == "odoo_search_read"
     assert payload[1]["tool"] == "odoo_read"
+
+
+# ---------------------------------------------------------------------------
+# Audit log file selection (perf optimization)
+# ---------------------------------------------------------------------------
+
+
+def test_audit_files_excludes_old_rotations_when_since_set(  # type: ignore[no-untyped-def]
+    tmp_path, monkeypatch
+):
+    """With since_minutes set, rotated files older than the cutoff are skipped.
+
+    The fix: status / audit --since N / audit --errors should not load
+    30 days of rotation history just to throw it away. Verify by
+    sprinkling dated rotation files and checking which ones are picked.
+    """
+    from pathlib import Path
+
+    audit_dir = tmp_path / ".odoo-mcp"
+    audit_dir.mkdir()
+    current = audit_dir / "audit.jsonl"
+    current.write_text("")
+    today = datetime.now(tz=UTC).date()
+    for delta in (1, 2, 3, 10, 30):
+        d = today - timedelta(days=delta)
+        (audit_dir / f"audit-{d.isoformat()}.jsonl").write_text("")
+
+    monkeypatch.setattr(audit_cli, "_audit_dir", lambda: audit_dir)
+    monkeypatch.setattr(audit_cli, "_audit_current", lambda: current)
+
+    # 24h window: only the 1-day-old file qualifies (plus current).
+    files_24h = audit_cli._audit_files(since_minutes=24 * 60)
+    names = {Path(f).name for f in files_24h}
+    assert "audit.jsonl" in names
+    assert f"audit-{(today - timedelta(days=1)).isoformat()}.jsonl" in names
+    assert f"audit-{(today - timedelta(days=10)).isoformat()}.jsonl" not in names
+    assert f"audit-{(today - timedelta(days=30)).isoformat()}.jsonl" not in names
+
+    # 5-day window: the 1-, 2-, 3-day rotations qualify, not 10 or 30.
+    files_5d = audit_cli._audit_files(since_minutes=5 * 24 * 60)
+    names = {Path(f).name for f in files_5d}
+    assert f"audit-{(today - timedelta(days=3)).isoformat()}.jsonl" in names
+    assert f"audit-{(today - timedelta(days=10)).isoformat()}.jsonl" not in names
+
+    # No window: every rotation included.
+    files_all = audit_cli._audit_files(since_minutes=None)
+    names = {Path(f).name for f in files_all}
+    assert f"audit-{(today - timedelta(days=30)).isoformat()}.jsonl" in names

@@ -256,6 +256,71 @@ class Dispatcher:
             args,
         )
 
+    def _resolve_read_fields(
+        self,
+        rt: InstanceRuntime,
+        model: str,
+        fields_meta: dict[str, dict[str, Any]],
+        known: frozenset[str],
+        args: dict[str, Any],
+        allow_sensitive: frozenset[str],
+    ) -> tuple[list[str], bool]:
+        """Resolve the field list for a read-path tool.
+
+        Returns ``(fields, smart)``. Three branches, in priority order:
+
+        1. Caller passed ``fields=[...]`` — validate explicitly, no
+           smart selection. ``smart=False``.
+        2. Caller omitted ``fields`` AND the instance has a
+           ``smart_fields_overrides[model]`` override — use the
+           configured list, validated through the normal redaction
+           policy so a typo or sensitive field surfaces clearly.
+           ``smart=True``.
+        3. Caller omitted ``fields`` and there's no override — fall
+           back to :func:`select_smart_fields` heuristic.
+           ``smart=True``.
+
+        Shared between :meth:`_search_read` and :meth:`_read`. The
+        previous duplicated 30-line branch is the bug surface this
+        helper closes.
+        """
+        overrides = rt.config.sensitive_fields
+        raw_fields = args.get("fields")
+        if raw_fields is not None:
+            return (
+                validate_requested_fields(
+                    model,
+                    _require_list_of_str(args, "fields"),
+                    known,
+                    allow_sensitive=allow_sensitive,
+                    instance_overrides=overrides,
+                    extra_redacted=rt.extra_redacted,
+                ),
+                False,
+            )
+        configured = rt.config.smart_fields_overrides.get(model)
+        if configured is not None:
+            return (
+                validate_requested_fields(
+                    model,
+                    list(configured),
+                    known,
+                    allow_sensitive=allow_sensitive,
+                    instance_overrides=overrides,
+                    extra_redacted=rt.extra_redacted,
+                ),
+                True,
+            )
+        return (
+            select_smart_fields(
+                model,
+                fields_meta,
+                instance_overrides=overrides,
+                extra_redacted=rt.extra_redacted,
+            ),
+            True,
+        )
+
     # ---- Handlers ---------------------------------------------------------
 
     def _help(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -433,41 +498,9 @@ class Dispatcher:
         fields_meta = rt.client.fields_get(model)
         known = frozenset(fields_meta.keys())
         overrides = rt.config.sensitive_fields
-        smart = False
-        raw_fields = args.get("fields")
-        if raw_fields is None:
-            override = rt.config.smart_fields_overrides.get(model)
-            if override is not None:
-                # Validate the override against the live schema and the
-                # sensitive-field policy. Trusted source (config.toml,
-                # chmod 600) but we still apply the same checks so a typo
-                # surfaces clearly and a sensitive field can't be opened
-                # via override + omitted ``allow_sensitive_fields``.
-                fields = validate_requested_fields(
-                    model,
-                    list(override),
-                    known,
-                    allow_sensitive=allow_sensitive,
-                    instance_overrides=overrides,
-                    extra_redacted=rt.extra_redacted,
-                )
-            else:
-                fields = select_smart_fields(
-                    model,
-                    fields_meta,
-                    instance_overrides=overrides,
-                    extra_redacted=rt.extra_redacted,
-                )
-            smart = True
-        else:
-            fields = validate_requested_fields(
-                model,
-                _require_list_of_str(args, "fields"),
-                known,
-                allow_sensitive=allow_sensitive,
-                instance_overrides=overrides,
-                extra_redacted=rt.extra_redacted,
-            )
+        fields, smart = self._resolve_read_fields(
+            rt, model, fields_meta, known, args, allow_sensitive
+        )
         domain = sandbox_domain(args.get("domain") or [], known)
         limit = clamp_limit(
             args.get("limit"), rt.config.max_records_default, rt.config.max_records_hard_cap
@@ -617,36 +650,9 @@ class Dispatcher:
         fields_meta = rt.client.fields_get(model)
         known = frozenset(fields_meta.keys())
         overrides = rt.config.sensitive_fields
-        smart = False
-        raw_fields = args.get("fields")
-        if raw_fields is None:
-            override = rt.config.smart_fields_overrides.get(model)
-            if override is not None:
-                fields = validate_requested_fields(
-                    model,
-                    list(override),
-                    known,
-                    allow_sensitive=allow_sensitive,
-                    instance_overrides=overrides,
-                    extra_redacted=rt.extra_redacted,
-                )
-            else:
-                fields = select_smart_fields(
-                    model,
-                    fields_meta,
-                    instance_overrides=overrides,
-                    extra_redacted=rt.extra_redacted,
-                )
-            smart = True
-        else:
-            fields = validate_requested_fields(
-                model,
-                _require_list_of_str(args, "fields"),
-                known,
-                allow_sensitive=allow_sensitive,
-                instance_overrides=overrides,
-                extra_redacted=rt.extra_redacted,
-            )
+        fields, smart = self._resolve_read_fields(
+            rt, model, fields_meta, known, args, allow_sensitive
+        )
         redacted = redact_response(
             model,
             rt.client.read(model, ids, fields),
