@@ -13,6 +13,7 @@ Usage::
     python -m odoo_mcp setup --remove           # remove an Odoo instance
     python -m odoo_mcp setup --list             # list configured instances
     python -m odoo_mcp setup --rotate-key NAME  # rotate API key
+    python -m odoo_mcp setup --acknowledge-admin NAME  # opt out of admin refusal for one instance
     python -m odoo_mcp setup --regenerate-launcher  # rewrite launch.sh
     python -m odoo_mcp config show              # dump the effective config (sanitized)
     python -m odoo_mcp config validate [PATH]   # validate a config file

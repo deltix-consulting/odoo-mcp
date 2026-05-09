@@ -10,6 +10,22 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.15.6] - 2026-05-09
+
+### Added
+
+- **``odoo-mcp setup --acknowledge-admin NAME``** — standalone command
+  to persist ``refuse_admin_on_production = false`` for an instance
+  whose config was already written under an older version. Closes the
+  loop for users stuck in the v0.15.5 wizard improvement: that release
+  fixed fresh-install flow, this one repairs an already-broken
+  config without requiring ``--remove`` + ``--add`` (and the lost
+  Keychain entry that goes with it).
+
+  Same explanation + confirmation prompt as the wizard branch.
+  Idempotent. ``odoo-mcp doctor`` afterwards verifies the instance
+  authenticates.
+
 ## [0.15.5] - 2026-05-09
 
 ### Fixed

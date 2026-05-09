@@ -747,6 +747,85 @@ def test_acknowledge_admin_skips_for_non_production(
     assert setup_wizard._acknowledge_admin_or_abort("prod") is True
 
 
+def test_acknowledge_admin_cli_persists_opt_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`odoo-mcp setup --acknowledge-admin NAME` writes the opt-out and exits 0."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_PROD_ADMIN_CONFIG)
+    cfg_path.chmod(0o600)
+    monkeypatch.setattr(setup_wizard, "DEFAULT_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(setup_wizard, "_CONFIG_DIR", tmp_path)
+    answers = iter(["acknowledge"])
+    monkeypatch.setattr(setup_wizard, "_ask", lambda *_a, **_kw: next(answers))
+
+    rc = setup_wizard.main(["--acknowledge-admin", "prod"])
+    assert rc == 0
+
+    import tomllib
+
+    body = tomllib.loads(cfg_path.read_text())
+    assert body["instances"]["prod"]["refuse_admin_on_production"] is False
+    out = capsys.readouterr().out
+    assert "refuse_admin_on_production = false written" in out
+
+
+def test_acknowledge_admin_cli_aborts_when_user_declines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_PROD_ADMIN_CONFIG)
+    cfg_path.chmod(0o600)
+    monkeypatch.setattr(setup_wizard, "DEFAULT_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(setup_wizard, "_CONFIG_DIR", tmp_path)
+    answers = iter(["no"])
+    monkeypatch.setattr(setup_wizard, "_ask", lambda *_a, **_kw: next(answers))
+
+    rc = setup_wizard.main(["--acknowledge-admin", "prod"])
+    assert rc == 1
+
+    import tomllib
+
+    body = tomllib.loads(cfg_path.read_text())
+    assert "refuse_admin_on_production" not in body["instances"]["prod"]
+
+
+def test_acknowledge_admin_cli_unknown_instance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_PROD_ADMIN_CONFIG)
+    cfg_path.chmod(0o600)
+    monkeypatch.setattr(setup_wizard, "DEFAULT_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(setup_wizard, "_CONFIG_DIR", tmp_path)
+
+    rc = setup_wizard.main(["--acknowledge-admin", "ghost"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "ghost" in out
+
+
+def test_acknowledge_admin_cli_missing_arg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_PROD_ADMIN_CONFIG)
+    cfg_path.chmod(0o600)
+    monkeypatch.setattr(setup_wizard, "DEFAULT_CONFIG_PATH", cfg_path)
+
+    rc = setup_wizard.main(["--acknowledge-admin", ""])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "Usage" in out
+
+
 def test_toml_value_escapes_carriage_return() -> None:
     """`_toml_value` must escape \\r alongside \\n / \\t."""
     import tomllib

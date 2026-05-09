@@ -714,6 +714,55 @@ def _persist_admin_acknowledgment(name: str) -> None:
     _write_config(defaults, instances)
 
 
+def _cmd_acknowledge_admin(name: str) -> int:
+    """Repair an existing config that's stuck on the admin-refusal gate.
+
+    The companion to :func:`_acknowledge_admin_or_abort`: that one runs
+    inside the wizard before doctor; this one is the standalone fix for
+    a user who already wrote a config (perhaps under v0.15.4 or earlier)
+    and hit the wall on ``odoo-mcp doctor`` or first tool call. Same
+    persistent effect: writes ``refuse_admin_on_production = false`` to
+    the instance's TOML block. Idempotent.
+    """
+    if not DEFAULT_CONFIG_PATH.exists():
+        print(f"No config found at {DEFAULT_CONFIG_PATH}")
+        print("Run 'odoo-mcp setup' first.")
+        return 1
+    defaults, instances = _load_raw_config()
+    if name not in instances:
+        print(f"Instance {name!r} not found. Configured: {sorted(instances.keys())}")
+        return 1
+
+    print()
+    print("=" * 60)
+    print(f"  Acknowledging admin credentials on instance {name!r}")
+    print("=" * 60)
+    print()
+    print("Setting 'refuse_admin_on_production = false' for this instance.")
+    print()
+    print("Reminder: the MCP's client-side denylist, redaction, and")
+    print("prod-write guard still apply. Only Odoo's per-user record")
+    print("rules — which would normally scope what this user can read")
+    print("and write — are bypassed because this API key is admin.")
+    print()
+    print("If you'd rather not bypass them, the right fix is to create")
+    print("a non-admin Odoo user with the groups it needs and rotate")
+    print(f"via 'odoo-mcp setup --rotate-key {name}'.")
+    print()
+    confirm = _ask("Type 'acknowledge' to persist, anything else to abort")
+    if confirm.strip().lower() != "acknowledge":
+        print("\nAborted. No changes made.")
+        return 1
+
+    instances[name]["refuse_admin_on_production"] = False
+    _write_config(defaults, instances)
+    print(f"\n  Updated {DEFAULT_CONFIG_PATH}")
+    print(f"  refuse_admin_on_production = false written for {name!r}.")
+    print()
+    print("Run 'odoo-mcp doctor' to verify the instance now authenticates.")
+    return 0
+
+
 def _check_user_is_internal(name: str) -> None:
     """Verify the just-created instance's API key has ``base.group_user``.
 
@@ -1197,6 +1246,12 @@ def main(argv: list[str] | None = None) -> int:
                 print("Usage: odoo-mcp setup --rotate-key NAME")
                 return 2
             return _cmd_rotate_key(rotate)
+        ack = _extract_flag_value(args, "--acknowledge-admin")
+        if ack is not None:
+            if not ack:
+                print("Usage: odoo-mcp setup --acknowledge-admin NAME")
+                return 2
+            return _cmd_acknowledge_admin(ack)
         if "--add" in args:
             return _cmd_add()
         if "--remove" in args:
