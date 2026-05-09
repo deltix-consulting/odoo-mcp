@@ -611,6 +611,109 @@ def _run_doctor() -> None:
     run_doctor()
 
 
+def _acknowledge_admin_or_abort(name: str) -> bool:
+    """Detect admin credentials on a fresh production instance and offer a choice.
+
+    Runs after the config has been written but before doctor. If the API
+    key authenticates as Odoo admin on a ``production = true`` instance,
+    the default-strict ``refuse_admin_on_production`` would block doctor
+    and every subsequent tool call. Many operators only have admin keys
+    available (especially on small Odoo SaaS deployments), so we offer
+    them an interactive opt-out instead of a silent failure.
+
+    Returns ``True`` when setup can continue (non-admin, non-prod, or the
+    user explicitly acknowledged). Returns ``False`` when the user chose
+    to abort and create a non-admin user first. The opt-out is
+    persisted by editing the instance's TOML block in place; the next
+    doctor run sees ``refuse_admin_on_production = false`` and the
+    warning is downgraded to informational.
+
+    Best-effort: any unexpected exception falls through with a warning
+    rather than aborting the wizard — doctor will still surface the
+    same situation, just less gracefully.
+    """
+    try:
+        from .client import OdooClient
+        from .config import load_config
+        from .credentials import load_credentials
+        from .errors import OdooAuthError
+
+        cfg = load_config(DEFAULT_CONFIG_PATH)
+        instance = cfg.instances.get(name)
+        if instance is None:
+            return True
+        if not instance.production:
+            # Admin on a dev instance is fine — only the prod gate matters.
+            return True
+        if not instance.refuse_admin_on_production:
+            # Already acknowledged in a previous run; nothing to do.
+            return True
+
+        creds = load_credentials(instance.name, instance.credentials_env_prefix)
+        client = OdooClient(instance, credentials=creds)
+        # Catch the OdooAuthError that the strict-by-default refusal would
+        # raise. We're in the wizard precisely to handle this gracefully.
+        try:
+            client.authenticate()
+        except OdooAuthError as exc:
+            if "Refusing to use admin credentials" not in exc.user_message:
+                # Some other auth problem — let the wizard's normal flow
+                # surface it via doctor.
+                return True
+            # Admin detected. Offer the choice.
+            print()
+            print("=" * 60)
+            print(f"  Admin-credentials detected on production instance {name!r}")
+            print("=" * 60)
+            print()
+            print("This API key has Odoo system-administrator rights")
+            print("(uid=1 or member of base.group_system). Most Odoo")
+            print("record rules are bypassed by such users, which removes")
+            print("the per-user ACL scoping this MCP relies on.")
+            print()
+            print("Two options:")
+            print()
+            print("  A) RECOMMENDED — abort this setup, create a")
+            print("     dedicated non-admin Odoo user with only the groups")
+            print("     it needs (Sales / Accounting / etc), then rerun")
+            print("     'odoo-mcp setup' with that user's API key.")
+            print()
+            print("  B) ACKNOWLEDGE THE RISK — proceed with the admin key.")
+            print("     The MCP's client-side denylist, redaction, and")
+            print("     prod-write guard still apply; only Odoo's per-user")
+            print("     record rules are bypassed. This sets")
+            print("     'refuse_admin_on_production = false' for this")
+            print("     instance in your config.")
+            print()
+            choice = _ask("Type 'acknowledge' to proceed with admin, anything else to abort")
+            if choice.strip().lower() != "acknowledge":
+                print()
+                print("Aborted. To rerun: 'odoo-mcp setup' (after creating")
+                print("a non-admin user), or 'odoo-mcp setup --remove' to")
+                print(f"clean up the {name!r} entry first.")
+                return False
+            _persist_admin_acknowledgment(name)
+            print()
+            print(f"  Acknowledged. refuse_admin_on_production = false written for {name!r}.")
+            return True
+
+        # Authenticate succeeded — either non-admin or admin on dev. The
+        # admin-warning surface in doctor will still flag it for visibility.
+        return True
+    except Exception as exc:  # noqa: BLE001 — best-effort, mustn't abort wizard
+        logger.debug("admin acknowledgment check skipped: %s", exc)
+        return True
+
+
+def _persist_admin_acknowledgment(name: str) -> None:
+    """Edit ``[instances.NAME]`` in config.toml to add ``refuse_admin_on_production = false``."""
+    defaults, instances = _load_raw_config()
+    if name not in instances:
+        return
+    instances[name]["refuse_admin_on_production"] = False
+    _write_config(defaults, instances)
+
+
 def _check_user_is_internal(name: str) -> None:
     """Verify the just-created instance's API key has ``base.group_user``.
 
@@ -703,6 +806,8 @@ def _cmd_setup() -> int:
     print("\nRegistering in Claude Desktop...")
     _register_claude_desktop()
 
+    if not _acknowledge_admin_or_abort(name):
+        return 1
     _run_doctor()
     _check_user_is_internal(name)
     _print_setup_summary(name, str(info["url"]))
@@ -737,6 +842,8 @@ def _cmd_add() -> int:
     _write_config(defaults, instances)
     print(f"  Updated {DEFAULT_CONFIG_PATH}")
 
+    if not _acknowledge_admin_or_abort(name):
+        return 1
     _run_doctor()
     _check_user_is_internal(name)
     print(f"\nInstance '{name}' added successfully.")

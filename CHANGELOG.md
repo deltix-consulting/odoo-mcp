@@ -10,6 +10,37 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.15.5] - 2026-05-09
+
+### Fixed
+
+- **Setup wizard now handles admin-on-prod gracefully.** Real-world
+  feedback from a colleague: their Odoo API key has admin rights (the
+  only credential available on many SMB Odoo SaaS deployments), and
+  ``odoo-mcp setup`` happily wrote the config — then doctor failed
+  with a ``Refusing to use admin credentials`` error and no obvious
+  next step. The wizard would silently abort.
+
+  The wizard now intercepts the same condition before doctor runs and
+  prompts the user with a clear explanation of the security trade-off
+  plus two paths:
+
+  1. **Recommended:** abort, create a non-admin Odoo user with the
+     groups the role actually needs, rerun ``odoo-mcp setup``.
+  2. **Acknowledge the risk:** type ``acknowledge`` to proceed. The
+     wizard writes ``refuse_admin_on_production = false`` to the
+     instance's TOML block. The MCP's denylist, redaction, and
+     prod-write guard still apply; only Odoo's per-user record-rule
+     scoping is bypassed.
+
+  The check is skipped when the instance is non-production, when it's
+  authenticated as a non-admin, or when the opt-out is already
+  persisted from a previous run.
+
+  No security-posture change: the underlying refusal behaviour is
+  unchanged, the wizard just exposes the choice instead of leaving
+  the user stuck.
+
 ## [0.15.4] - 2026-05-08
 
 Performance + code-quality pass. No behaviour change visible to MCP

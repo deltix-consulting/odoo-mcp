@@ -591,6 +591,162 @@ def test_credstore_set_get_delete_via_wizard_aliases(
     assert setup_wizard._keychain_get("main", "API_KEY") is None
 
 
+# ---------------------------------------------------------------------------
+# Admin acknowledgment flow (setup wizard catches admin-on-prod before doctor)
+# ---------------------------------------------------------------------------
+
+
+_PROD_ADMIN_CONFIG = """\
+[defaults]
+timeout_seconds = 30
+
+[instances.prod]
+url = "https://klantx.odoo.com"
+database = "klantx-prod"
+credentials_env_prefix = "ODOO_MCP_PROD"
+production = true
+"""
+
+
+def _wire_admin_fakes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    raise_admin_refusal: bool,
+) -> Path:
+    """Common scaffolding: pretend a config exists and stub out the auth call."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_PROD_ADMIN_CONFIG)
+    cfg_path.chmod(0o600)
+    monkeypatch.setattr(setup_wizard, "DEFAULT_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(setup_wizard, "_CONFIG_DIR", tmp_path)
+
+    from odoo_mcp import client as client_module
+    from odoo_mcp.credentials import Credentials
+    from odoo_mcp.errors import OdooAuthError
+
+    def fake_load_credentials(name: str, prefix: str) -> Credentials:
+        return Credentials(instance_name=name, username="admin@example.com", _api_key="k" * 10)
+
+    monkeypatch.setattr("odoo_mcp.credentials.load_credentials", fake_load_credentials)
+
+    def fake_authenticate(self: Any) -> int:
+        if raise_admin_refusal:
+            raise OdooAuthError(
+                "Refusing to use admin credentials (system administrator "
+                "(base.group_system)) on production instance 'prod'. "
+                "Admin keys bypass per-user Odoo record rules..."
+            )
+        self._uid = 7  # noqa: SLF001
+        return 7
+
+    monkeypatch.setattr(client_module.OdooClient, "authenticate", fake_authenticate)
+    return cfg_path
+
+
+def test_acknowledge_admin_writes_opt_out_when_user_acknowledges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Wizard prompts and persists the opt-out when the user types 'acknowledge'."""
+    cfg_path = _wire_admin_fakes(tmp_path, monkeypatch, raise_admin_refusal=True)
+
+    answers = iter(["acknowledge"])
+    monkeypatch.setattr(setup_wizard, "_ask", lambda *_a, **_kw: next(answers))
+
+    proceeded = setup_wizard._acknowledge_admin_or_abort("prod")
+    assert proceeded is True
+
+    # Opt-out is now persisted in the toml.
+    import tomllib
+
+    body = tomllib.loads(cfg_path.read_text())
+    assert body["instances"]["prod"]["refuse_admin_on_production"] is False
+
+    out = capsys.readouterr().out
+    assert "Admin-credentials detected" in out
+    assert "ACKNOWLEDGE THE RISK" in out
+
+
+def test_acknowledge_admin_aborts_when_user_declines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Anything other than 'acknowledge' aborts and leaves the toml untouched."""
+    cfg_path = _wire_admin_fakes(tmp_path, monkeypatch, raise_admin_refusal=True)
+
+    answers = iter(["no"])
+    monkeypatch.setattr(setup_wizard, "_ask", lambda *_a, **_kw: next(answers))
+
+    proceeded = setup_wizard._acknowledge_admin_or_abort("prod")
+    assert proceeded is False
+
+    # No opt-out written.
+    import tomllib
+
+    body = tomllib.loads(cfg_path.read_text())
+    assert "refuse_admin_on_production" not in body["instances"]["prod"]
+
+    out = capsys.readouterr().out
+    assert "Aborted" in out
+
+
+def test_acknowledge_admin_skips_for_non_admin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-admin authenticate returns True without prompting."""
+    _wire_admin_fakes(tmp_path, monkeypatch, raise_admin_refusal=False)
+
+    # _ask must not be called — wire it to fail loudly if it is.
+    def fail_ask(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("must not prompt for non-admin auth")
+
+    monkeypatch.setattr(setup_wizard, "_ask", fail_ask)
+
+    assert setup_wizard._acknowledge_admin_or_abort("prod") is True
+
+
+def test_acknowledge_admin_skips_when_already_opted_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the toml already has refuse_admin_on_production=false we don't prompt."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        _PROD_ADMIN_CONFIG.replace(
+            "production = true",
+            "production = true\nrefuse_admin_on_production = false",
+        )
+    )
+    cfg_path.chmod(0o600)
+    monkeypatch.setattr(setup_wizard, "DEFAULT_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(setup_wizard, "_CONFIG_DIR", tmp_path)
+
+    def fail_ask(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("must not prompt when already acknowledged")
+
+    monkeypatch.setattr(setup_wizard, "_ask", fail_ask)
+    assert setup_wizard._acknowledge_admin_or_abort("prod") is True
+
+
+def test_acknowledge_admin_skips_for_non_production(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admin on a dev instance is fine — the gate is prod-only."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(_PROD_ADMIN_CONFIG.replace("production = true", "production = false"))
+    cfg_path.chmod(0o600)
+    monkeypatch.setattr(setup_wizard, "DEFAULT_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(setup_wizard, "_CONFIG_DIR", tmp_path)
+
+    def fail_ask(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("must not prompt on non-production instance")
+
+    monkeypatch.setattr(setup_wizard, "_ask", fail_ask)
+    assert setup_wizard._acknowledge_admin_or_abort("prod") is True
+
+
 def test_toml_value_escapes_carriage_return() -> None:
     """`_toml_value` must escape \\r alongside \\n / \\t."""
     import tomllib
