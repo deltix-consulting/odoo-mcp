@@ -568,6 +568,59 @@ class OdooClient:
         )
         return bool(result)
 
+    def message_post(
+        self,
+        model: str,
+        record_id: int,
+        body: str,
+        *,
+        subject: str | None,
+        partner_ids: list[int],
+        message_type: str,
+    ) -> int:
+        """Post a message on a record via Odoo's ``message_post`` method.
+
+        Calls ``model.message_post(...)`` on ``record_id``. Odoo's
+        notification engine sends the email when ``message_type=='comment'``
+        and at least one partner is in ``partner_ids`` or in the record's
+        followers list. ``message_type=='notification'`` creates an
+        internal log note without sending email.
+
+        This is the only method-execute escape in the entire client —
+        every other operation is one of the named primitives. Exposed
+        only via the ``odoo_send_message`` tool, which itself is gated
+        behind two independent opt-ins (env var + per-instance config).
+
+        Returns the id of the created ``mail.message`` row.
+        """
+        if message_type not in ("comment", "notification"):
+            raise OdooRemoteError(
+                f"Refusing message_post with message_type={message_type!r}; "
+                f"only 'comment' (email) and 'notification' (log note) are "
+                f"allowed."
+            )
+        kwargs: dict[str, Any] = {
+            "body": body,
+            "message_type": message_type,
+        }
+        if subject is not None:
+            kwargs["subject"] = subject
+        if partner_ids:
+            kwargs["partner_ids"] = partner_ids
+        # ``subtype_xmlid`` controls which Odoo subtype this message
+        # belongs to. ``mt_comment`` ⇒ visible email-eligible message
+        # in the chatter. ``mt_note`` ⇒ internal log note. We force
+        # the matching subtype so a misbehaving caller cannot post a
+        # silent "note" that actually triggers an email blast.
+        kwargs["subtype_xmlid"] = "mail.mt_comment" if message_type == "comment" else "mail.mt_note"
+        result = self._execute(model, "message_post", [[record_id]], kwargs)
+        if not isinstance(result, int):
+            raise OdooRemoteError(
+                f"message_post on {model!r}({record_id}) returned unexpected "
+                f"type {type(result).__name__}"
+            )
+        return result
+
     def unlink(self, model: str, ids: list[int]) -> bool:
         """Permanently delete records. Exposed only via ``odoo_archive_or_delete``."""
         result = self._execute(model, "unlink", [ids], {})

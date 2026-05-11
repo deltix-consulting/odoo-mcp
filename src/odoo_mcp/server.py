@@ -110,7 +110,20 @@ def build_server(app: OdooMcpApp) -> Server:
     server: Server = Server("odoo-mcp")
     dispatcher = Dispatcher(app)
     all_tools = build_tools()
-    disabled = _disabled_tools()
+    disabled = set(_disabled_tools())
+    # External-communications tools are double-gated: they only show up
+    # in tools/list if (a) the env var is set AND (b) at least one
+    # configured instance has external_comms_enabled. Otherwise the
+    # tool is hidden, just as if the operator listed it in
+    # ODOO_MCP_DISABLE_TOOLS. The dispatcher refuses calls to a hidden
+    # tool too — this is defense in depth, not the primary gate.
+    if os.environ.get("ODOO_MCP_ENABLE_EXTERNAL_COMMS", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    } or not any(rt.config.external_comms_enabled for rt in app.instances.values()):
+        disabled.add("odoo_send_message")
     if disabled:
         unknown = disabled - {t.name for t in all_tools}
         if unknown:

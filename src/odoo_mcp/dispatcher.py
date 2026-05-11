@@ -90,6 +90,19 @@ def _latency_budget_ms() -> int | None:
     return value if value > 0 else None
 
 
+def _external_comms_globally_enabled() -> bool:
+    """True iff ``ODOO_MCP_ENABLE_EXTERNAL_COMMS`` is set to a truthy value.
+
+    Read each call (cheap) so tests can set / unset it dynamically.
+    Outbound communications via the MCP are off by default — the
+    operator must opt in *twice* (this env var AND the per-instance
+    ``external_comms_enabled`` config flag) before ``odoo_send_message``
+    can be invoked or even advertised.
+    """
+    raw = os.environ.get("ODOO_MCP_ENABLE_EXTERNAL_COMMS", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _read_only_session() -> bool:
     """True iff ``ODOO_MCP_READ_ONLY`` is set to a truthy value at process start.
 
@@ -855,6 +868,135 @@ class Dispatcher:
         self._add_commits_remaining(result, ctx)
         return result
 
+    def _send_message(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Post a message on an Odoo record — email or log note.
+
+        Twice-gated outbound communications path. Disabled by default;
+        requires:
+
+        1. ``ODOO_MCP_ENABLE_EXTERNAL_COMMS=1`` in the process environment
+           (else the tool isn't even advertised in ``tools/list``, and a
+           direct call here is refused).
+        2. ``external_comms_enabled = true`` on the targeted instance
+           in ``config.toml``.
+
+        Then it flows through the standard prod-guard pipeline:
+        unlock → dry-run preview (always, even on dev) → confirmation
+        token → commit. The preview includes the full message body and
+        recipient list verbatim, so a human can see exactly what will go
+        out before approving.
+        """
+        _refuse_if_read_only_session()
+        if not _external_comms_globally_enabled():
+            raise ProdGuardError(
+                "External communications are not enabled on this MCP install. "
+                "Set ODOO_MCP_ENABLE_EXTERNAL_COMMS=1 in the environment AND "
+                "add 'external_comms_enabled = true' to the instance config "
+                "to opt in. Both gates must be set."
+            )
+        ctx = self._begin("odoo_send_message", args, Operation.SEND_MESSAGE)
+        assert ctx.model is not None
+        rt, model = ctx.rt, ctx.model
+        if not rt.config.external_comms_enabled:
+            raise ProdGuardError(
+                f"Instance {ctx.instance!r} has external_comms_enabled = false. "
+                f"To allow outbound emails / log notes through the MCP on this "
+                f"instance, add 'external_comms_enabled = true' under "
+                f"[instances.{ctx.instance}] in your config."
+            )
+        # Refuse on models that are read-only via the MCP: posting a
+        # message to e.g. ``mail.message`` itself makes no sense, but
+        # the same blocklist also catches future additions.
+        _refuse_write_blocklisted(model)
+
+        record_id = _require_int(args, "record_id")
+        body = _require_str(args, "body")
+        message_type = args.get("message_type", "comment")
+        if message_type not in ("comment", "notification"):
+            raise OdooMcpError(
+                "message_type must be 'comment' (sends email to followers / "
+                "recipients) or 'notification' (internal log note)."
+            )
+        subject = _optional_str(args, "subject")
+        raw_partners = args.get("partner_ids") or []
+        if not isinstance(raw_partners, list):
+            raise OdooMcpError("partner_ids must be a list of integer ids.")
+        partner_ids: list[int] = []
+        for pid in raw_partners:
+            if not isinstance(pid, int) or isinstance(pid, bool):
+                raise OdooMcpError("partner_ids must contain only integers.")
+            partner_ids.append(pid)
+
+        self.app.prod_guard.check_write(ctx.instance, rt.config.production)
+
+        # Outbound communications always default to dry-run, on prod AND
+        # on dev. The cost of an accidentally-sent email is the same in
+        # both environments (real human reads it), so the "no surprise
+        # sends" property has to hold everywhere.
+        raw_dry = args.get("dry_run")
+        dry_run = True if raw_dry is None else bool(raw_dry)
+
+        if dry_run:
+            preview_body = body if len(body) <= 2000 else body[:2000] + "...[truncated]"
+            summary = f"{message_type} on {model}({record_id}) to {len(partner_ids)} partner(s)"
+            token = self.app.prod_guard.create_pending(
+                ctx.instance, ctx.op.value, model, summary=summary
+            )
+            self._audit_ok(
+                ctx,
+                {
+                    "message_type": str(message_type),
+                    "record_id": record_id,
+                    "partner_count": len(partner_ids),
+                    "body_length": len(body),
+                },
+                args,
+                dry_run=True,
+            )
+            return {
+                "preview": True,
+                "instance": ctx.instance,
+                "model": model,
+                "record_id": record_id,
+                "message_type": message_type,
+                "subject": subject,
+                "body_preview": preview_body,
+                "partner_ids": partner_ids,
+                "would_send_email": message_type == "comment" and bool(partner_ids),
+                "confirmation_token": token,
+                "note": _DRY_RUN_NOTE.format(tool="odoo_send_message"),
+            }
+
+        self._consume_token_on_prod(ctx, args)
+        message_id = rt.client.message_post(
+            model,
+            record_id,
+            body,
+            subject=subject,
+            partner_ids=partner_ids,
+            message_type=str(message_type),
+        )
+        self._audit_ok(
+            ctx,
+            {
+                "message_type": str(message_type),
+                "record_id": record_id,
+                "partner_count": len(partner_ids),
+                "message_id": message_id,
+            },
+            args,
+        )
+        result: dict[str, Any] = {
+            "instance": ctx.instance,
+            "model": model,
+            "record_id": record_id,
+            "message_id": message_id,
+            "message_type": message_type,
+            "committed": True,
+        }
+        self._add_commits_remaining(result, ctx)
+        return result
+
     def _add_commits_remaining(self, result: dict[str, Any], ctx: _Ctx) -> None:
         """If on prod, expose the post-commit burst budget to the caller."""
         if not ctx.rt.config.production:
@@ -1032,6 +1174,7 @@ _HANDLERS: dict[str, Callable[[Dispatcher, dict[str, Any]], dict[str, Any]]] = {
     "odoo_archive_or_delete": Dispatcher._archive_or_delete,
     "odoo_enable_prod_writes": Dispatcher._enable_prod_writes,
     "odoo_diagnose_access": Dispatcher._diagnose_access,
+    "odoo_send_message": Dispatcher._send_message,
 }
 
 
@@ -1291,6 +1434,17 @@ def _require_list_of_str(args: dict[str, Any], key: str) -> list[str]:
         if not isinstance(item, str):
             raise OdooMcpError(f"{key!r} must contain only strings.")
     return list(value)
+
+
+def _require_int(args: dict[str, Any], key: str) -> int:
+    """Strict integer arg, no default. Rejects booleans (subclass of int)."""
+    value = args.get(key)
+    if value is None:
+        raise OdooMcpError(f"Argument {key!r} is required and must be an integer.")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise OdooMcpError(f"Argument {key!r} must be an integer.")
+    ivalue: int = value
+    return ivalue
 
 
 def _require_list_of_int(args: dict[str, Any], key: str) -> list[int]:

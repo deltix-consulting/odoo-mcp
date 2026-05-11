@@ -415,6 +415,82 @@ _TOOL_ENABLE_PROD_WRITES = Tool(
 )
 
 
+_TOOL_SEND_MESSAGE = Tool(
+    name="odoo_send_message",
+    description=(
+        "Post a message on a record — sends an email when message_type='comment' "
+        "AND partner_ids contains at least one recipient (or the record has "
+        "followers); creates an internal log note when message_type='notification'. "
+        "DISABLED BY DEFAULT. Two independent opt-ins required: "
+        "(1) the operator sets ODOO_MCP_ENABLE_EXTERNAL_COMMS=1 in the "
+        "environment, (2) the operator sets external_comms_enabled=true on the "
+        "target instance in config.toml. Both gates must be set, otherwise this "
+        "tool refuses. Then the call goes through the same prod-guard flow as "
+        "writes: unlock + dry-run + confirmation_token. The dry-run preview "
+        "shows the full body and recipient list verbatim. ALWAYS dry-runs first, "
+        "on prod AND dev — outbound emails are equally costly to send by "
+        'accident anywhere. Example: model="res.partner", record_id=42, '
+        'message_type="comment", body="Hello", partner_ids=[42] sends an email '
+        "to partner 42 on a dry-run-then-confirm flow."
+    ),
+    inputSchema={
+        "type": "object",
+        "required": ["instance", "model", "record_id", "body"],
+        "additionalProperties": False,
+        "properties": {
+            "instance": {"type": "string"},
+            "model": {
+                "type": "string",
+                "description": "Target model (must pass the allowlist, e.g. 'res.partner').",
+            },
+            "record_id": {
+                "type": "integer",
+                "description": "Record id on which to post the message.",
+            },
+            "body": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Message body. HTML is accepted; plain text gets wrapped "
+                    "in <p> by Odoo. Shown verbatim in the dry-run preview."
+                ),
+            },
+            "subject": {
+                "type": "string",
+                "description": "Email subject (optional). Only relevant when message_type='comment'.",
+            },
+            "message_type": {
+                "type": "string",
+                "enum": ["comment", "notification"],
+                "default": "comment",
+                "description": (
+                    "'comment' = visible chatter message + email to partner_ids "
+                    "and followers. 'notification' = internal log note, no email."
+                ),
+            },
+            "partner_ids": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "default": [],
+                "description": "Recipient res.partner ids. For 'comment' type, these get the email.",
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": (
+                    "Preview only — validates and returns what would be sent. "
+                    "Defaults to true on EVERY instance (prod and dev), not just prod. "
+                    "Pass dry_run=false plus a confirmation_token to commit."
+                ),
+            },
+            "confirmation_token": {
+                "type": "string",
+                "description": "Token from a prior dry-run call, required to commit.",
+            },
+        },
+    },
+)
+
+
 _TOOL_DIAGNOSE_ACCESS = Tool(
     name="odoo_diagnose_access",
     description=(
@@ -480,4 +556,5 @@ def build_tools() -> list[Tool]:
         _TOOL_ARCHIVE_OR_DELETE,
         _TOOL_ENABLE_PROD_WRITES,
         _TOOL_DIAGNOSE_ACCESS,
+        _TOOL_SEND_MESSAGE,
     ]

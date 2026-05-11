@@ -10,6 +10,80 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-05-09
+
+This release reverses v0.13.1's blanket refusal of outbound
+communications, but only behind two independent opt-ins and the full
+existing prod-guard pipeline. Default behaviour is unchanged — out of
+the box the MCP still cannot email anyone.
+
+### Added
+
+- **``odoo_send_message`` tool.** Wraps Odoo's ``message_post`` to
+  send a chatter message + email (``message_type="comment"``) or post
+  an internal log note (``message_type="notification"``) on a record
+  of any allowlisted model. The full pipeline:
+
+  1. ``ODOO_MCP_ENABLE_EXTERNAL_COMMS=1`` in the process environment.
+  2. ``external_comms_enabled = true`` on the target instance in
+     ``config.toml``.
+  3. ``odoo_enable_prod_writes`` unlock on production instances.
+  4. Dry-run first — *on prod AND dev*. The default for sends is
+     ``dry_run=true`` regardless of instance, because an accidentally
+     sent email is equally costly in any environment.
+  5. Confirmation token bound to (instance, op, model, unlock window).
+  6. Burst budget shares ``max_commits_per_unlock`` with other writes.
+
+  The dry-run preview includes the verbatim body, subject, and recipient
+  partner_ids so a human can see exactly what will go out.
+
+  ``subtype_xmlid`` is forced from the ``message_type`` value
+  (``mail.mt_comment`` ↔ ``mail.mt_note``) so a caller cannot post a
+  "log note" that actually triggers an email blast via a mismatched
+  subtype.
+
+- **``Operation.SEND_MESSAGE``** added to the closed operation enum
+  and to ``_WRITE_OPS``. The dispatcher's ``check_write`` /
+  ``effective_dry_run`` / ``consume_pending`` chain applies unchanged.
+
+- **``OdooClient.message_post()``** — the one and only method-execute
+  primitive on the client. Calls ``model.message_post(...)`` for a
+  specific record id; rejects any ``message_type`` outside
+  ``{"comment", "notification"}``.
+
+- **``InstanceConfig.external_comms_enabled`` (default ``False``)** —
+  per-instance opt-in. Without it, the dispatcher refuses
+  ``odoo_send_message`` with a clear error pointing at the config
+  knob.
+
+- **Tool advertisement gating.** ``odoo_send_message`` is filtered out
+  of ``tools/list`` unless the env var is set AND at least one
+  configured instance has ``external_comms_enabled``. A
+  well-behaved client doesn't see the tool until both gates are open.
+
+### Tests
+
+- 12 new tests in ``test_send_message.py`` covering: env-var gate,
+  per-instance gate, dev defaults to dry-run, dev commit requires
+  token, prod commit requires unlock + token, message_type validation,
+  partner_ids type-check, ``would_send_email`` flag, advertisement
+  gating, and ``ODOO_MCP_READ_ONLY`` still wins.
+
+- ``test_disabled_tools.py`` updated to expect ``odoo_send_message``
+  hidden from the default tool list.
+
+### Deliberately not in this release
+
+- **WhatsApp send** — depends on Odoo Enterprise + the WhatsApp
+  module. Framework is in place (``Operation.SEND_MESSAGE`` is generic
+  enough); a follow-up release will add ``odoo_send_whatsapp`` once
+  the Enterprise schema is pinned.
+
+- **Separate burst budget for sends.** Currently shares
+  ``max_commits_per_unlock``. Argument for a separate
+  ``max_messages_per_unlock``: a chatty AI could exhaust the write
+  budget on emails. Defer until real usage shows it matters.
+
 ## [0.15.11] - 2026-05-09
 
 ### Security

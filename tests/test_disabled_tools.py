@@ -70,13 +70,18 @@ def test_no_env_advertises_full_tool_list(
     make_app: Callable[..., Any],
 ) -> None:
     monkeypatch.delenv("ODOO_MCP_DISABLE_TOOLS", raising=False)
+    monkeypatch.delenv("ODOO_MCP_ENABLE_EXTERNAL_COMMS", raising=False)
     app = make_app()
     srv = server.build_server(app)
     advertised = set(_list_tools_via_server(srv))
-    # Every tool from build_tools() must show up.
+    # Every tool from build_tools() must show up EXCEPT odoo_send_message,
+    # which is double-gated: tool only advertises when (a) the env var
+    # is set and (b) at least one instance has external_comms_enabled.
+    # Both are off in this fixture, so the tool is hidden.
     from odoo_mcp.tools import build_tools
 
-    assert advertised == {t.name for t in build_tools()}
+    expected = {t.name for t in build_tools()} - {"odoo_send_message"}
+    assert advertised == expected
 
 
 def test_unknown_disable_names_logged_not_fatal(

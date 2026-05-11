@@ -68,6 +68,7 @@ _VALID_INSTANCE_KEYS: Final[frozenset[str]] = frozenset(
         "custom_sensitive_field_patterns",
         "max_commits_per_unlock",
         "smart_fields_overrides",
+        "external_comms_enabled",
     }
 )
 
@@ -114,6 +115,13 @@ class InstanceConfig:
     # for that model and the configured list is returned as-is (sensitive
     # field redaction still applies on the response side).
     smart_fields_overrides: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # External communications (email / log notes via Odoo's message_post,
+    # later WhatsApp + SMS) are gated by TWO independent opt-ins: this
+    # per-instance flag AND the ``ODOO_MCP_ENABLE_EXTERNAL_COMMS`` env
+    # var. Both must be set for ``odoo_send_message`` to be reachable.
+    # Default ``False`` — the safe stance is "the MCP cannot email
+    # anyone unless the operator explicitly enables it".
+    external_comms_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +318,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
 
     max_commits = _require_int(entry, "max_commits_per_unlock", 10, minimum=1, maximum=1000)
     smart_overrides = _parse_smart_fields_overrides(entry.get("smart_fields_overrides"), name)
+    external_comms = bool(entry.get("external_comms_enabled", False))
 
     return InstanceConfig(
         name=name,
@@ -328,6 +337,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         custom_sensitive_field_patterns=custom_patterns,
         max_commits_per_unlock=max_commits,
         smart_fields_overrides=smart_overrides,
+        external_comms_enabled=external_comms,
     )
 
 
