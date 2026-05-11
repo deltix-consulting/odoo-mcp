@@ -10,6 +10,31 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.15.9] - 2026-05-09
+
+Documentation-only release. No code change.
+
+### Added
+
+- **``GETTING_STARTED.md``** — standalone first-run guide for someone
+  landing on the GitHub repo without prior context. Covers:
+  prerequisites; how to pick the right Odoo user (and why not admin);
+  step-by-step API-key creation on Odoo 16 / 17 / 18 (including the
+  re-authentication prompt, the "shown once" copy step, the "no API
+  Keys tab" troubleshooting, and the fact that *any* internal user
+  can create their own — no special permission needed); minimum
+  groups by use case; install commands per platform; verify;
+  first-test prompts; a ten-row gotcha table; rotation / revocation.
+
+  About 5 min to read, 10 min to install through.
+
+### Changed
+
+- **README Quick Start** now leads with a clearly visible banner
+  pointing first-time installers at ``GETTING_STARTED.md``. Short
+  three-step recap stays for people who already know what they're
+  doing. Windows install command added inline.
+
 ## [0.15.8] - 2026-05-09
 
 Documentation correction. No code change.

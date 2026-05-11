@@ -29,9 +29,11 @@ Built by [deltix](https://www.deltix.pro) for in-house Odoo teams and individual
 
 ## Quick start
 
-Requires Claude Desktop, Claude Code, or Codex, plus an Odoo user account. Supported on macOS, Windows 10+, and Linux (with libsecret).
+> **First time installing?** Read **[GETTING_STARTED.md](GETTING_STARTED.md)** — it walks through prerequisites, picking the right Odoo user, creating an API key step-by-step (and what permissions you need), the install command, and the top ten gotchas. About 5 minutes to read; 10 minutes to install.
 
-1. **Generate an API key in Odoo.** Profile photo → My Profile → Account Security → New API Key. Name it `odoo-mcp-yourname`. Copy it — Odoo only shows it once.
+Already familiar? The short version, macOS / Linux:
+
+1. **Create an Odoo API key.** Top-right profile → My Profile → Account Security → New API Key. Name it `odoo-mcp`. Copy it — Odoo only shows it once. Any internal user can create their own; no admin rights needed. Don't use an admin user's key on production (the MCP refuses by default).
 
 2. **Run the installer.**
 
@@ -40,11 +42,13 @@ Requires Claude Desktop, Claude Code, or Codex, plus an Odoo user account. Suppo
    curl -fsSL https://raw.githubusercontent.com/deltix-consulting/odoo-mcp/main/scripts/install.sh | bash
    ```
 
-   The installer verifies the release attestation, asks for Odoo URL / database / email / API key, and stores credentials in macOS Keychain.
+   It verifies the release attestation, asks for Odoo URL / database / login / API key, and stores credentials in your OS credential store.
 
-3. **Restart Claude Cowork / Claude Desktop and Codex** so they load the MCP. Ask: *"use odoo_help to show what you can do with my Odoo"*.
+3. **Restart Claude Desktop / Claude Code / Codex** so they load the MCP. Ask: *"use odoo_help to show what you can do with my Odoo"*.
 
-For a guided first run including a scan of the live instance, run `odoo-mcp onboarding`. See [ONBOARDING.md](ONBOARDING.md).
+Windows: PowerShell `iwr -useb https://raw.githubusercontent.com/deltix-consulting/odoo-mcp/main/scripts/install.ps1 | iex`.
+
+For deltix-internal onboarding (admin preps a colleague), see [ONBOARDING.md](ONBOARDING.md).
 
 ### Other MCP clients
 
