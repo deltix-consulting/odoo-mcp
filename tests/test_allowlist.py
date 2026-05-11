@@ -176,6 +176,8 @@ def test_denylist_contents_are_locked_in() -> None:
         "res.users.deletion",
         "res.users.settings",
         "res.users.settings.volumes",
+        "res.users.role",
+        "res.users.role.line",
         "res.groups",
         "auth_totp.device",
         "auth_oauth.provider",
@@ -198,6 +200,10 @@ def test_denylist_contents_are_locked_in() -> None:
         "ir.ui.view",
         "ir.asset",
         "mail.template",
+        "base.automation",
+        "base.automation.lint",
+        "base.automation.line.test",
+        "mcp.access.profile",
         # Mail server credentials and gateway/credential storage
         "ir.mail_server",
         "fetchmail.server",
@@ -246,6 +252,73 @@ def test_denylist_contents_are_locked_in() -> None:
     }
     missing = required - MODEL_DENYLIST
     assert not missing, f"MODEL_DENYLIST is missing: {sorted(missing)}"
+
+
+def test_rights_modification_models_all_denied() -> None:
+    """Every known rights-modification vector is denied in open mode.
+
+    Defense in depth: even if someone forgets the denylist intent, this
+    test pins the specific models that grant or revoke privileges in
+    Odoo. If a future refactor accidentally drops one of these, this
+    test fails loudly.
+
+    The set is grouped by escalation type, with a comment per group so
+    a reviewer adding a new entry understands the category.
+    """
+    allowed = frozenset({ALLOWLIST_WILDCARD})
+
+    rights_models: dict[str, list[str]] = {
+        "direct user / group membership": [
+            "res.users",
+            "res.users.log",
+            "res.groups",
+            "res.users.role",
+            "res.users.role.line",
+        ],
+        "API keys + auth tokens": [
+            "res.users.apikeys",
+            "res.users.apikeys.description",
+            "res.users.apikeys.show",
+            "auth_totp.device",
+            "auth.oauth.provider",
+            "auth.passkey.key",
+        ],
+        "ACL + record rules + defaults": [
+            "ir.model.access",
+            "ir.rule",
+            "ir.default",
+            "ir.filters",
+        ],
+        "executable content / automation": [
+            "ir.actions.server",
+            "ir.actions.client",
+            "ir.actions.todo",
+            "ir.embedded.actions",
+            "base.automation",
+            "ir.cron",
+        ],
+        "model + module metadata": [
+            "ir.model",
+            "ir.model.fields",
+            "ir.module.module",
+        ],
+        "MCP own controls (when companion addon is installed)": [
+            "mcp.access.profile",
+        ],
+    }
+    for category, models in rights_models.items():
+        for model in models:
+            with pytest.raises(ModelNotAllowedError, match="denylist"):
+                check_model(model, allowed)
+            # Reading the error message lets us confirm the rejection
+            # cites the denylist specifically, not a generic "unknown
+            # model" / "name shape" / etc.
+            try:
+                check_model(model, allowed)
+            except ModelNotAllowedError as exc:
+                assert "denylist" in str(exc), (
+                    f"{category}/{model}: error did not mention denylist: {exc}"
+                )
 
 
 def test_write_blocklist_contents_are_locked_in() -> None:

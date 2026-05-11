@@ -51,6 +51,9 @@ ALLOWLIST_WILDCARD: Final[str] = "*"
 MODEL_DENYLIST: Final[frozenset[str]] = frozenset(
     {
         # Auth / user / group
+        # Rights-modification vector: any write to these can grant or
+        # revoke privileges. Reading them also leaks per-user permission
+        # shape. Full denylist (read + write), not config-overridable.
         "res.users",
         "res.users.log",
         "res.users.apikeys",
@@ -60,6 +63,8 @@ MODEL_DENYLIST: Final[frozenset[str]] = frozenset(
         "res.users.deletion",  # pending GDPR-style user deletions
         "res.users.settings",  # holds OAuth refresh tokens via inherit
         "res.users.settings.volumes",
+        "res.users.role",  # Enterprise role-based access: assignable rights
+        "res.users.role.line",  # role-assignment join (period-scoped roles)
         "res.groups",
         "auth_totp.device",
         # NOTE: auth_oauth.provider and auth_signup.reset.password are kept
@@ -79,6 +84,8 @@ MODEL_DENYLIST: Final[frozenset[str]] = frozenset(
         "ir.default",  # default values across any model — write-side sneak
         "ir.filters",  # saved searches with arbitrary domains
         # Stored code / executable content (injection + exec risk)
+        # Writing to any of these can run Python or modify what other
+        # users see; in either case it's a privilege-escalation path.
         "ir.actions.server",
         "ir.actions.client",
         "ir.actions.act_url",  # URL-redirect actions — phishing vector
@@ -87,6 +94,17 @@ MODEL_DENYLIST: Final[frozenset[str]] = frozenset(
         "ir.ui.view",
         "ir.asset",  # frontend JS / CSS assets — XSS vector on write
         "mail.template",
+        # Automated actions: condition-triggered jobs that can run Python
+        # or modify other records under sudo. Same threat class as
+        # ir.actions.server; a write here is rights modification by proxy.
+        "base.automation",
+        "base.automation.lint",
+        "base.automation.line.test",
+        # Optional companion addon (odoo_addon/odoo_mcp_companion):
+        # explicitly controls who can act through the MCP. Even when
+        # the addon is installed and exposed, the MCP must never
+        # let itself reconfigure its own gate.
+        "mcp.access.profile",
         # Mail server credentials and gateway/credential storage
         "ir.mail_server",  # smtp_user / smtp_pass
         "fetchmail.server",  # incoming mail credentials, oauth tokens

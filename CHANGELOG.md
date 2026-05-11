@@ -10,6 +10,48 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.15.11] - 2026-05-09
+
+### Security
+
+- **Denylist expanded to close three rights-modification gaps.** Four
+  additional models added to ``MODEL_DENYLIST`` so the MCP cannot be
+  used (read or write) to grant or revoke privileges, even on
+  instances where Odoo's per-user ACLs would technically allow it:
+
+  - ``res.users.role`` and ``res.users.role.line`` — Odoo Enterprise
+    role-based access. Writing here assigns rights in the same way
+    ``res.users.groups_id`` does on Community. Already covered for
+    Community via the existing ``res.users`` / ``res.groups`` entries;
+    this closes the Enterprise variant.
+
+  - ``base.automation`` (and its ``.lint`` / ``.line.test`` siblings)
+    — automated actions that can run Python or modify other records
+    under sudo. Same threat class as ``ir.actions.server``: a write
+    here is rights modification by proxy.
+
+  - ``mcp.access.profile`` — the model added by the optional
+    companion addon (``odoo_addon/odoo_mcp_companion/``) that controls
+    who can act through the MCP. Defense in depth: even when that
+    addon is installed and exposed, the MCP itself must never let a
+    caller reconfigure its own gate.
+
+  No code path change; this is purely an extension of the existing
+  hardcoded denylist. The "Auth / user / group" and "Stored
+  executable content" sections of the denylist now carry comments
+  explaining that the intent is "no rights modification via MCP" so a
+  future reviewer adding a new entry knows the category.
+
+### Tests
+
+- New ``test_rights_modification_models_all_denied`` test pins every
+  known privilege-escalation vector to a specific denylist entry
+  grouped by escalation type. If a future refactor accidentally drops
+  one, this test fails before merge.
+
+- ``test_denylist_contents_are_locked_in`` updated to include the new
+  entries.
+
 ## [0.15.10] - 2026-05-09
 
 Documentation fixes. No code change.
