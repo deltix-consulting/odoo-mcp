@@ -219,6 +219,36 @@ checkout, or a compromised maintainer machine. `odoo-mcp update`
 performs the same check automatically before applying an update; pass
 `--skip-verification` only if you have a specific reason to bypass it.
 
+## Scope and shared responsibility
+
+**This MCP is designed for a single Odoo deployment per install.** The
+multi-instance feature exists so you can wire up dev, staging, and
+production of the *same* Odoo deployment in one config — not so you
+can point one MCP install at multiple unrelated organisations'
+databases.
+
+Why this matters:
+
+- The audit log is a single file (`~/.odoo-mcp/audit.jsonl`). Every
+  instance writes to it. Mixing unrelated organisations there breaks
+  the per-customer audit boundary that consulting work usually
+  requires.
+- The OS credential store (Keychain / Credential Manager / libsecret)
+  is keyed by the OS user, not by config. Two organisations' API keys
+  in the same install live under the same login. A compromise of that
+  OS account reaches both.
+- The L1+L2 fields cache and the rate-limit / prod-guard state are
+  per-process. A typo on instance name will still target the wrong
+  Odoo at the boundary; the only thing protecting you is the
+  ``instance`` argument the caller passes.
+- The MCP's allowlist / denylist / sensitive-field policy is global to
+  the install. Tightening for one organisation tightens for all.
+
+If you run consulting work across multiple unrelated customer Odoos,
+the right pattern is one MCP install per customer on separate OS user
+accounts (or separate machines / VMs). One config, one customer.
+Do not combine.
+
 ## What we never see
 
 The MCP runs entirely on your machine. Specifically:

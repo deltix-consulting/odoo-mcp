@@ -10,16 +10,48 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.15.8] - 2026-05-09
+
+Documentation correction. No code change.
+
+### Changed
+
+- **Scope clarification: one MCP install = one Odoo deployment.**
+  README and SECURITY.md now state explicitly that the multi-instance
+  feature is for dev / staging / prod of the *same* Odoo deployment —
+  not for pointing one MCP install at multiple unrelated organisations'
+  databases. The single audit log, shared OS keychain entries, and
+  global allowlist / denylist / sensitive-field policy all assume
+  single-organisation scope. For consulting work that touches multiple
+  unrelated customer Odoos, the right pattern is one MCP install per
+  customer on separate OS user accounts. The architecture was already
+  single-org by design; v0.15.7's marketing copy implied otherwise,
+  and this release corrects that.
+
+- **SECURITY.md** gains a "Scope and shared responsibility" section
+  enumerating the four things that are per-process and therefore
+  shared across configured instances (audit log file, OS credential
+  store entries, fields cache, allowlist / denylist / sensitive-field
+  policy).
+
+- **README** ``What you get`` and ``Where it fits`` rewritten:
+  "multi-instance, multi-client, multi-user" → "Dev + prod side by
+  side". "Consulting on multiple customer Odoos" → "In-house operators
+  with one Odoo deployment". One-line scope banner at the top of the
+  README.
+
+- **Corporate link normalised** to ``https://www.deltix.pro`` in the
+  README.
+
 ## [0.15.7] - 2026-05-09
 
 ### Changed
 
 - **README leads with value, not implementation.** New top sections:
   one-line hook, "What you get" with six concrete benefits, "Where it
-  fits" with four use cases (multi-customer consulting, in-house data
-  work, migration & audit, read-only demos). Technical detail
-  unchanged below the fold; the existing tool / CLI / configuration
-  reference reads the same. No code change.
+  fits" with four use cases. Technical detail unchanged below the
+  fold; the existing tool / CLI / configuration reference reads the
+  same. No code change.
 
 ## [0.15.6] - 2026-05-09
 

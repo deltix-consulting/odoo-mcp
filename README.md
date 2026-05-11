@@ -2,22 +2,25 @@
 
 **Let Claude, Codex, Cursor or any MCP client work directly against your [Odoo](https://www.odoo.com) — without a hallucinating loop wiping production.**
 
-Built by [deltix](https://deltix.pro) for Odoo consultants and in-house teams who want AI on tap during day-to-day work — reading invoices, drafting partners, reviewing pipelines, auditing custom modules — but refuse to expose a customer database to a misbehaving agent. Local, open source, MIT.
+Built by [deltix](https://www.deltix.pro) for in-house Odoo teams and individual operators who want AI on tap during day-to-day work — reading invoices, drafting partners, reviewing pipelines, auditing custom modules — but refuse to expose the database to a misbehaving agent. Local, open source, MIT.
+
+> **One MCP install = one Odoo deployment.** Connect dev, staging, and prod of the same Odoo side by side in one config — that's what the multi-instance support is for. Do not point a single MCP install at multiple unrelated organisations' Odoos; credentials, audit log, and OS keychain entries are shared per process. See [SECURITY.md](SECURITY.md#scope-and-shared-responsibility).
 
 ## What you get
 
 - **Production-safe writes.** Every commit on a production instance goes through three independent gates: explicit unlock, dry-run preview, single-use confirmation token. A hallucinated 200-call loop cannot silently mutate data.
 - **Per-call PII redaction.** VAT, IBAN, salary, RSZ, employee birth dates and 60+ other patterns are stripped by default. Passwords and API keys can never be read, full stop.
-- **Multi-instance, multi-client, multi-user.** Connect dev / prod / per-customer Odoos side by side. Use it from Claude Desktop, Claude Code, OpenAI Codex, Cursor, Windsurf, Continue.dev, Zed — the same server, one config. Each consultant brings their own Odoo API key so per-user ACLs still apply.
+- **Dev + prod side by side.** Wire up `[instances.dev]` and `[instances.prod]` of the same Odoo deployment in one config. Each instance has its own API key, its own rate-limit budget, and its own prod-guard state.
+- **Works with every major MCP client.** Claude Desktop, Claude Code, OpenAI Codex, Cursor, Windsurf, Continue.dev, Zed. One server, paste-ready config snippets via `odoo-mcp client-config`.
 - **No telemetry, no phone-home, no data exfil path.** The only outbound traffic is to your Odoo. We never see your URL, your queries, your data, or your audit log.
 - **66-model security denylist hardcoded.** Auth tables, ACL rules, mail credentials, payment tokens, stored executable content, attachments — unreachable, not config-overridable.
 - **Audit log on every call.** One JSONL line per tool call with timing and shape, never values. Fail-closed if the log becomes unwritable.
 
 ## Where it fits
 
-- **Consulting on multiple customer Odoos** — one MCP, one config file, separate API keys per instance, separate audit per customer.
-- **In-house data work without a Studio license** — `odoo_search_read`, `odoo_read_group` and the prompts library cover most reporting / cleanup tasks without writing a single SQL query.
-- **Migration & audit** — `odoo-mcp scan-custom` diffs a live klant Odoo against the standard 18.0 schema to surface custom models, Studio fields, and likely-sensitive columns before they show up in a production incident.
+- **In-house operators with one Odoo deployment** — reading reports, drafting partners, reviewing pipelines without writing SQL or building Studio dashboards.
+- **Dev → prod workflows** — try a write against `[instances.dev]` first, then re-run against `[instances.prod]` with the explicit unlock + token flow.
+- **Schema audit and migration prep** — `odoo-mcp scan-custom` diffs a live Odoo against the standard 18.0 schema to surface custom models, Studio fields, and likely-sensitive columns before they show up in an incident.
 - **Read-only demos and training** — set `ODOO_MCP_READ_ONLY=1` and hand a session to anyone safely.
 
 > **As-is software, MIT-licensed.** No external security audit has been performed.
