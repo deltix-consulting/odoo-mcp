@@ -307,7 +307,7 @@ liable for damages arising from use of this software.
 
 ## Reporting vulnerabilities
 
-Email `security@deltix.pro`. PGP is available on request.
+Email `hello@deltix.pro` with subject prefix `[odoo-mcp security]`. PGP is available on request.
 
 Please include:
 

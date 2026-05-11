@@ -10,6 +10,24 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.15.10] - 2026-05-09
+
+Documentation fixes. No code change.
+
+### Changed
+
+- **README ``scan-custom`` claim no longer promises Odoo 18.0.** The
+  embedded reference schema is currently Odoo 18 Community, but the
+  visitor may be running Odoo 16, 17, or 19. Rewrote the bullet to
+  state the reference version explicitly and note that the diff still
+  works on other versions (with a small custom-field overcount on
+  newer Odoo, harmless).
+
+- **Security-reporting email corrected to ``hello@deltix.pro``** with
+  subject prefix ``[odoo-mcp security]``. The old
+  ``security@deltix.pro`` did not exist. Updated in README,
+  SECURITY.md, and GETTING_STARTED.md.
+
 ## [0.15.9] - 2026-05-09
 
 Documentation-only release. No code change.

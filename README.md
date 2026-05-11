@@ -20,7 +20,7 @@ Built by [deltix](https://www.deltix.pro) for in-house Odoo teams and individual
 
 - **In-house operators with one Odoo deployment** — reading reports, drafting partners, reviewing pipelines without writing SQL or building Studio dashboards.
 - **Dev → prod workflows** — try a write against `[instances.dev]` first, then re-run against `[instances.prod]` with the explicit unlock + token flow.
-- **Schema audit and migration prep** — `odoo-mcp scan-custom` diffs a live Odoo against the standard 18.0 schema to surface custom models, Studio fields, and likely-sensitive columns before they show up in an incident.
+- **Schema audit and migration prep** — `odoo-mcp scan-custom` diffs your live Odoo against an embedded reference schema (currently Odoo 18 Community) to surface custom models, Studio fields, and likely-sensitive columns before they show up in an incident. On other Odoo versions the diff still runs — fields present in your Odoo but not in the reference get flagged as custom (a small overcount on newer versions, harmless).
 - **Read-only demos and training** — set `ODOO_MCP_READ_ONLY=1` and hand a session to anyone safely.
 
 > **As-is software, MIT-licensed.** No external security audit has been performed.
@@ -179,7 +179,7 @@ Integration tests need `ODOO_MCP_TEST_*` environment variables and `pytest -m in
 
 ## Security reporting
 
-Email `security@deltix.pro` and expect a response within five business days. See [SECURITY.md](SECURITY.md).
+Email `hello@deltix.pro` (subject: `[odoo-mcp security]`) and expect a response within five business days. See [SECURITY.md](SECURITY.md).
 
 ## License
 

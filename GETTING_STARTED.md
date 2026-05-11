@@ -222,5 +222,5 @@ To revoke (e.g. laptop lost): delete the key in Odoo's Account Security tab. The
 - Doctor output usually contains the exact next step. Read it before asking.
 - `odoo-mcp help` lists every CLI subcommand.
 - `odoo_help` (the tool, not the CLI) lists every MCP tool inside your AI client.
-- Bug or security issue → [GitHub issues](https://github.com/deltix-consulting/odoo-mcp/issues) or `security@deltix.pro` for sensitive reports.
+- Bug or security issue → [GitHub issues](https://github.com/deltix-consulting/odoo-mcp/issues) or `hello@deltix.pro` (subject `[odoo-mcp security]`) for sensitive reports.
 - Project context: [README](README.md). Threat model: [SECURITY.md](SECURITY.md).
