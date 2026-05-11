@@ -1,9 +1,27 @@
 # odoo-mcp
 
-Local MCP server that exposes a security-gated slice of [Odoo](https://www.odoo.com) to any MCP client (Claude Desktop, Claude Code, OpenAI Codex, Cursor, Windsurf, Continue.dev, Zed, ...) over stdio. 13 tools, 12 prompts, server-enforced guardrails, no telemetry.
+**Let Claude, Codex, Cursor or any MCP client work directly against your [Odoo](https://www.odoo.com) — without a hallucinating loop wiping production.**
 
-> **As-is software.** No external security audit has been performed.
-> Review [SECURITY.md](SECURITY.md) before deploying. The MCP runs on
+Built by [deltix](https://deltix.pro) for Odoo consultants and in-house teams who want AI on tap during day-to-day work — reading invoices, drafting partners, reviewing pipelines, auditing custom modules — but refuse to expose a customer database to a misbehaving agent. Local, open source, MIT.
+
+## What you get
+
+- **Production-safe writes.** Every commit on a production instance goes through three independent gates: explicit unlock, dry-run preview, single-use confirmation token. A hallucinated 200-call loop cannot silently mutate data.
+- **Per-call PII redaction.** VAT, IBAN, salary, RSZ, employee birth dates and 60+ other patterns are stripped by default. Passwords and API keys can never be read, full stop.
+- **Multi-instance, multi-client, multi-user.** Connect dev / prod / per-customer Odoos side by side. Use it from Claude Desktop, Claude Code, OpenAI Codex, Cursor, Windsurf, Continue.dev, Zed — the same server, one config. Each consultant brings their own Odoo API key so per-user ACLs still apply.
+- **No telemetry, no phone-home, no data exfil path.** The only outbound traffic is to your Odoo. We never see your URL, your queries, your data, or your audit log.
+- **66-model security denylist hardcoded.** Auth tables, ACL rules, mail credentials, payment tokens, stored executable content, attachments — unreachable, not config-overridable.
+- **Audit log on every call.** One JSONL line per tool call with timing and shape, never values. Fail-closed if the log becomes unwritable.
+
+## Where it fits
+
+- **Consulting on multiple customer Odoos** — one MCP, one config file, separate API keys per instance, separate audit per customer.
+- **In-house data work without a Studio license** — `odoo_search_read`, `odoo_read_group` and the prompts library cover most reporting / cleanup tasks without writing a single SQL query.
+- **Migration & audit** — `odoo-mcp scan-custom` diffs a live klant Odoo against the standard 18.0 schema to surface custom models, Studio fields, and likely-sensitive columns before they show up in a production incident.
+- **Read-only demos and training** — set `ODOO_MCP_READ_ONLY=1` and hand a session to anyone safely.
+
+> **As-is software, MIT-licensed.** No external security audit has been performed.
+> Review [SECURITY.md](SECURITY.md) before deploying to production. The MCP runs on
 > macOS, Windows 10+, and Linux (with libsecret).
 
 ## Quick start
@@ -37,17 +55,16 @@ odoo-mcp client-config --list               # see the full supported list
 
 The command resolves the absolute `odoo-mcp` path on your machine and prints a paste-ready snippet plus the file it goes in.
 
-## What this MCP never sees
+## Privacy posture in detail
 
 - **No telemetry.** The only outbound HTTP is to your Odoo, plus GitHub during `odoo-mcp update`.
 - **No phone-home.** deltix-consulting receives nothing — no URL, database name, queries, results, or audit log.
 - **No source-code upload.** Custom modules are discovered at runtime via `ir.model` / `ir.model.fields`. Source stays in your repo.
-- **Credentials never on disk.** Username and API key live in macOS Keychain, are scrubbed from errors, and are deleted from `os.environ` after auth.
+- **Credentials never on disk.** Username and API key live in your OS credential store (macOS Keychain / Windows Credential Manager / libsecret), are scrubbed from errors, and are deleted from `os.environ` after auth.
 - **Audit log stays local.** `~/.odoo-mcp/audit.jsonl` records metadata only — no field values, no queries, no results.
-- **Not your responsibility either.** See [SECURITY.md](SECURITY.md#user-responsibilities)
-  for what the operator must still own.
+- **Shared responsibility.** See [SECURITY.md](SECURITY.md#user-responsibilities) for what the operator must still own.
 
-See [SECURITY.md](SECURITY.md) for the threat model.
+See [SECURITY.md](SECURITY.md) for the full threat model.
 
 ## Tools
 

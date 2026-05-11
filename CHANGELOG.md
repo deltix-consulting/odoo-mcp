@@ -10,6 +10,17 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.15.7] - 2026-05-09
+
+### Changed
+
+- **README leads with value, not implementation.** New top sections:
+  one-line hook, "What you get" with six concrete benefits, "Where it
+  fits" with four use cases (multi-customer consulting, in-house data
+  work, migration & audit, read-only demos). Technical detail
+  unchanged below the fold; the existing tool / CLI / configuration
+  reference reads the same. No code change.
+
 ## [0.15.6] - 2026-05-09
 
 ### Added
