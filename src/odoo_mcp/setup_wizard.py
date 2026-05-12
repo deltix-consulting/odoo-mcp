@@ -1022,6 +1022,145 @@ def _cmd_rotate_key(name: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: renew-key NAME (password-auth → programmatic key generation)
+# ---------------------------------------------------------------------------
+
+
+def _cmd_renew_key(name: str) -> int:
+    """Generate a fresh API key via password authentication.
+
+    Built specifically for Odoo Online, where non-admin API keys expire
+    after 1 day by platform policy. Cannot be relaxed via custom module
+    (Odoo Online forbids custom modules) or via System Parameters
+    (Odoo enforces the policy at the platform level).
+
+    Flow:
+
+      1. Read the instance config; find URL + database + username.
+      2. Prompt for the user's Odoo password (NOT echoed, NOT stored).
+      3. Authenticate to Odoo via password — this is allowed for users
+         who don't have 2FA enabled.
+      4. Once authenticated, call ``res.users.apikeys._generate`` on
+         the user's own account to produce a fresh key.
+      5. Write the new key to the OS credential store, overwriting
+         the previous (typically expired) one.
+      6. Disposal: the password variable is overwritten and dropped
+         from the local scope. Python doesn't let us forcibly wipe
+         strings from memory, so the structural mitigation is "use
+         it once, then drop the reference".
+
+    Returns 0 on success, 1 on any failure (with a readable message).
+    """
+    import ssl  # local import: keeps import-time costs lean
+    import xmlrpc.client
+
+    if not DEFAULT_CONFIG_PATH.exists():
+        print(f"No config found at {DEFAULT_CONFIG_PATH}")
+        return 1
+    _, instances = _load_raw_config()
+    if name not in instances:
+        print(f"Instance {name!r} is not configured.")
+        print(f"Known instances: {sorted(instances.keys())}")
+        return 1
+
+    inst = instances[name]
+    url = str(inst.get("url") or "")
+    database = str(inst.get("database") or "")
+    prefix = str(inst.get("credentials_env_prefix") or _env_prefix(name))
+    username_service = f"{prefix}_USERNAME"
+    api_key_service = f"{prefix}_API_KEY"
+    username = _keychain_get(name, username_service)
+
+    if not url or not database:
+        print(f"Instance {name!r} has incomplete config (url / database missing).")
+        return 1
+    if not username:
+        print(f"No username found in keychain for instance {name!r}.")
+        print("Run 'odoo-mcp setup --add' to (re)configure it.")
+        return 1
+
+    print(f"Renewing API key for {username} on instance '{name}'.")
+    print("Your Odoo password is used once to generate a new key and then")
+    print("discarded. It is NOT stored anywhere.")
+    print()
+    password = getpass.getpass("Odoo password (will not echo): ")
+    try:
+        if not password:
+            print("Password cannot be empty. Aborted.")
+            return 1
+
+        # Authenticate. Odoo's XML-RPC ``common.authenticate`` accepts
+        # passwords for users without 2FA, and API keys otherwise. We
+        # need the password path here because we're generating a new key.
+        ctx = ssl.create_default_context()
+        common = xmlrpc.client.ServerProxy(
+            f"{url.rstrip('/')}/xmlrpc/2/common",
+            context=ctx,
+            allow_none=True,
+        )
+        try:
+            uid = common.authenticate(database, username, password, {})
+        except xmlrpc.client.Fault as exc:
+            print(f"  Odoo rejected the password: {exc.faultString}")
+            print("  Common causes: wrong password, 2FA enabled (then password")
+            print("  auth is blocked — generate the key manually in Odoo profile).")
+            return 1
+        except (OSError, ssl.SSLError, TimeoutError) as exc:
+            print(f"  Could not reach Odoo: {type(exc).__name__}: {exc}")
+            return 1
+
+        if not isinstance(uid, int) or not uid:
+            print("  Authentication returned no uid. Check username + database.")
+            return 1
+
+        # Generate the key as the authenticated user. We call
+        # ``res.users.apikeys._generate`` directly — same code path the
+        # Odoo UI uses behind the "New API Key" button.
+        models = xmlrpc.client.ServerProxy(
+            f"{url.rstrip('/')}/xmlrpc/2/object",
+            context=ctx,
+            allow_none=True,
+        )
+        try:
+            new_key = models.execute_kw(
+                database,
+                uid,
+                password,
+                "res.users.apikeys",
+                "_generate",
+                ["rpc", f"odoo-mcp ({name})"],
+                {},
+            )
+        except xmlrpc.client.Fault as exc:
+            print(f"  Odoo refused to generate a new key: {exc.faultString}")
+            print("  If the error mentions 'duration' or 'expiration', your Odoo")
+            print("  may require a specific duration argument. Re-run with the")
+            print("  flag noted in the error message, or generate manually.")
+            return 1
+        except (OSError, ssl.SSLError, TimeoutError) as exc:
+            print(f"  Could not generate key: {type(exc).__name__}: {exc}")
+            return 1
+    finally:
+        # Structural disposal: drop the password reference immediately.
+        # Python's GC will collect it on the next cycle; we can't force
+        # it but we can keep the window small.
+        password = ""  # noqa: F841 — deliberate overwrite
+
+    if not isinstance(new_key, str) or not new_key:
+        print(f"  Unexpected response from Odoo: {new_key!r}")
+        return 1
+
+    _keychain_set(name, api_key_service, new_key)
+    print()
+    print(f"  ✓ New API key stored in keychain for instance '{name}'.")
+    print("  Existing Claude Desktop / Codex sessions will pick it up after restart.")
+    print()
+    print("  On Odoo Online, this new key is typically valid for 1 day.")
+    print("  Re-run 'odoo-mcp renew-key' tomorrow morning.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: setup --regenerate-launcher
 # ---------------------------------------------------------------------------
 

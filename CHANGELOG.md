@@ -10,6 +10,61 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-05-12
+
+Real-world fix for deltix's own Odoo Online deployment: non-admin API
+keys expire after 1 day by platform policy, and Odoo Online forbids
+custom modules — so v0.16.1's addon approach doesn't apply to Online
+deployments. The daily-renewal flow is the only honest fix that fits
+inside Odoo Online's constraints.
+
+### Added
+
+- **``odoo-mcp renew-key INSTANCE`** CLI command. One-shot daily
+  renewal flow:
+
+    1. Reads instance config + username from keychain.
+    2. Prompts for the user's Odoo password (not echoed, not stored).
+    3. Authenticates via password to Odoo's stock XML-RPC.
+    4. Calls ``res.users.apikeys._generate`` on the user's own
+       account to produce a fresh key.
+    5. Stores the new key in the OS credential store, overwriting
+       the previous one.
+    6. Drops the password reference immediately after use.
+
+  Works for any user without 2FA enabled (2FA blocks password-auth
+  via XML-RPC; those users must generate keys manually in Odoo).
+  Surfaces clear errors for wrong password, missing username,
+  unknown instance, and Odoo refusing the generate call.
+
+  Workflow for daily users on Odoo Online:
+
+  ```bash
+  # Each morning, takes ~30 seconds
+  odoo-mcp renew-key prod
+  # → Type Odoo password
+  # → Key refreshed, valid for the next 24h
+  ```
+
+- Nine new tests in ``test_renew_key.py`` covering happy path, wrong
+  password, missing username, unknown instance, empty password,
+  generate-side fault, the ``__main__`` dispatch, and the
+  ``Usage`` error for missing arg.
+
+### Why this is here
+
+The session-long context: ``v0.16.1`` shipped a small Odoo addon that
+overrides the 1-day API key default — but that addon can only be
+installed on self-hosted Odoo or Odoo.sh. **Odoo Online forbids
+custom modules**, so the addon is dead-in-the-water for SaaS Odoo
+customers. The 1-day expiry is enforced at the Odoo platform layer
+and cannot be relaxed from within the database.
+
+This release adds the only fix that fits inside Online's constraints:
+**accept the 1-day limit and provide a clean way to renew daily**.
+30 seconds of friction per user per day, no stored password, no
+shared service account.
+
 ## [0.16.1] - 2026-05-12
 
 Documentation + a new optional Odoo-side addon. No MCP code change.

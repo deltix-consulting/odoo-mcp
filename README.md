@@ -102,7 +102,8 @@ No `execute_kw`. No workflow buttons. No `copy`, `name_search`, `fields_view_get
 | `odoo-mcp setup --add` | Add another instance |
 | `odoo-mcp setup --remove` | Remove an instance and its Keychain entries |
 | `odoo-mcp setup --list` | List configured instances |
-| `odoo-mcp setup --rotate-key NAME` | Rotate the API key for one instance |
+| `odoo-mcp setup --rotate-key NAME` | Rotate the API key for one instance (paste a new key) |
+| `odoo-mcp renew-key NAME` | Generate + store a fresh API key via password (for Odoo Online's 1-day expiry policy) |
 | `odoo-mcp setup --regenerate-launcher` | Rewrite `launch.sh` |
 | `odoo-mcp uninstall` | Remove config, Keychain entries, launcher, Claude Desktop + Codex registration, and the `uv tool` install |
 | `odoo-mcp doctor` | Pre-flight: config perms, audit log, TLS, auth, smoke call |

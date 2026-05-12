@@ -14,6 +14,7 @@ Usage::
     python -m odoo_mcp setup --list             # list configured instances
     python -m odoo_mcp setup --rotate-key NAME  # rotate API key
     python -m odoo_mcp setup --acknowledge-admin NAME  # opt out of admin refusal for one instance
+    python -m odoo_mcp renew-key INSTANCE       # generate fresh API key via password (Odoo Online daily)
     python -m odoo_mcp setup --regenerate-launcher  # rewrite launch.sh
     python -m odoo_mcp config show              # dump the effective config (sanitized)
     python -m odoo_mcp config validate [PATH]   # validate a config file
@@ -94,6 +95,14 @@ def main() -> int:
         from . import cache_cli
 
         return cache_cli.main(argv[1:])
+
+    if argv and argv[0] == "renew-key":
+        from . import setup_wizard
+
+        if len(argv) < 2 or not argv[1]:
+            print("Usage: odoo-mcp renew-key INSTANCE", file=sys.stderr)
+            return 2
+        return setup_wizard._cmd_renew_key(argv[1])
 
     if argv and argv[0] == "client-config":
         from . import client_config_cli
