@@ -1,5 +1,11 @@
 # odoo-mcp
 
+[![CI](https://github.com/deltix-consulting/odoo-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/deltix-consulting/odoo-mcp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/deltix-consulting/odoo-mcp?display_name=tag&sort=semver)](https://github.com/deltix-consulting/odoo-mcp/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](pyproject.toml)
+[![Build provenance attested](https://img.shields.io/badge/build%20provenance-Sigstore-success)](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations)
+
 **Let Claude, Codex, Cursor or any MCP client work directly against your [Odoo](https://www.odoo.com) — without a hallucinating loop wiping production.**
 
 Built by [deltix](https://www.deltix.pro) for in-house Odoo teams and individual operators who want AI on tap during day-to-day work — reading invoices, drafting partners, reviewing pipelines, auditing custom modules — but refuse to expose the database to a misbehaving agent. Local, open source, MIT.
@@ -30,6 +36,8 @@ Built by [deltix](https://www.deltix.pro) for in-house Odoo teams and individual
 ## Quick start
 
 > **First time installing?** Read **[GETTING_STARTED.md](GETTING_STARTED.md)** — it walks through prerequisites, picking the right Odoo user, creating an API key step-by-step (and what permissions you need), the install command, and the top ten gotchas. About 5 minutes to read; 10 minutes to install.
+>
+> **For production: [VERIFY.md](VERIFY.md)** describes the verified-release install flow (download release artifact, verify Sigstore attestation, verify sha256 yourself, then install). **`curl | bash` is the convenience path, not the production-recommended path.** No external security audit has been performed — see [SECURITY.md](SECURITY.md) before deploying.
 
 Already familiar? The short version, macOS / Linux:
 
@@ -113,6 +121,103 @@ No `execute_kw`. No workflow buttons. No `copy`, `name_search`, `fields_view_get
 | `odoo-mcp scan-custom INSTANCE` | Discover custom models and likely-sensitive fields, suggest TOML overrides |
 | `odoo-mcp client-config` | Print MCP client config snippets for Claude Desktop, Cursor, Windsurf, Continue, Zed, Codex, ... |
 | `odoo-mcp update` | `git pull` + `uv sync` against the install directory |
+
+## Compatibility
+
+> **No external security audit has been performed.** Treat the
+> compatibility table below as community-tested. For production
+> deployments, review [SECURITY.md](SECURITY.md) and the
+> [safe production setup checklist](SECURITY.md#safe-production-setup-checklist).
+
+| Surface | Versions | Status |
+|---|---|---|
+| Odoo Community | 17.0, 18.0 | tested |
+| Odoo Enterprise | 17.0, 18.0 | tested |
+| Odoo Online (SaaS) | current | tested — note: non-admin API keys expire in 1 day; use `odoo-mcp renew-key` |
+| Odoo Community / Enterprise | 16.0 | should work, lightly tested |
+| Odoo 19+ / JSON-2 | — | planned, see [ROADMAP.md](ROADMAP.md) |
+| Python | 3.11, 3.12, 3.13 | tested |
+| Operating system | macOS 12+, Windows 10/11, Linux (libsecret) | tested |
+| MCP clients | Claude Desktop, Claude Code, OpenAI Codex CLI, Cursor, Windsurf, Continue.dev, Zed | snippets shipped — see `odoo-mcp client-config --list` |
+
+If a combination is missing or broken, file an [Odoo compatibility bug](https://github.com/deltix-consulting/odoo-mcp/issues/new?template=odoo-compat-bug.yml).
+
+## Example output
+
+A few sample interactions so you know what to expect before installing.
+
+### `odoo-mcp doctor`
+
+```text
+  ✓ Load config — from /Users/you/.odoo-mcp/config.toml
+  ✓ Audit log writable — /Users/you/.odoo-mcp/audit.jsonl
+  ✓ [prod] credentials — user you@yourcompany.com
+  ✓ [prod] authenticate — uid=42
+  ✓ [prod] fields_get(res.partner) — 137 fields
+
+OK
+```
+
+### `odoo_help` (terse mode)
+
+```json
+{
+  "ok": true,
+  "version": "0.16.2",
+  "summary": "Security-gated Odoo over XML-RPC: per-instance allowlists, domain sandbox, field redaction, prod-write guard with dry-run + confirmation tokens. Call odoo_help(verbose=true) for the full cookbook.",
+  "tools": [
+    {"name": "odoo_search_read", "purpose": "Search + read with explicit fields list."},
+    {"name": "odoo_diagnose_access", "purpose": "Read/write/create/unlink rights on a model."},
+    ...
+  ],
+  "instances": [
+    {"name": "prod", "url": "https://yourco.odoo.com", "production": true,
+     "writes_unlocked": false, "allowlist_mode": "strict"}
+  ]
+}
+```
+
+### Dry-run write on production
+
+Call `odoo_write` for the first time after unlocking prod:
+
+```json
+{
+  "ok": true,
+  "preview": true,
+  "instance": "prod",
+  "model": "crm.lead",
+  "id_count": 1,
+  "would_update_fields": ["stage_id"],
+  "confirmation_token": "conf_XXXXXXXXXXXXXXXXXXXX",
+  "note": "This was a dry run. To commit, call odoo_write again with dry_run=false and confirmation_token set to the token above."
+}
+```
+
+Same call with `dry_run: false, confirmation_token: "conf_..."`:
+
+```json
+{
+  "ok": true,
+  "instance": "prod",
+  "model": "crm.lead",
+  "ids": [42],
+  "committed": true,
+  "commits_remaining": 9
+}
+```
+
+### `odoo-mcp audit --stats`
+
+```text
+TOOL                       CALLS  OK   ERR  P50ms  P95ms  MAXms
+odoo_search_read           312    310    2    87    254    611
+odoo_describe_model         48     48    0    34     91    187
+odoo_read_group             18     18    0   102    188    220
+odoo_diagnose_access         4      4    0    71    108    113
+odoo_enable_prod_writes      2      2    0     8     12     14
+odoo_write                   2      2    0    96    102    102
+```
 
 ## Production write workflow
 

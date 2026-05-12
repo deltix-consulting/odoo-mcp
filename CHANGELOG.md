@@ -10,6 +10,116 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-05-12
+
+Repo maturity pass driven by an external review. Targeted security,
+adoption, and supply-chain hardening — no code path changes, no
+guardrail changes. Same dispatcher, same denylist, same tests.
+
+### Security
+
+- **Release attestation is now hard-fail.** The
+  ``actions/attest-build-provenance`` step in ``release.yml`` no
+  longer carries ``continue-on-error: true`` — a failed Sigstore
+  attestation now blocks the release. The repo is public so this
+  works; if you flip the repo private again, attestations will fail
+  and that is intentional. Recovery for transient failures: delete
+  the tag, push again, the workflow re-runs cleanly.
+
+- **CI / release workflows pinned to full commit SHAs**, with the
+  resolved tag in a trailing comment. Closes the supply-chain hole
+  where a compromised action repo could update a tag to point at a
+  malicious commit. Bump via dependabot or manually re-resolve via
+  ``gh api repos/<org>/<repo>/git/refs/tags/<tag> --jq .object.sha``.
+
+- **``pip-audit`` advisory job in CI.** Runs against the runtime
+  dependency tree on every push / PR. Currently
+  ``continue-on-error: true`` — first introduction, no vuln-response
+  SLA yet. Promote to hard-fail when the policy lands (see
+  ``ROADMAP.md``).
+
+- **Package metadata verification in CI** — asserts ``pyproject.toml``
+  is internally consistent (name, version present, license MIT,
+  Python floor, required deps). Prevents a malformed metadata
+  release.
+
+### Added
+
+- **[VERIFY.md](VERIFY.md)** — verified-release install flow. Download
+  the release artefact, verify the Sigstore attestation, verify
+  ``sha256``, then install. **The README now recommends this for
+  production**; the ``curl | bash`` one-liner is explicitly labelled
+  as a convenience path.
+
+- **[RELEASE.md](RELEASE.md)** — release checklist with security
+  review gates, tag-and-push commands, post-release verification,
+  and an explicit "what to do if release workflow fails" section.
+
+- **[ROADMAP.md](ROADMAP.md)** — open owner decisions surfaced as a
+  document so external feedback can land against concrete proposals.
+  Covers PyPI ownership, Docker registry, signed tags vs release
+  attestations, JSON-2 / Odoo 19+ transport, supported Odoo version
+  matrix, real Odoo smoke tests in CI, vulnerability response SLA.
+  Also documents what is **deliberately not** planned (multi-tenant,
+  generic ``execute_kw``, web UI, ...).
+
+- **README badges** for CI, latest release, license, Python versions,
+  and Sigstore build provenance.
+
+- **README compatibility matrix** — explicit which Odoo versions,
+  Python versions, OSes, and MCP clients are tested vs. supported
+  vs. planned. Includes the "no external security audit" notice and
+  links to the threat model.
+
+- **README example output section** — sample output for
+  ``odoo-mcp doctor``, ``odoo_help`` (terse), a prod dry-run write
+  + confirmation flow, and ``odoo-mcp audit --stats``. Lets a
+  first-time reader see what the tool actually returns before
+  installing.
+
+- **SECURITY.md threat-model matrix** — compact threat → mitigation
+  (with code pointer) → tests → residual risk table for every
+  defended threat. Sits above the existing per-threat narrative.
+
+- **SECURITY.md "Safe production setup checklist"** — eleven-item
+  checklist mapping straight to the actions and config knobs that
+  make a production install safe (dedicated non-admin Odoo user,
+  strict ``allowed_models``, ``production = true``, audit-log
+  review cadence, verified-release install, ...). The "open
+  allowlist = discovery/staging, strict = recommended for
+  production" stance is now explicit.
+
+- **GitHub issue templates** — security bug (with private-report
+  redirect), Odoo compatibility bug, MCP client integration bug,
+  feature request (with security-impact dropdown to keep the bar
+  high on broadening the surface).
+
+- **GitHub PR template** with explicit security-impact and docs-impact
+  sections, plus a reviewer checklist.
+
+### Notes on what was deliberately NOT taken from comparable projects
+
+External review compared the repo to ``tuanle96/mcp-odoo``. The
+following ideas from that survey were intentionally not adopted:
+
+- **Generic ``execute_method`` tool.** Even with an allowlist, the
+  surface area is too large to threat-model per call. We keep
+  per-method named tools instead.
+- **``fields=["*"]`` wildcard reads.** Caller must pass an explicit
+  list or rely on the curated ``smart_fields`` default; both go
+  through redaction.
+- **HTTP / SSE transport.** stdio-only is a deliberate scope
+  decision tied to the per-user credential model. See SECURITY.md
+  scope section.
+- **Auto-update with stored password.** Persistent password storage
+  to bypass Odoo's API-key expiry would defeat the policy that
+  expiry is designed to enforce. We ship ``odoo-mcp renew-key`` as
+  the one-shot daily flow instead.
+- **Shared service account pattern.** One Odoo user for many human
+  consultants kills per-user audit and ACL scoping.
+
+These are all documented in [ROADMAP.md "What is NOT planned"](ROADMAP.md).
+
 ## [0.16.2] - 2026-05-12
 
 Real-world fix for deltix's own Odoo Online deployment: non-admin API

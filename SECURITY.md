@@ -50,6 +50,42 @@ appear in error messages and operator-facing logs, but they are never
 written to the audit log (which records only metadata and an instance
 name) and never returned in tool responses.
 
+## Threat-model matrix
+
+Compact view of the threat → mitigation → tests → residual risk
+relationship. The full per-threat narrative is in the next section.
+
+| Threat | Mitigation (where) | Tests (where) | Residual risk |
+|---|---|---|---|
+| Accidental destructive writes on prod | Four gates: unlock (`ProdGuard.check_write`) + dry-run default (`effective_dry_run`) + single-use confirmation token (`consume_pending`) + burst budget. Read-only env (`ODOO_MCP_READ_ONLY=1`) and per-tool hide (`ODOO_MCP_DISABLE_TOOLS`) on top. | `tests/test_prod_guard.py`, `tests/test_archive_or_delete.py`, `tests/test_read_only_session.py` | Operator misconfigures `production = false` on a real prod Odoo. Setup wizard prompts with default `True` to mitigate. |
+| Credential exfiltration | OS credential store (Keychain / Credential Manager / libsecret), env-var purge after auth, `Credentials.__repr__` redaction, error-message scrubbing. No persistent storage of Odoo password — `renew-key` flow disposes after one use. | `tests/test_credentials.py`, `tests/test_credstore.py`, `tests/test_renew_key.py` | Compromised laptop reveals the keychain; OS account compromise reaches keys for every configured instance. |
+| Field-level PII leakage | Always-redacted regex set (`_ALWAYS_REDACTED_PATTERNS`), default-hidden per-model set (`_DEFAULT_HIDDEN`), binary stripping, `allow_sensitive_fields` opt-in per call, custom per-instance regex (`custom_sensitive_field_patterns`). | `tests/test_field_redaction.py`, `tests/test_smart_fields.py` | A custom field not matched by built-in patterns; operator must extend `custom_sensitive_field_patterns`. |
+| Privilege escalation via domain traversal | Domain sandbox rejects dotted fields, validates field existence + operator allowlist, caps leaves at 32. | `tests/test_domain_sandbox.py` | A custom Odoo method bypasses the sandbox; addressed by refusing arbitrary `execute_kw`. |
+| Runaway resource consumption | Per-instance token-bucket rate limiter, hard cap on record count (`max_records_hard_cap`), per-call XML-RPC timeout, latency-budget warning (`ODOO_MCP_TOOL_LATENCY_BUDGET_MS`). | `tests/test_limits.py` | A single very-slow Odoo call can still block the dispatcher for `timeout_seconds`. |
+| Unauthorized method execution | No generic `execute_kw` tool. Each Odoo method is wrapped behind a named tool with its own argument schema and security shape (`message_post` is the only named wrapper, behind double opt-in). | `tests/test_allowlist.py`, `tests/test_send_message.py` | A future maintainer adds a thin wrapper without the full pipeline. Pinned by `test_rights_modification_models_all_denied`. |
+| Model-level escalation | Hardcoded `MODEL_DENYLIST` (auth, ACLs, executable content, mail credentials, payment tokens, IAP, scheduler, module metadata, raw attachments — see `allowlist.py`). Not config-overridable. | `tests/test_allowlist.py::test_denylist_contents_are_locked_in`, `tests/test_allowlist.py::test_rights_modification_models_all_denied` | A new Odoo version adds a sensitive model not yet on the denylist. |
+| Outbound mail / message abuse | `mail.message`/`mail.followers`/`mail.notification` are write-blocklisted. The narrow `odoo_send_message` tool needs both `ODOO_MCP_ENABLE_EXTERNAL_COMMS=1` AND per-instance `external_comms_enabled=true`, then goes through dry-run + token, with `subtype_xmlid` server-forced to match `message_type`. | `tests/test_send_message.py` | Both opt-ins enabled + token reuse window — closes by token single-use and unlock-window binding. |
+| Supply-chain compromise (build artefact tampering) | GitHub Actions build provenance attestation via Sigstore, hard-fail in `release.yml`. Verified-install flow documented in [VERIFY.md](../VERIFY.md). `pip-audit` runs in CI as an advisory. | Release workflow run logs | Maintainer-machine compromise can still produce signed-but-malicious builds; tag-signing policy is an [open owner question](../ROADMAP.md). |
+
+## Safe production setup checklist
+
+Run through this before pointing the MCP at any production Odoo. Each item maps to a section of this document or to a setting in `config.toml`.
+
+- [ ] **Dedicated non-admin Odoo user** for the MCP. Not your personal admin account. Not `OdooBot`. A new user named e.g. `mcp-integration` whose only job is to be the API-key holder.
+- [ ] **Minimum Odoo groups** on that user. Start narrow (Sales: User, Accounting: Billing read-only). Grant more only when a tool call fails for legitimate reasons. The MCP inherits whatever this user can do — granting `Settings` here is granting it to every prompt.
+- [ ] **`allowed_models` is strict on prod**, not `["*"]` (open mode). Open mode is for discovery / staging. Enumerate the models you actually need. See [Reference](../README.md#reference).
+- [ ] **`production = true`** on the prod instance block in `config.toml`. The setup wizard defaults to `True`; verify with `odoo-mcp setup --list`.
+- [ ] **`refuse_admin_on_production` not opted out** unless you really need it. If the MCP's API key user has admin rights, every per-user ACL scoping below the MCP is bypassed.
+- [ ] **Read-only env var for demos / training** (`ODOO_MCP_READ_ONLY=1`). Set in the shell that launches Claude Desktop / Codex for that session.
+- [ ] **Disabled-tools env var** (`ODOO_MCP_DISABLE_TOOLS=...`) when a particular surface is not needed. Tools that aren't in `tools/list` cannot be called even by a hallucinating model.
+- [ ] **Audit log is being reviewed** at a real cadence. `~/.odoo-mcp/audit.jsonl`, daily rotation, 30-day retention. Pipe to your SIEM if you have one, or set a weekly calendar reminder.
+- [ ] **One install per Odoo deployment.** Dev / staging / prod of the *same* Odoo, yes. Multiple customers' Odoos in one MCP install, no — see [Scope and shared responsibility](#scope-and-shared-responsibility).
+- [ ] **API keys rotated** at your security policy's cadence. Default reminder at 90 days. Adjust `rotation_warning_days` in `[defaults]`.
+- [ ] **Verified release installed** for production, not the convenience installer. See [VERIFY.md](../VERIFY.md).
+- [ ] **CHANGELOG.md reviewed** for the version you install — security-sensitive changes are flagged under a `### Security` heading.
+
+The checklist is exhaustive for v0.16.x. If an item does not apply to your deployment (e.g. you do not run demos), skip it consciously rather than silently.
+
 ## Defense layers
 
 For each threat above:

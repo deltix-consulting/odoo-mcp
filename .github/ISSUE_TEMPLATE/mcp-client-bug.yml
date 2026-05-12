@@ -1,0 +1,90 @@
+name: MCP client integration bug
+description: Claude Desktop / Code / Codex / Cursor / Windsurf / Continue / Zed cannot use the MCP correctly.
+title: "[mcp-client] "
+labels: ["mcp-client", "needs-triage"]
+body:
+  - type: dropdown
+    id: client
+    attributes:
+      label: MCP client
+      options:
+        - Claude Desktop
+        - Claude Code (CLI)
+        - OpenAI Codex CLI
+        - Cursor
+        - Windsurf
+        - Continue.dev
+        - Zed
+        - Other (specify below)
+    validations:
+      required: true
+
+  - type: input
+    id: client_version
+    attributes:
+      label: MCP client version
+    validations:
+      required: true
+
+  - type: input
+    id: mcp_version
+    attributes:
+      label: odoo-mcp version
+      placeholder: "v0.16.2 (output of `odoo-mcp doctor` first line)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows 10/11
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: Symptom
+      options:
+        - MCP not advertised in client's tool list
+        - MCP advertised but every call hangs
+        - MCP advertised but every call fails with the same error
+        - Specific tool fails / behaves unexpectedly
+        - Performance / latency issue
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: client_config
+    attributes:
+      label: Client config snippet
+      description: |
+        Paste the relevant section from your client's config
+        (claude_desktop_config.json, .codex/config.toml, .cursor/mcp.json, etc).
+        Redact any secrets first.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Exact prompt you gave the AI + the resulting tool call(s) + the output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Output of `ODOO_MCP_LOG_LEVEL=DEBUG` set in the launching shell, then
+        running the failing flow. Credentials are scrubbed automatically.
+      render: shell

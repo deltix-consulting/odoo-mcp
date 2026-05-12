@@ -1,0 +1,75 @@
+name: Odoo compatibility bug
+description: A specific Odoo version / module combination breaks the MCP.
+title: "[odoo-compat] "
+labels: ["odoo-compat", "needs-triage"]
+body:
+  - type: input
+    id: mcp_version
+    attributes:
+      label: odoo-mcp version
+      placeholder: "v0.16.2"
+    validations:
+      required: true
+
+  - type: input
+    id: odoo_version
+    attributes:
+      label: Odoo version (exact)
+      placeholder: "18.0 Community / 17.0 Enterprise / Online (build 12345)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hosting
+    attributes:
+      label: Hosting
+      options:
+        - Odoo Online (SaaS)
+        - Odoo.sh
+        - Self-hosted Community
+        - Self-hosted Enterprise
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: installed_modules
+    attributes:
+      label: Relevant installed Odoo modules
+      description: Especially anything that touches auth, ACLs, custom fields, mail, or workflows.
+      placeholder: |
+        - auth_password_policy
+        - mail_enterprise
+        - studio (Enterprise)
+        - one custom in-house module: deltix_pricelist_extra
+
+  - type: textarea
+    id: tool_call
+    attributes:
+      label: Failing tool call
+      description: Exact MCP tool name + arguments.
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: Error / unexpected output
+      description: Copy the full JSON response, error_code included.
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: odoo-mcp doctor output
+      description: |
+        Run `odoo-mcp doctor` and paste the output here (it never includes
+        credentials).
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else

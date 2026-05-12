@@ -13,9 +13,13 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v5
+      # All third-party actions pinned to a full commit SHA. Tag in
+      # the comment is what we resolved at pin-time. Bump via
+      # dependabot or:
+      #   gh api repos/<org>/<repo>/git/refs/tags/<tag> --jq .object.sha
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
 
       - name: Install Python 3.11
         run: uv python install 3.11
@@ -39,12 +43,14 @@ jobs:
         run: uv build
 
       - name: Generate build provenance attestation
-        # Attestations require a public repo OR a paid org plan. We let
-        # this step fail soft so the release still publishes on a private
-        # free-tier repo. When the org upgrades or the repo flips public,
-        # this becomes the default verification path.
-        uses: actions/attest-build-provenance@v1
-        continue-on-error: true
+        # Hard-fail: attestation is the trust anchor for the release.
+        # A failed attestation here means the release does not publish.
+        # If it fails for a transient reason (GitHub API hiccup), delete
+        # the tag, push it again, and the workflow re-runs cleanly.
+        # The repo is public (attestations require either public OR a
+        # paid org); if you make the repo private again this step will
+        # fail and that is intentional.
+        uses: actions/attest-build-provenance@92c65d2898f1f53cfdc910b962cecff86e7f8fcc  # v1
         with:
           subject-path: 'dist/*'
 
@@ -66,7 +72,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3
         with:
           name: ${{ github.ref_name }}
           body_path: release_notes.md

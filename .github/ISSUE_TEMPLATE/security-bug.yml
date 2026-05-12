@@ -1,0 +1,75 @@
+name: Security-impacting bug (public report)
+description: |
+  A bug with security implications that is already public / low-severity
+  enough to discuss in the open. For non-public reports, email
+  hello@deltix.pro (subject [odoo-mcp security]) — see SECURITY.md.
+title: "[security] "
+labels: ["security", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Before you file
+        If exploiting this report would let someone bypass a security
+        boundary in the MCP (denylist, redaction, prod-guard, audit log,
+        credentials), **do not file it publicly**. Email
+        `hello@deltix.pro` instead with subject `[odoo-mcp security]`.
+
+  - type: input
+    id: version
+    attributes:
+      label: odoo-mcp version
+      placeholder: "v0.16.2"
+    validations:
+      required: true
+
+  - type: input
+    id: odoo_version
+    attributes:
+      label: Odoo version
+      placeholder: "18.0 Community / 17.0 Enterprise / Odoo Online"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      multiple: true
+      options:
+        - Denylist bypass
+        - Field redaction bypass
+        - Domain sandbox bypass
+        - Prod-write guard bypass
+        - Confirmation token reuse / replay
+        - Credential leak (logs / error messages)
+        - Audit log gap
+        - Rate limit / DoS
+        - Other (please describe)
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps to reproduce. Include exact tool call(s).
+      placeholder: |
+        1. odoo_search_read with domain=[("create_uid.login","=","admin")]
+        2. Expected: rejected by domain sandbox
+        3. Actual: returned admin's lookup
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact assessment
+      description: Who can exploit, what they get, how easy it is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: mitigation
+    attributes:
+      label: Suggested mitigation (optional)

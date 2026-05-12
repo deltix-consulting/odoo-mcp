@@ -1,0 +1,57 @@
+name: Feature request
+description: Suggest a new capability or improvement.
+title: "[feat] "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Scope reminder
+        This MCP is **security-first**. Requests that broaden the
+        method/model/field surface (a generic `execute_method`, a
+        `fields=["*"]` wildcard, raw `mail.message` write, etc.) will
+        likely be declined. Targeted tools for specific workflow actions
+        — wrapped in the existing dry-run + confirmation-token flow —
+        are fine. See SECURITY.md for what is intentionally not exposed.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem you're trying to solve
+      description: What are you trying to do today that the MCP doesn't support?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: |
+        Concrete: name the tool you want, the arguments, the expected return shape.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        Have you tried `base.automation`? A scheduled action? A direct Odoo
+        web call? Why is an MCP tool the right answer here?
+
+  - type: dropdown
+    id: security_impact
+    attributes:
+      label: Security impact
+      options:
+        - Read-only — no new write surface
+        - Write — fits the existing dry-run + token flow
+        - Write — would need a new opt-in (env var + per-instance flag)
+        - Bypass — would weaken an existing guardrail (likely declined)
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else

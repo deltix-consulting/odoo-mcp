@@ -6,13 +6,20 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  ci:
+  lint-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      # All third-party actions pinned to a full commit SHA. The tag
+      # name in the comment is the tag we resolved at pin-time. Bump
+      # via dependabot or manually with:
+      #   gh api repos/<org>/<repo>/git/refs/tags/<tag> --jq .object.sha
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
 
       - name: Install Python 3.11
         run: uv python install 3.11
@@ -31,3 +38,47 @@ jobs:
 
       - name: Pytest
         run: uv run pytest -q
+
+      - name: Build package
+        run: uv build
+
+      - name: Verify package metadata
+        run: |
+          uv run python -c "$(cat <<'PY'
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+          p = data['project']
+          assert p['name'] == 'odoo-mcp', p['name']
+          assert p['version'], 'version empty'
+          assert p['license']['text'] == 'MIT', p['license']
+          assert p['requires-python'].startswith('>=3.11'), p['requires-python']
+          deps = {dep.split('>')[0].split('=')[0].strip() for dep in p['dependencies']}
+          assert 'mcp' in deps, deps
+          assert 'keyring' in deps, deps
+          print('pyproject.toml metadata OK')
+          PY
+          )"
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    # First introduction: do not fail CI on a vulnerability until we
+    # have a triage SLA. Operators see the report in the Actions log
+    # and can react. Promote to hard-fail (remove continue-on-error)
+    # once a vuln-response process is in place.
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pip-audit
+        run: pip install "pip-audit==2.7.3"
+
+      - name: Audit runtime dependencies
+        run: |
+          pip install -e .
+          pip-audit --strict --progress-spinner off
