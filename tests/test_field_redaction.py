@@ -351,6 +351,31 @@ def test_validate_aggregate_fields_accepts_plain_and_typed() -> None:
     assert out == ["expected_revenue:sum", "id:count", "stage_id"]
 
 
+def test_validate_aggregate_fields_accepts_bool_aggregators() -> None:
+    # bool_and / bool_or are scalar (one bool per group) — same disclosure
+    # profile as count, so they're on the allowlist.
+    partner_fields = frozenset({"id", "is_company", "active"})
+    out = validate_aggregate_fields(
+        "res.partner",
+        ["is_company:bool_and", "active:bool_or"],
+        partner_fields,
+        allow_sensitive=frozenset(),
+    )
+    assert out == ["is_company:bool_and", "active:bool_or"]
+
+
+def test_validate_aggregate_fields_rejects_array_agg() -> None:
+    # array_agg collapses raw row values into the response, bypassing the
+    # row-level redaction policy. Must stay off the allowlist.
+    with pytest.raises(FieldPolicyError):
+        validate_aggregate_fields(
+            "crm.lead",
+            ["name:array_agg"],
+            LEAD_FIELDS,
+            allow_sensitive=frozenset(),
+        )
+
+
 @pytest.mark.parametrize(
     "spec",
     [

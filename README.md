@@ -83,7 +83,7 @@ See [SECURITY.md](SECURITY.md) for the full threat model.
 | `odoo_lookup` | Fast `name ilike` lookup, returns id + display_name |
 | `odoo_search_read` | Query records with explicit fields and a sandboxed domain |
 | `odoo_search_count` | Count records matching a domain |
-| `odoo_read_group` | Aggregate (sum/avg/count/min/max) with groupby |
+| `odoo_read_group` | Aggregate (sum/avg/count/min/max/bool_and/bool_or) with groupby |
 | `odoo_read` | Read specific records by ID |
 | `odoo_create` | Create a record (prod-gated) |
 | `odoo_write` | Update records (prod-gated) |
