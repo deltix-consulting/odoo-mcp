@@ -10,6 +10,33 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-05-12
+
+Documentation + a new optional Odoo-side addon. No MCP code change.
+
+### Added
+
+- **``odoo_addon/odoo_mcp_long_lived_keys/``** — small Odoo addon
+  (~50 lines of Python) that adds a per-user **"Allow long-lived MCP
+  API keys"** checkbox to the user form. When ticked by an admin,
+  that user's next API key gets a 90-day expiry instead of the 1-day
+  default that some Odoo installs enforce for non-admin users
+  (Odoo Online, `auth_password_policy`, custom modules).
+
+  Real-world driver: the v0.15.x advice to just "add users to a
+  group" did not actually change anything in Odoo, because groups
+  are inert labels until code references them. This addon is that
+  code. An admin ticks the checkbox per user, the user generates
+  a new API key, and the override fires.
+
+  See [`odoo_addon/odoo_mcp_long_lived_keys/README.md`](odoo_addon/odoo_mcp_long_lived_keys/README.md)
+  for install / use / customise / revoke. Status: **tested locally
+  only**. Install on a non-prod Odoo first.
+
+- **``odoo_addon/README.md`** index page enumerating both addons
+  (long-lived keys + companion) with a one-line summary and status
+  per addon.
+
 ## [0.16.0] - 2026-05-09
 
 This release reverses v0.13.1's blanket refusal of outbound

@@ -1,4 +1,17 @@
-# odoo-mcp companion addon (optional, untested)
+# odoo-mcp companion Odoo addons
+
+This directory ships two small Odoo addons. They are **separate from the
+MCP itself** — they live on the Odoo side. Install only the ones you
+need.
+
+| Addon | What it does | Status |
+|---|---|---|
+| [`odoo_mcp_long_lived_keys`](./odoo_mcp_long_lived_keys/) | Adds a per-user "Allow long-lived MCP API keys" checkbox. Ticking it makes that user's next API key valid for 90 days instead of the 1-day default. Use this if your Odoo policy expires non-admin keys after 1 day. | tested locally only |
+| [`odoo_mcp_companion`](./odoo_mcp_companion/) | Adds two security groups (MCP Read Only / MCP Read+Write) and an `mcp.access.profile` model for centralised MCP-user permissioning. | design + skeleton, untested |
+
+---
+
+# odoo_mcp_companion (optional, untested)
 
 > **Status: design + skeleton.** This addon ships as code and a
 > manifest, but it has not been validated against a live Odoo

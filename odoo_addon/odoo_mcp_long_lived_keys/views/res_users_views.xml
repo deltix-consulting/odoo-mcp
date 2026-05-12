@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <!-- Inherit the user form and add the checkbox to the Access Rights tab. -->
+    <record id="view_users_form_mcp_long_lived" model="ir.ui.view">
+        <field name="name">res.users.form.mcp.long.lived</field>
+        <field name="model">res.users</field>
+        <field name="inherit_id" ref="base.view_users_form"/>
+        <field name="arch" type="xml">
+            <!-- Prefer the Access Rights page; fall back to the bottom of the
+                 form if a custom theme moved that page. -->
+            <xpath expr="//page[@name='access_rights']" position="inside">
+                <group string="MCP Integration" name="mcp_integration">
+                    <field name="mcp_long_lived_keys"/>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>
