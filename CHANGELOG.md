@@ -10,6 +10,30 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-05-12
+
+Small read-side enhancement: round out the `odoo_read_group` aggregator
+allowlist with the two scalar boolean aggregators Odoo already supports
+natively. No behaviour change for existing callers.
+
+### Added
+
+- **`bool_and` / `bool_or` aggregators** accepted in `odoo_read_group`'s
+  ``fields`` argument. Both return one boolean per group, so the
+  information-disclosure profile matches the existing `count` /
+  `count_distinct` aggregators — the default-hidden / always-redacted
+  policy still applies unchanged. Useful for queries like
+  ``fields=["is_company:bool_and"]`` ("are all partners in this group
+  companies?").
+
+### Why not `array_agg`?
+
+Odoo also supports `array_agg`, but it collapses raw row values into
+the response and would silently bypass `odoo_read_group`'s scalar-only
+redaction policy. Callers who want the underlying rows should use
+`odoo_search_read` so the per-field redaction runs. The test suite
+asserts `array_agg` stays rejected.
+
 ## [0.16.0] - 2026-05-09
 
 This release reverses v0.13.1's blanket refusal of outbound

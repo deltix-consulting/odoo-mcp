@@ -168,8 +168,17 @@ _BINARY_PLACEHOLDER_PREFIX: Final[str] = "<binary:"
 
 # Whitelisted aggregation functions for read_group `fields` entries.
 # Anything outside this set is rejected — no SQL-ish tricks via alias syntax.
+#
+# `bool_and` / `bool_or` are scalar aggregators (one bool per group) — same
+# information-disclosure profile as `count` / `count_distinct`, so the existing
+# default-hidden / always-redacted policy applies unchanged.
+#
+# `array_agg` is intentionally NOT included: it collapses raw row values into
+# the response, which would bypass the row-level redaction policy designed
+# around scalar aggregates. If a caller needs the underlying rows, they should
+# use `odoo_search_read` so the field-level redaction runs.
 _AGG_FUNCS: Final[frozenset[str]] = frozenset(
-    {"sum", "avg", "count", "count_distinct", "max", "min"}
+    {"sum", "avg", "count", "count_distinct", "max", "min", "bool_and", "bool_or"}
 )
 
 # Whitelisted date/datetime bucketing suffixes for read_group `groupby` entries.
