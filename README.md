@@ -252,12 +252,13 @@ Releases are signed via Sigstore using GitHub Actions Build Provenance Attestati
 
 ## Configuration
 
-Configuration lives at `~/.odoo-mcp/config.toml` (chmod 600 — the server refuses to start otherwise). The onboarding wizard generates it; advanced operators can edit it by hand. The schema is defined in `src/odoo_mcp/config.py`. Key knobs: `timeout_seconds`, `max_records_default`, `max_records_hard_cap`, `allowed_models` (open `["*"]` or strict list), and per-instance `[instances.NAME]` blocks with `url`, `database`, `credentials_env_prefix`, `production`.
+Configuration lives at `~/.odoo-mcp/config.toml` (chmod 600 — the server refuses to start otherwise). The onboarding wizard generates it; advanced operators can edit it by hand. The schema is defined in `src/odoo_mcp/config.py`. Key knobs: `timeout_seconds`, `max_records_default`, `max_records_hard_cap`, `allowed_models` (open `["*"]` or strict list), `language` (Odoo locale for the call context), and per-instance `[instances.NAME]` blocks with `url`, `database`, `credentials_env_prefix`, `production`.
 
 ## Reference
 
 - **Allowed models.** Default is open mode (`allowed_models = ["*"]`): every model reachable except a hardcoded denylist (auth/users/groups, ACLs, stored executable content, system config, scheduler, raw attachments, model metadata). Switch to strict mode by listing models explicitly. The denylist always applies on top. See `src/odoo_mcp/config.py` for the denylist.
 - **Sensitive fields.** Two tiers: regex-matched fields (passwords, tokens, api_keys, salary/payroll/bonus, secrets, credentials) are always redacted and unwritable. Per-model default-hidden fields (e.g. `res.partner.vat`, `hr.employee.ssnid`) require per-call `allow_sensitive_fields=[...]`. Extend with `custom_sensitive_field_patterns` per instance.
+- **Language.** `language` (in `[defaults]` or per `[instances.NAME]`) sets the Odoo `res.lang` code injected into every call context — `nl_BE`, `fr_FR`, etc. It drives the language of translated field labels, selection-value labels, and translatable record fields. Default `en_US`. It is operator config only: callers never supply a `context`, so this is the one vetted knob for locale.
 - **Audit log.** One JSONL line per call to `~/.odoo-mcp/audit.jsonl`. Daily rotation, 30-day retention. No values, no domains, no record content. Server fails closed if the log becomes unwritable. Inspect with `odoo-mcp audit`.
 - **Caching.** L1 in-memory + L2 persistent SQLite (`~/.odoo-mcp/fields-cache.db`, 24h TTL) for `fields_get` only — never record values. Disable L2 with `fields_cache_path = ""`. Drop stale entries with `odoo-mcp cache --clear`.
 - **Debug logging.** Export `ODOO_MCP_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR` to stream to stderr. Credentials are scrubbed.

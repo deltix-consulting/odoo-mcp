@@ -42,6 +42,14 @@ DEFAULT_FIELDS_CACHE: Final[str] = "~/.odoo-mcp/fields-cache.db"
 # explicitly in TOML (globally or per-instance).
 _DEFAULT_ALLOWED_MODELS: Final[tuple[str, ...]] = ("*",)
 
+# The locale handed to Odoo via the call context. Operator config — never
+# caller input — but we still validate the shape so a typo in config.toml
+# fails loudly at load time instead of silently producing an untranslated
+# session. Odoo ``res.lang`` codes are ISO ``ll`` / ``ll_CC`` with an
+# optional ``@variant`` modifier (e.g. ``en_US``, ``nl_BE``, ``sr@latin``).
+_DEFAULT_LANGUAGE: Final[str] = "en_US"
+_LANGUAGE_RE: Final = re.compile(r"^[a-z]{2,3}(_[A-Z]{2})?(@[A-Za-z]+)?$")
+
 _VALID_DEFAULT_KEYS: Final[frozenset[str]] = frozenset(
     {
         "timeout_seconds",
@@ -51,6 +59,7 @@ _VALID_DEFAULT_KEYS: Final[frozenset[str]] = frozenset(
         "allowed_models",
         "fields_cache_path",
         "rotation_warning_days",
+        "language",
     }
 )
 
@@ -74,6 +83,7 @@ _VALID_INSTANCE_KEYS: Final[frozenset[str]] = frozenset(
         "smart_fields_overrides",
         "external_comms_enabled",
         "attachment_source_paths",
+        "language",
     }
 )
 
@@ -94,6 +104,10 @@ class Defaults:
     # effectively warns every run. Recorded set-time comes from the OS
     # credential store via :mod:`odoo_mcp._credstore`.
     rotation_warning_days: int = 90
+    # Locale code injected into every Odoo call context. Drives the language
+    # of translated field labels, selection-value labels, and translatable
+    # record fields. Per-instance ``language`` overrides this default.
+    language: str = _DEFAULT_LANGUAGE
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +166,10 @@ class InstanceConfig:
     #         "/home/api-server/.claude-api-server/attachments",
     #     ]
     attachment_source_paths: tuple[str, ...] = ()
+    # Odoo locale code (e.g. ``en_US``, ``nl_BE``) injected into the call
+    # context so translated labels and selection values come back in the
+    # consultant's language. Inherits ``[defaults].language`` when unset.
+    language: str = _DEFAULT_LANGUAGE
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +266,7 @@ def _parse_defaults(raw: dict[str, Any]) -> Defaults:
         rotation_warning_days=_require_int(
             raw, "rotation_warning_days", 90, minimum=0, maximum=3650
         ),
+        language=_require_language(raw, "language", _DEFAULT_LANGUAGE, "defaults"),
     )
 
 
@@ -354,6 +373,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
     smart_overrides = _parse_smart_fields_overrides(entry.get("smart_fields_overrides"), name)
     external_comms = bool(entry.get("external_comms_enabled", False))
     attachment_paths = _parse_attachment_source_paths(entry.get("attachment_source_paths"), name)
+    language = _require_language(entry, "language", defaults.language, f"instances.{name}")
 
     return InstanceConfig(
         name=name,
@@ -375,6 +395,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         smart_fields_overrides=smart_overrides,
         external_comms_enabled=external_comms,
         attachment_source_paths=attachment_paths,
+        language=language,
     )
 
 
@@ -535,6 +556,21 @@ def _parse_attachment_source_paths(raw: Any, instance_name: str) -> tuple[str, .
                 instance_name,
             )
     return tuple(resolved)
+
+
+def _require_language(raw: dict[str, Any], key: str, default: str, section: str) -> str:
+    """Return ``raw[key]`` as a validated Odoo locale code, or ``default``.
+
+    The value goes into the Odoo call context, so a malformed locale would
+    otherwise fail silently (Odoo just ignores an unknown ``lang``). We
+    validate the shape here so a typo is loud at config-load time.
+    """
+    value = raw.get(key, default)
+    if not isinstance(value, str) or not _LANGUAGE_RE.match(value):
+        raise ConfigError(
+            f"[{section}].{key} must be an Odoo locale code like 'en_US' or 'nl_BE' (got {value!r})"
+        )
+    return value
 
 
 def _require_int(

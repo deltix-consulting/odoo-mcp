@@ -23,6 +23,10 @@ credentials_env_prefix = "PSA"
 production = false
 allowed_models = ["*"]
 refuse_admin_on_production = true
+# Odoo locale for the call context — translated field/selection labels come
+# back in this language. Matches deltix's own profile; set "fr_FR" / "en_US"
+# per klant. Omit to inherit [defaults].language (en_US).
+language = "nl_BE"
 
 # Common patterns in professional-services Studio / OCA modules.
 custom_sensitive_field_patterns = [
