@@ -37,11 +37,12 @@ from .fields_cache import PersistentFieldsCache
 
 logger = logging.getLogger(__name__)
 
-# The one and only context we ever pass to Odoo. Deliberately minimal — no
-# active_test override, no tracking_disable, no mail.create_nolog, no company
-# override. If a caller needs any of these, they should file an issue and we
+# The context we pass to Odoo is deliberately minimal — no active_test
+# override, no tracking_disable, no mail.create_nolog, no company override.
+# Its single key, ``lang``, is built once per client from the instance's
+# operator-configured ``language`` (config.toml) — never from caller input.
+# If a caller needs any other context key, they should file an issue and we
 # can add a vetted opt-in, not a pass-through.
-_FROZEN_CONTEXT: Final[dict[str, Any]] = {"lang": "en_US"}
 
 # Default cap for the per-process L1 fields cache. A long-running MCP server
 # that touches many distinct models (an Odoo with hundreds of installed
@@ -164,6 +165,9 @@ class OdooClient:
                 f"or credential_loader."
             )
         self._instance = instance
+        # Built once: the fixed Odoo call context. The locale is operator
+        # config, resolved at construction — callers never influence it.
+        self._frozen_context: dict[str, Any] = {"lang": instance.language}
         self._credentials: Credentials | None = credentials
         self._credential_loader = credential_loader
         self._credential_lock = threading.Lock()
@@ -644,7 +648,7 @@ class OdooClient:
         expose ``execute_kw`` to callers.
         """
         merged_kwargs = dict(kwargs)
-        merged_kwargs["context"] = dict(_FROZEN_CONTEXT)
+        merged_kwargs["context"] = dict(self._frozen_context)
         creds = self._get_credentials()
         try:
             return self._object.execute_kw(
