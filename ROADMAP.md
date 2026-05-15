@@ -59,6 +59,86 @@ The honest position:
 
 **What is explicitly OUT of scope:** turning `odoo-mcp` into a JSON-RPC HTTP server (the other half of MCP transports). The MCP is stdio-only by design. JSON-2 here means how we talk to Odoo, not how MCP clients talk to us.
 
+### OAuth authentication to Odoo
+
+**Status:** requested, blocked, tracked. Not buildable today for the
+common deployment (Odoo Online). A real path exists for self-hosted /
+Odoo.sh but is gated on prerequisites outside our control.
+
+**The request.** Authenticate the MCP to Odoo via an OAuth flow —
+browser-based SSO login, works with 2FA, no API key to create, no
+password typed into the wizard.
+
+**Why it does not work today.** Three candidate mechanisms, all checked:
+
+1. **OAuth against XML-RPC.** The XML-RPC call signature
+   (`execute_kw(db, uid, password, ...)`) has a password slot. An
+   OAuth access token is not a password and XML-RPC has no bearer
+   header. Structurally impossible — not a missing feature, a wrong
+   layer.
+
+2. **Odoo's `auth_oauth` module.** Makes Odoo an OAuth *client* — end
+   users log into the Odoo *web UI* via Google / Microsoft. It yields
+   an Odoo *web session cookie*, not an API token. Riding that cookie
+   against `/web/dataset/call_kw` is technically possible but is
+   session-scraping: cookies expire quickly, the web-client endpoint
+   is not a stable contract, CSRF handling intrudes. **We will not
+   ship a session-cookie scraper** — it is a maintenance liability and
+   bypasses the clean external-API surface the whole security pipeline
+   is built on.
+
+3. **Odoo as an OAuth2 *provider* + the JSON-2 external API.** The
+   only clean path. Requires (a) an OAuth2-provider module installed
+   on the Odoo, and (b) the JSON-2 API accepting bearer tokens. Both
+   are unavailable on **Odoo Online** (no custom modules; JSON-2 auth
+   model unverified). Available in principle on self-hosted / Odoo.sh.
+
+**What this means by deployment:**
+
+- **Odoo Online** (incl. deltix's own Odoo): OAuth is not available,
+  period. The wizard-generates-the-key flow (`odoo-mcp setup` option
+  2) plus `odoo-mcp renew-key` is the lowest-friction path the
+  platform permits.
+- **Self-hosted / Odoo.sh**: an optional OAuth backend is buildable —
+  see the architecture below — once the customer's Odoo exposes a
+  token endpoint the API layer accepts.
+
+**Architecture if/when buildable** (so the path is clear, not so it
+ships speculatively):
+
+- `OdooClient` becomes an interface (same refactor JSON-2 needs).
+  A new `_OAuthJson2Client` implementation sits beside `_XmlRpcClient`.
+- New `transport = "oauth-json2"` per-instance config value.
+- New `odoo-mcp login INSTANCE` command: starts a loopback HTTP
+  server on `127.0.0.1:<random port>`, opens the browser to the
+  Odoo / IdP authorization URL, receives the authorization code on
+  the loopback callback, exchanges it for an access + refresh token.
+- Tokens stored in the OS credential store exactly like API keys are
+  today. Refresh token used to mint new access tokens; the same
+  credential-redaction and never-log rules apply.
+- The dispatcher, denylist, domain sandbox, redaction, prod-guard,
+  audit log — everything above the client — stays byte-for-byte
+  unchanged. OAuth changes *how we authenticate to Odoo*, nothing
+  about *what the MCP is allowed to do*.
+
+**What would unblock building it:**
+
+1. A customer (or deltix) running self-hosted Odoo or Odoo.sh — not
+   Odoo Online — willing to be the test deployment.
+2. A confirmed OAuth2-provider module on that Odoo whose tokens the
+   JSON-2 API accepts. The module choice and its maintenance status
+   need verification first; this is not a settled part of the Odoo
+   ecosystem.
+3. About a week of implementation + a real integration test against
+   that deployment. We do not ship auth code that cannot be tested
+   end to end.
+
+**Proposed step:** revisit together with the JSON-2 transport work.
+OAuth-to-Odoo and JSON-2 share the same `OdooClient`-becomes-an-
+interface refactor; doing them as one project is the efficient path.
+Until a testable self-hosted deployment exists, this stays a tracked
+request, not in-progress work.
+
 ### Supported Odoo version matrix
 
 **Status:** decided for now, revisit per Odoo release.

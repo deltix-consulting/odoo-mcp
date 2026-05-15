@@ -10,6 +10,17 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **ROADMAP.md gains a full "OAuth authentication to Odoo" section.**
+  Documents why OAuth-to-Odoo is not available today (XML-RPC has no
+  bearer slot; `auth_oauth` yields a web-session not an API token;
+  Odoo-as-OAuth2-provider + JSON-2 needs custom modules unavailable on
+  Odoo Online), what a real optional OAuth backend would look like
+  architecturally, and the three concrete prerequisites that would
+  unblock building it. No code change — a tracked request, not
+  in-progress work.
+
 ## [0.16.4] - 2026-05-12
 
 Lower the first-time setup friction without weakening the credential
