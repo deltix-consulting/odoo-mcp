@@ -393,6 +393,123 @@ def _ask_bool(prompt: str, default: bool = True) -> bool:
         print("  Please enter y or n.")
 
 
+class _KeyGenError(Exception):
+    """Raised by :func:`_generate_api_key_via_password` with a user-readable message."""
+
+
+def _generate_api_key_via_password(
+    url: str,
+    database: str,
+    username: str,
+    password: str,
+    key_name: str,
+) -> str:
+    """Authenticate with a password and generate a fresh Odoo API key.
+
+    The single shared implementation behind both ``odoo-mcp renew-key``
+    and the setup wizard's "generate the key for me" path. The password
+    is used for exactly two XML-RPC calls (authenticate + _generate) and
+    is never returned, logged, or stored — the caller is responsible for
+    dropping its own reference afterwards.
+
+    Returns the new API key string. Raises :class:`_KeyGenError` with a
+    readable message on any failure (wrong password, 2FA, network, Odoo
+    refusing the generate call, unexpected response shape).
+    """
+    import ssl
+    import xmlrpc.client
+
+    base = url.rstrip("/")
+    ctx = ssl.create_default_context()
+    common = xmlrpc.client.ServerProxy(f"{base}/xmlrpc/2/common", context=ctx, allow_none=True)
+    try:
+        uid = common.authenticate(database, username, password, {})
+    except xmlrpc.client.Fault as exc:
+        raise _KeyGenError(
+            f"Odoo rejected the password: {exc.faultString}\n"
+            f"  Common causes: wrong password, or 2FA enabled (password auth "
+            f"is then blocked — create the key manually in your Odoo profile)."
+        ) from exc
+    except (OSError, ssl.SSLError, TimeoutError) as exc:
+        raise _KeyGenError(f"Could not reach Odoo: {type(exc).__name__}: {exc}") from exc
+
+    if not isinstance(uid, int) or not uid:
+        raise _KeyGenError("Authentication returned no uid. Check the username and database name.")
+
+    models = xmlrpc.client.ServerProxy(f"{base}/xmlrpc/2/object", context=ctx, allow_none=True)
+    try:
+        new_key = models.execute_kw(
+            database,
+            uid,
+            password,
+            "res.users.apikeys",
+            "_generate",
+            ["rpc", key_name],
+            {},
+        )
+    except xmlrpc.client.Fault as exc:
+        raise _KeyGenError(
+            f"Odoo refused to generate a new key: {exc.faultString}\n"
+            f"  If the error mentions 'duration' or 'expiration', your Odoo "
+            f"may require a specific argument — generate the key manually."
+        ) from exc
+    except (OSError, ssl.SSLError, TimeoutError) as exc:
+        raise _KeyGenError(f"Could not generate key: {type(exc).__name__}: {exc}") from exc
+
+    if not isinstance(new_key, str) or not new_key:
+        raise _KeyGenError(f"Unexpected response from Odoo: {new_key!r}")
+    return new_key
+
+
+def _ask_api_key(url: str, database: str, username: str, instance_name: str) -> str:
+    """Collect an API key — either pasted, or generated from a password.
+
+    Offers two paths. Path 1 keeps the historical behaviour (paste a key
+    you created in the Odoo UI). Path 2 is the low-friction default:
+    type your Odoo password once, the wizard generates the key via
+    :func:`_generate_api_key_via_password` and discards the password.
+    Path 2 falls through to a clear message for 2FA users (who must use
+    path 1, since 2FA blocks password auth).
+    """
+    print()
+    print("How do you want to authenticate this instance?")
+    print("  1) Paste an API key you create yourself in Odoo's profile UI.")
+    print("  2) Type your Odoo password once — the wizard generates the key")
+    print("     for you and discards the password. (Recommended; not for")
+    print("     accounts with 2FA enabled.)")
+    choice = _ask("Choice", default="2")
+
+    if choice.strip() == "1":
+        api_key = getpass.getpass("API key (will not echo): ").strip()
+        if not api_key:
+            print("API key cannot be empty.")
+            sys.exit(1)
+        return api_key
+
+    # Path 2 — generate via password.
+    password = getpass.getpass("Odoo password (will not echo, not stored): ")
+    try:
+        if not password:
+            print("Password cannot be empty.")
+            sys.exit(1)
+        try:
+            key = _generate_api_key_via_password(
+                url, database, username, password, f"odoo-mcp ({instance_name})"
+            )
+        except _KeyGenError as exc:
+            print(f"  {exc}")
+            print("  Falling back to manual entry.")
+            api_key = getpass.getpass("API key (will not echo): ").strip()
+            if not api_key:
+                print("API key cannot be empty.")
+                sys.exit(1)
+            return api_key
+    finally:
+        password = ""  # noqa: F841 — deliberate disposal
+    print("  ✓ API key generated and will be stored in the OS credential store.")
+    return key
+
+
 def _ask_instance() -> dict[str, str | bool]:
     """Interactively collect instance details. Returns a dict."""
     name = _ask("Instance name", default="main", validator="name")
@@ -400,17 +517,14 @@ def _ask_instance() -> dict[str, str | bool]:
     database = _ask("Database name")
     production = _ask_bool("Is this a production instance?", default=True)
     username = _ask("Username (email)")
-    api_key = getpass.getpass("API key (will not echo): ")
-    if not api_key.strip():
-        print("API key cannot be empty.")
-        sys.exit(1)
+    api_key = _ask_api_key(url, database, username, name)
     return {
         "name": name,
         "url": url,
         "database": database,
         "production": production,
         "username": username,
-        "api_key": api_key.strip(),
+        "api_key": api_key,
     }
 
 
@@ -1051,9 +1165,6 @@ def _cmd_renew_key(name: str) -> int:
 
     Returns 0 on success, 1 on any failure (with a readable message).
     """
-    import ssl  # local import: keeps import-time costs lean
-    import xmlrpc.client
-
     if not DEFAULT_CONFIG_PATH.exists():
         print(f"No config found at {DEFAULT_CONFIG_PATH}")
         return 1
@@ -1088,67 +1199,18 @@ def _cmd_renew_key(name: str) -> int:
         if not password:
             print("Password cannot be empty. Aborted.")
             return 1
-
-        # Authenticate. Odoo's XML-RPC ``common.authenticate`` accepts
-        # passwords for users without 2FA, and API keys otherwise. We
-        # need the password path here because we're generating a new key.
-        ctx = ssl.create_default_context()
-        common = xmlrpc.client.ServerProxy(
-            f"{url.rstrip('/')}/xmlrpc/2/common",
-            context=ctx,
-            allow_none=True,
-        )
         try:
-            uid = common.authenticate(database, username, password, {})
-        except xmlrpc.client.Fault as exc:
-            print(f"  Odoo rejected the password: {exc.faultString}")
-            print("  Common causes: wrong password, 2FA enabled (then password")
-            print("  auth is blocked — generate the key manually in Odoo profile).")
-            return 1
-        except (OSError, ssl.SSLError, TimeoutError) as exc:
-            print(f"  Could not reach Odoo: {type(exc).__name__}: {exc}")
-            return 1
-
-        if not isinstance(uid, int) or not uid:
-            print("  Authentication returned no uid. Check username + database.")
-            return 1
-
-        # Generate the key as the authenticated user. We call
-        # ``res.users.apikeys._generate`` directly — same code path the
-        # Odoo UI uses behind the "New API Key" button.
-        models = xmlrpc.client.ServerProxy(
-            f"{url.rstrip('/')}/xmlrpc/2/object",
-            context=ctx,
-            allow_none=True,
-        )
-        try:
-            new_key = models.execute_kw(
-                database,
-                uid,
-                password,
-                "res.users.apikeys",
-                "_generate",
-                ["rpc", f"odoo-mcp ({name})"],
-                {},
+            new_key = _generate_api_key_via_password(
+                url, database, username, password, f"odoo-mcp ({name})"
             )
-        except xmlrpc.client.Fault as exc:
-            print(f"  Odoo refused to generate a new key: {exc.faultString}")
-            print("  If the error mentions 'duration' or 'expiration', your Odoo")
-            print("  may require a specific duration argument. Re-run with the")
-            print("  flag noted in the error message, or generate manually.")
-            return 1
-        except (OSError, ssl.SSLError, TimeoutError) as exc:
-            print(f"  Could not generate key: {type(exc).__name__}: {exc}")
+        except _KeyGenError as exc:
+            print(f"  {exc}")
             return 1
     finally:
         # Structural disposal: drop the password reference immediately.
         # Python's GC will collect it on the next cycle; we can't force
         # it but we can keep the window small.
         password = ""  # noqa: F841 — deliberate overwrite
-
-    if not isinstance(new_key, str) or not new_key:
-        print(f"  Unexpected response from Odoo: {new_key!r}")
-        return 1
 
     _keychain_set(name, api_key_service, new_key)
     print()

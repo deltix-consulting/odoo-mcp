@@ -58,11 +58,27 @@ Start narrow. You can always grant more later by editing the user in Odoo.
 
 ---
 
-## 3. Create an Odoo API key
+## 3. Get an Odoo API key
 
-API keys are how non-interactive integrations authenticate to Odoo. They are individual, revocable, and never expire on their own (you should rotate them — see the bottom of this doc).
+API keys are how non-interactive integrations authenticate to Odoo. They are individual and revocable.
 
-### Step-by-step in Odoo 16 / 17 / 18
+**You have two ways to get one.** The setup wizard (`odoo-mcp setup`) asks which you prefer:
+
+> **Option 2 — let the wizard generate it (recommended).** When the wizard
+> asks how to authenticate, pick option 2. You type your normal Odoo
+> password once; the wizard authenticates, generates the API key for you,
+> stores it in the OS credential store, and discards the password
+> immediately. You never touch the Odoo UI. **This does not work if your
+> account has 2FA enabled** — 2FA blocks password authentication over the
+> API, so 2FA users must use option 1 below.
+
+> **Option 1 — create it yourself in Odoo (manual).** Follow the
+> step-by-step below, then paste the key when the wizard asks. Required
+> for 2FA accounts; also fine if you simply prefer to create it yourself.
+
+The rest of this section covers Option 1. If you're using Option 2 you can skip ahead to [section 4](#4-install-odoo-mcp).
+
+### Step-by-step in Odoo 16 / 17 / 18 (Option 1, manual)
 
 1. **Log in to Odoo** as the user you want the MCP to act as.
 2. **Top-right corner**, click your profile photo or initials.

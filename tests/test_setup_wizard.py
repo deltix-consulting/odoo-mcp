@@ -838,3 +838,85 @@ def test_toml_value_escapes_carriage_return() -> None:
     # TOML string and reads back to the original value.
     parsed = tomllib.loads(f"v = {serialized}\n")
     assert parsed["v"] == raw
+
+
+# ---------------------------------------------------------------------------
+# _ask_api_key — choice between paste and generate-via-password
+# ---------------------------------------------------------------------------
+
+
+def test_ask_api_key_paste_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Choice 1 returns the pasted key, never touches XML-RPC."""
+    monkeypatch.setattr(setup_wizard, "_ask", lambda *_a, **_kw: "1")
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "pasted-key-value")
+    key = setup_wizard._ask_api_key("https://x.odoo.com", "db", "u@x.com", "prod")
+    assert key == "pasted-key-value"
+
+
+def test_ask_api_key_generate_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Choice 2 generates the key via password and returns it."""
+    monkeypatch.setattr(setup_wizard, "_ask", lambda *_a, **_kw: "2")
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "the-password")
+    monkeypatch.setattr(
+        setup_wizard,
+        "_generate_api_key_via_password",
+        lambda url, db, user, pw, name: "generated-key",
+    )
+    key = setup_wizard._ask_api_key("https://x.odoo.com", "db", "u@x.com", "prod")
+    assert key == "generated-key"
+
+
+def test_ask_api_key_generate_falls_back_to_manual(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """If generation fails (e.g. 2FA), the wizard falls back to manual paste."""
+    monkeypatch.setattr(setup_wizard, "_ask", lambda *_a, **_kw: "2")
+    # First getpass = password for generation, second = manual key fallback.
+    answers = iter(["the-password", "manual-fallback-key"])
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: next(answers))
+
+    def _boom(*_a: object, **_kw: object) -> str:
+        raise setup_wizard._KeyGenError("2FA enabled — password auth blocked")
+
+    monkeypatch.setattr(setup_wizard, "_generate_api_key_via_password", _boom)
+    key = setup_wizard._ask_api_key("https://x.odoo.com", "db", "u@x.com", "prod")
+    assert key == "manual-fallback-key"
+    out = capsys.readouterr().out
+    assert "Falling back to manual entry" in out
+
+
+def test_generate_api_key_via_password_happy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import xmlrpc.client
+    from unittest.mock import MagicMock
+
+    common = MagicMock()
+    common.authenticate.return_value = 5
+    obj = MagicMock()
+    obj.execute_kw.return_value = "fresh-generated-key"
+
+    def fake_proxy(url: str, **_kw: object) -> MagicMock:
+        return common if "/common" in url else obj
+
+    monkeypatch.setattr(xmlrpc.client, "ServerProxy", fake_proxy)
+    key = setup_wizard._generate_api_key_via_password(
+        "https://x.odoo.com", "db", "u@x.com", "pw", "odoo-mcp (prod)"
+    )
+    assert key == "fresh-generated-key"
+
+
+def test_generate_api_key_via_password_wrong_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import xmlrpc.client
+    from unittest.mock import MagicMock
+
+    common = MagicMock()
+    common.authenticate.side_effect = xmlrpc.client.Fault(1, "Access denied")
+    monkeypatch.setattr(xmlrpc.client, "ServerProxy", lambda url, **_kw: common)
+    with pytest.raises(setup_wizard._KeyGenError, match="rejected the password"):
+        setup_wizard._generate_api_key_via_password(
+            "https://x.odoo.com", "db", "u@x.com", "wrong", "odoo-mcp (prod)"
+        )

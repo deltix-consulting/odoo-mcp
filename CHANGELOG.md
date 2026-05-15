@@ -10,6 +10,56 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-05-12
+
+Lower the first-time setup friction without weakening the credential
+model. No new write surface, no new env var, no guardrail change.
+
+### Added
+
+- **Setup wizard can generate the API key for you.** `odoo-mcp setup`
+  (and `--add`) now asks how to authenticate:
+
+    1. Paste an API key you created yourself in the Odoo UI (the
+       previous behaviour, still required for 2FA accounts).
+    2. Type your Odoo password once — the wizard authenticates,
+       generates the key via `res.users.apikeys._generate`, stores it
+       in the OS credential store, and discards the password. **No
+       Odoo UI navigation.**
+
+  Option 2 is the recommended path for accounts without 2FA. If
+  generation fails for any reason (wrong password, 2FA enabled,
+  network), the wizard falls back to manual paste rather than aborting.
+
+  The password is used for exactly two XML-RPC calls (authenticate +
+  generate) and never stored. This is the same one-shot pattern as
+  `odoo-mcp renew-key` — the key-generation logic is now a single
+  shared helper (`_generate_api_key_via_password`) used by both.
+
+### Changed
+
+- `odoo-mcp renew-key` internals refactored onto the shared
+  `_generate_api_key_via_password` helper. Behaviour unchanged; the
+  duplicated authenticate-then-generate block is gone.
+
+- `GETTING_STARTED.md` section 3 rewritten: the manual "create a key
+  in the Odoo UI" walkthrough is now Option 1, with the new
+  wizard-generates-it path as Option 2 (recommended). 2FA users are
+  told up front they need Option 1.
+
+### Not done — and why
+
+- **No OAuth against Odoo.** Odoo's external API (XML-RPC) does not
+  accept OAuth tokens; `auth_oauth` is web-login SSO only. There is no
+  authorization-code flow on the API layer. The wizard's
+  password-once-then-generate flow is the closest achievable
+  low-friction UX. Revisited only if a future Odoo JSON-2 API adds
+  bearer-token support — see [ROADMAP.md](ROADMAP.md).
+- **No persistent password storage.** The password is never written
+  to the credential store; only the generated API key is. Storing the
+  password would be a strictly worse credential than the 1-day key it
+  would replace.
+
 ## [0.16.3] - 2026-05-12
 
 Repo maturity pass driven by an external review. Targeted security,
