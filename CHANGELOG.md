@@ -10,6 +10,24 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-instance `language` config key.** The locale handed to Odoo in the
+  call context is now operator-configurable instead of hardcoded to
+  `en_US`. Set `[defaults].language` to change it globally, or
+  `[instances.NAME].language` to override per instance — e.g.
+  `language = "nl_BE"` so a Dutch-speaking consultant gets translated
+  field labels, selection-value labels, and translatable record fields
+  back in their own language. Accepts Odoo `res.lang` codes
+  (`ll` / `ll_CC` with an optional `@variant`); a malformed value fails
+  loudly at config-load time. Default stays `en_US`, so existing
+  installs are unchanged.
+
+  The locale remains **operator config, never caller input** — the Odoo
+  call context is still built once per client and never accepts a
+  pass-through `context` from the LLM. This is the "vetted opt-in, not a
+  pass-through" the `client.py` context comment always pointed at.
+
 ## [0.16.3] - 2026-05-12
 
 Repo maturity pass driven by an external review. Targeted security,

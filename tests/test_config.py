@@ -235,3 +235,68 @@ production = false
     cfg_file = _write_cfg(tmp_path / "config.toml", body)
     with pytest.raises(ConfigError, match="ODOO_MCP_SHARED"):
         load_config(cfg_file)
+
+
+def test_language_defaults_to_en_us(tmp_path: Path) -> None:
+    """No language configured anywhere -> en_US, preserving prior behavior."""
+    cfg_file = _write_cfg(tmp_path / "config.toml", _VALID_CONFIG)
+    cfg = load_config(cfg_file)
+    assert cfg.defaults.language == "en_US"
+    assert cfg.instances["dev"].language == "en_US"
+    assert cfg.instances["prod"].language == "en_US"
+
+
+def test_language_default_propagates_to_instances(tmp_path: Path) -> None:
+    """A [defaults].language flows to instances that don't override it."""
+    body = """
+[defaults]
+language = "nl_BE"
+
+[instances.dev]
+url = "https://dev.example.odoo.com"
+database = "dev_db"
+credentials_env_prefix = "ODOO_MCP_DEV"
+production = false
+"""
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    cfg = load_config(cfg_file)
+    assert cfg.defaults.language == "nl_BE"
+    assert cfg.instances["dev"].language == "nl_BE"
+
+
+def test_per_instance_language_overrides_default(tmp_path: Path) -> None:
+    body = """
+[defaults]
+language = "nl_BE"
+
+[instances.dev]
+url = "https://dev.example.odoo.com"
+database = "dev_db"
+credentials_env_prefix = "ODOO_MCP_DEV"
+production = false
+
+[instances.fr]
+url = "https://fr.example.odoo.com"
+database = "fr_db"
+credentials_env_prefix = "ODOO_MCP_FR"
+production = false
+language = "fr_FR"
+"""
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    cfg = load_config(cfg_file)
+    assert cfg.instances["dev"].language == "nl_BE"
+    assert cfg.instances["fr"].language == "fr_FR"
+
+
+def test_invalid_language_rejected(tmp_path: Path) -> None:
+    body = """
+[instances.dev]
+url = "https://dev.example.odoo.com"
+database = "dev_db"
+credentials_env_prefix = "ODOO_MCP_DEV"
+production = false
+language = "not a locale"
+"""
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    with pytest.raises(ConfigError, match="locale code"):
+        load_config(cfg_file)
