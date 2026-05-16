@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import http.client
 import logging
+import re
 import socket
 import ssl
 import threading
@@ -140,6 +141,50 @@ def _build_ssl_context(allow_self_signed: bool) -> ssl.SSLContext:
     return ctx
 
 
+# Matches a Python traceback stack-frame line, e.g.
+#   File "/usr/lib/python3/.../models.py", line 1234, in check_field_access
+_TRACEBACK_FRAME_RE: Final[re.Pattern[str]] = re.compile(r'^\s+File ".*", line \d+')
+
+
+def _summarize_odoo_fault(fault_string: str) -> str:
+    """Reduce an Odoo XML-RPC fault to its actionable exception summary.
+
+    Odoo returns the *entire* server-side Python traceback in
+    :attr:`xmlrpc.client.Fault.faultString` — routinely 20-40 lines of
+    internal Odoo file paths. For an MCP client that is pure noise: it
+    buries the one actionable line, costs tokens on every failed call,
+    and needlessly discloses the Odoo server's filesystem layout.
+
+    If ``fault_string`` is a Python traceback, return only the trailing
+    exception summary — everything after the last stack frame, which
+    keeps a multi-line exception message intact. If it is not a
+    traceback (some Odoo faults are already a single line) it is
+    returned stripped and otherwise unchanged. The transform is
+    best-effort: any input that does not match the expected traceback
+    shape falls through to the stripped original, so a fault is never
+    lost.
+    """
+    text = fault_string.strip()
+    if "Traceback (most recent call last):" not in text:
+        return text
+    lines = text.splitlines()
+    last_frame = -1
+    for i, line in enumerate(lines):
+        if _TRACEBACK_FRAME_RE.match(line):
+            last_frame = i
+    if last_frame < 0:
+        return text
+    # Everything after the last stack frame is the exception summary.
+    # Skip the indented source-code echo Python prints under the frame;
+    # stop at the first non-indented line (the exception type + message).
+    tail = lines[last_frame + 1 :]
+    start = 0
+    while start < len(tail) and (not tail[start].strip() or tail[start].startswith((" ", "\t"))):
+        start += 1
+    summary = "\n".join(tail[start:]).strip()
+    return summary or text
+
+
 class OdooClient:
     """Thin wrapper around ``xmlrpc.client`` for one Odoo instance.
 
@@ -247,7 +292,7 @@ class OdooClient:
         except xmlrpc.client.Fault as exc:
             raise OdooAuthError(
                 f"Odoo rejected authentication for instance {self._instance.name!r}: "
-                f"{exc.faultString}"
+                f"{_summarize_odoo_fault(exc.faultString)}"
             ) from exc
         except (OSError, ssl.SSLError, TimeoutError) as exc:
             raise OdooTransportError(
@@ -657,7 +702,9 @@ class OdooClient:
                 merged_kwargs,
             )
         except xmlrpc.client.Fault as exc:
-            raise OdooRemoteError(f"Odoo fault on {model}.{method}: {exc.faultString}") from exc
+            raise OdooRemoteError(
+                f"Odoo fault on {model}.{method}: {_summarize_odoo_fault(exc.faultString)}"
+            ) from exc
         except TimeoutError as exc:
             raise OdooTransportError(
                 f"Timeout calling {model}.{method} on {self._instance.name!r} "

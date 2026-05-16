@@ -21,6 +21,30 @@ breaking change explicitly in this file.
   unblock building it. No code change — a tracked request, not
   in-progress work.
 
+## [0.16.5] - 2026-05-16
+
+Odoo XML-RPC faults were forwarded to the MCP client with the full
+server-side Python traceback attached. Trim them to the actionable
+exception line. No new tool, no schema change, no guardrail change.
+
+### Changed
+
+- **Odoo fault messages are reduced to their exception summary.** When
+  an Odoo call fails, `xmlrpc.client` hands back the *entire*
+  server-side Python traceback in `Fault.faultString` — routinely
+  20-40 lines of internal Odoo file paths. The MCP forwarded that
+  verbatim inside `OdooRemoteError` (every read/write tool) and
+  `OdooAuthError` (authentication). It now strips the traceback frames
+  and returns only the trailing exception line(s).
+
+  Three wins: the one actionable line is no longer buried, every failed
+  tool call costs far fewer tokens, and the Odoo server's filesystem
+  layout is no longer disclosed to the model. The transform
+  (`_summarize_odoo_fault`) is best-effort — a fault that is not a
+  recognizable Python traceback (some Odoo faults are already a single
+  line) is passed through unchanged, so no error detail is ever lost.
+  The existing credential-redaction pass still runs on top.
+
 ## [0.16.4] - 2026-05-12
 
 Lower the first-time setup friction without weakening the credential
