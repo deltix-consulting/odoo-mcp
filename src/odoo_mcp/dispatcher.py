@@ -570,6 +570,10 @@ class Dispatcher:
             result["has_more"] = False
         if smart:
             result["smart_fields_used"] = fields
+            # Total fields on the model. Lets the caller tell a curated
+            # subset apart from the full schema — without it, a 25-field
+            # smart default looks identical to "all the model has".
+            result["fields_available"] = len(fields_meta)
         return result
 
     def _search_count(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -695,6 +699,10 @@ class Dispatcher:
         }
         if smart:
             result["smart_fields_used"] = fields
+            # Total fields on the model. Lets the caller tell a curated
+            # subset apart from the full schema — without it, a 25-field
+            # smart default looks identical to "all the model has".
+            result["fields_available"] = len(fields_meta)
         return result
 
     def _create(self, args: dict[str, Any]) -> dict[str, Any]:
