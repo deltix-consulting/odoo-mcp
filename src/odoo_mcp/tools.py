@@ -99,6 +99,9 @@ _TOOL_SEARCH_READ = Tool(
         "Run Odoo search_read against an allowlisted model. Pass an explicit "
         "`fields` list, OR omit it to get a curated default (id + name + a few "
         "business-relevant scalars, audit/binary/HTML/relation fields skipped). "
+        "When the curated default is used the response reports `fields_available` "
+        "(total fields on the model) next to `smart_fields_used`, so you can tell "
+        "the subset apart from the model's full schema. "
         "Domain filters are sandboxed: dotted field traversal (e.g. "
         "'create_uid.login') is rejected. Results have default-hidden fields "
         "stripped unless you pass `allow_sensitive_fields`. Binary fields are "
@@ -255,6 +258,9 @@ _TOOL_READ = Tool(
         "Fetch specific records by ID from an allowlisted model. Same field-level "
         "policies as odoo_search_read: pass `fields` explicitly OR omit for the "
         "smart default; sensitive fields gated; binary fields stripped by default. "
+        "The smart-default response reports `fields_available` (total fields on "
+        "the model) next to `smart_fields_used` so you can tell the curated "
+        "subset from the model's full schema. "
         'Example: ids=[42, 47], fields=["name","email"] fetches two partners.'
     ),
     inputSchema={
