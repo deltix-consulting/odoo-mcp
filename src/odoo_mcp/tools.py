@@ -289,6 +289,47 @@ _TOOL_READ = Tool(
     },
 )
 
+_TOOL_DEFAULT_GET = Tool(
+    name="odoo_default_get",
+    description=(
+        "Preview the values Odoo would auto-fill on a NEW record of an "
+        "allowlisted model. Calls Odoo's default_get for the named fields and "
+        "returns only those that actually have a default (company, currency, "
+        "journal, fiscal position, sequence- and context-derived values, ...). "
+        "Read-only — computes defaults, never writes. Pair it with an "
+        "odoo_create dry-run: the dry-run shows the fields YOU set, "
+        "odoo_default_get shows the fields ODOO sets, so there are no "
+        "surprises on commit. Same field policy as odoo_read: pass an explicit "
+        "`fields` list (no wildcard); sensitive fields need allow_sensitive_fields. "
+        'Example: model="sale.order", fields=["company_id","currency_id",'
+        '"pricelist_id","payment_term_id"] returns the defaults Odoo would apply.'
+    ),
+    inputSchema={
+        "type": "object",
+        "required": ["instance", "model", "fields"],
+        "additionalProperties": False,
+        "properties": {
+            "instance": {"type": "string"},
+            "model": {"type": "string"},
+            "fields": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": (
+                    "Explicit list of field names to ask Odoo for defaults on. "
+                    "Use odoo_describe_model to discover field names."
+                ),
+            },
+            "allow_sensitive_fields": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Per-call opt-in to default-hidden sensitive fields.",
+                "default": [],
+            },
+        },
+    },
+)
+
 _TOOL_CREATE = Tool(
     name="odoo_create",
     description=(
@@ -551,6 +592,7 @@ def build_tools() -> list[Tool]:
         _TOOL_SEARCH_COUNT,
         _TOOL_READ_GROUP,
         _TOOL_READ,
+        _TOOL_DEFAULT_GET,
         _TOOL_CREATE,
         _TOOL_WRITE,
         _TOOL_ARCHIVE_OR_DELETE,

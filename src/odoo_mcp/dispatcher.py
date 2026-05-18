@@ -697,6 +697,58 @@ class Dispatcher:
             result["smart_fields_used"] = fields
         return result
 
+    def _default_get(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Preview the defaults Odoo would auto-fill on a new record.
+
+        Read-only companion to odoo_create: ``default_get`` computes the
+        values Odoo applies on its own (company, currency, journal,
+        sequence- and context-derived defaults) without writing anything.
+        The requested ``fields`` go through the same field-policy
+        validation as a read, and the returned defaults run back through
+        the redaction pipeline as defense in depth — a default sitting on
+        a sensitive field is dropped exactly as it would be on a read.
+        """
+        ctx = self._begin("odoo_default_get", args, Operation.DEFAULT_GET)
+        assert ctx.model is not None
+        rt, model = ctx.rt, ctx.model
+        allow_sensitive = frozenset(args.get("allow_sensitive_fields") or [])
+
+        fields_meta = rt.client.fields_get(model)
+        known = frozenset(fields_meta.keys())
+        overrides = rt.config.sensitive_fields
+        fields = validate_requested_fields(
+            model,
+            _require_list_of_str(args, "fields"),
+            known,
+            allow_sensitive=allow_sensitive,
+            instance_overrides=overrides,
+            extra_redacted=rt.extra_redacted,
+        )
+        raw = rt.client.default_get(model, fields)
+        redacted = redact_response(
+            model,
+            [raw],
+            {n: m.get("type", "") for n, m in fields_meta.items()},
+            allow_sensitive=allow_sensitive,
+            include_binary=False,
+            instance_overrides=overrides,
+            extra_redacted=rt.extra_redacted,
+        )[0]
+        # Requested fields Odoo returned no default for — useful signal:
+        # the caller knows odoo_create won't auto-fill these.
+        without_default = sorted(f for f in fields if f not in raw)
+        self._audit_ok(
+            ctx,
+            {"field_count": len(fields), "default_count": len(redacted)},
+            args,
+        )
+        return {
+            "instance": ctx.instance,
+            "model": model,
+            "defaults": redacted,
+            "fields_without_default": without_default,
+        }
+
     def _create(self, args: dict[str, Any]) -> dict[str, Any]:
         _refuse_if_read_only_session()
         ctx = self._begin("odoo_create", args, Operation.CREATE)
@@ -1169,6 +1221,7 @@ _HANDLERS: dict[str, Callable[[Dispatcher, dict[str, Any]], dict[str, Any]]] = {
     "odoo_search_count": Dispatcher._search_count,
     "odoo_read_group": Dispatcher._read_group,
     "odoo_read": Dispatcher._read,
+    "odoo_default_get": Dispatcher._default_get,
     "odoo_create": Dispatcher._create,
     "odoo_write": Dispatcher._write,
     "odoo_archive_or_delete": Dispatcher._archive_or_delete,
@@ -1313,6 +1366,10 @@ _HELP_TOOLS_TERSE: list[dict[str, str]] = [
         "purpose": "Aggregations / dashboards. Pass include_domain=true for drill-down domains.",
     },
     {"name": "odoo_read", "purpose": "Read records by id with explicit fields."},
+    {
+        "name": "odoo_default_get",
+        "purpose": "Preview Odoo's auto-fill defaults for a new record.",
+    },
     {"name": "odoo_create", "purpose": "Create record. Prod: dry_run -> token -> commit."},
     {"name": "odoo_write", "purpose": "Update records. Prod: dry_run -> token -> commit."},
     {
@@ -1378,6 +1435,15 @@ _HELP_COMMON_PATTERNS: list[dict[str, Any]] = [
             "domain": [["is_company", "=", True]],
             "fields": ["id", "name", "email"],
             "limit": 20,
+        },
+    },
+    {
+        "goal": "See what Odoo will auto-fill before creating a record",
+        "use": "odoo_default_get",
+        "example": {
+            "instance": "prod",
+            "model": "sale.order",
+            "fields": ["company_id", "currency_id", "pricelist_id", "payment_term_id"],
         },
     },
     {

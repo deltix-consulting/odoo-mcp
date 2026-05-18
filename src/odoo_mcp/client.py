@@ -541,6 +541,22 @@ class OdooClient:
             )
         return result
 
+    def default_get(self, model: str, fields: list[str]) -> dict[str, Any]:
+        """Return the default values Odoo would apply to a new ``model`` record.
+
+        Calls Odoo's ``default_get(fields_list)``. The response only contains
+        entries for fields that actually have a default — fields with no
+        default are omitted. Read-only: ``default_get`` computes values from
+        context / ``ir.default`` / Python defaults but never writes anything.
+        Exposed via ``odoo_default_get``.
+        """
+        result = self._execute(model, "default_get", [fields], {})
+        if not isinstance(result, dict):
+            raise OdooRemoteError(
+                f"default_get({model!r}) returned unexpected type {type(result).__name__}"
+            )
+        return result
+
     def create(self, model: str, values: dict[str, Any]) -> int:
         result = self._execute(model, "create", [values], {})
         if not isinstance(result, int):
