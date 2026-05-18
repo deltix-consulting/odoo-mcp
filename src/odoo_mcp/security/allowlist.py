@@ -189,6 +189,7 @@ class Operation(StrEnum):
     UNLINK = "unlink"
     SEND_MESSAGE = "send_message"  # used only by odoo_send_message
     FIELDS_GET = "fields_get"  # used only by odoo_describe_model
+    DEFAULT_GET = "default_get"  # used only by odoo_default_get
     DIAGNOSE_ACCESS = "diagnose_access"  # used only by odoo_diagnose_access
     HELP = "help"  # used only by odoo_help (no Odoo round-trip)
     LIST_INSTANCES = "list_instances"  # used only by odoo_list_instances
@@ -202,6 +203,7 @@ _READ_OPS: Final[frozenset[Operation]] = frozenset(
         Operation.READ_GROUP,
         Operation.LOOKUP,
         Operation.FIELDS_GET,
+        Operation.DEFAULT_GET,
         Operation.DIAGNOSE_ACCESS,
         Operation.HELP,
         Operation.LIST_INSTANCES,

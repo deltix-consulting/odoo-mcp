@@ -10,6 +10,31 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`odoo_default_get` — preview Odoo's auto-fill defaults for a new
+  record.** A read-only tool that wraps Odoo's `default_get`: pass a
+  model and an explicit `fields` list, get back the values Odoo would
+  apply on its own (company, currency, journal, fiscal position,
+  sequence- and context-derived defaults). It computes defaults without
+  writing anything.
+
+  The motivation is the create flow: an `odoo_create` dry-run shows the
+  fields *you* set (`would_write_fields`) but never the fields *Odoo*
+  fills in by itself. `odoo_default_get` closes that gap — run it
+  alongside the dry-run and the preview of a commit is complete, with no
+  surprises.
+
+  It goes through the same pipeline as every other read: instance
+  allowlist + denylist, the standard field-policy validation
+  (`validate_requested_fields` — explicit list, no wildcard,
+  always-redacted fields rejected, default-hidden fields require
+  `allow_sensitive_fields`), and the returned defaults run back through
+  the redaction pipeline as defense in depth. The response also lists
+  `fields_without_default` so the caller knows which requested fields
+  Odoo will *not* auto-fill. New `Operation.DEFAULT_GET` (a read op),
+  new `OdooClient.default_get` primitive — no `execute_kw` widening.
+
 ### Changed
 
 - **ROADMAP.md gains a full "OAuth authentication to Odoo" section.**
