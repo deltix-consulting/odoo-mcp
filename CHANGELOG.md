@@ -10,6 +10,18 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`odoo_search_read` / `odoo_read` report `fields_available`.** When the
+  caller omits `fields` and the smart-default selection runs, the response
+  now carries `fields_available` — the total field count on the model —
+  next to the existing `smart_fields_used`. Without it a curated 25-field
+  default was indistinguishable from "every field this model has", so the
+  caller could not tell whether to request more fields explicitly. The
+  count comes from the `fields_get` metadata already fetched for the call,
+  so there is no extra round trip. Surfaced only on the smart-default
+  path; an explicit `fields=[...]` list omits it.
+
 ### Changed
 
 - **ROADMAP.md gains a full "OAuth authentication to Odoo" section.**
