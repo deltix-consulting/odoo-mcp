@@ -93,6 +93,7 @@ See [SECURITY.md](SECURITY.md) for the full threat model.
 | `odoo_search_count` | Count records matching a domain |
 | `odoo_read_group` | Aggregate (sum/avg/count/min/max) with groupby |
 | `odoo_read` | Read specific records by ID |
+| `odoo_default_get` | Preview the defaults Odoo would auto-fill on a new record |
 | `odoo_create` | Create a record (prod-gated) |
 | `odoo_write` | Update records (prod-gated) |
 | `odoo_archive_or_delete` | Archive or `unlink` records (prod-gated) |

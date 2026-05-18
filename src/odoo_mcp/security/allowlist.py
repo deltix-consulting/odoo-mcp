@@ -204,6 +204,7 @@ class Operation(StrEnum):
     CREATE_ATTACHMENT = "create_attachment"  # used only by odoo_create_attachment
     LOG_NOTE = "log_note"  # used only by odoo_log_note
     FIELDS_GET = "fields_get"  # used only by odoo_describe_model
+    DEFAULT_GET = "default_get"  # used only by odoo_default_get
     DIAGNOSE_ACCESS = "diagnose_access"  # used only by odoo_diagnose_access
     DIAGNOSE_ROUTING = "diagnose_routing"  # used only by odoo_diagnose_routing
     HELP = "help"  # used only by odoo_help (no Odoo round-trip)
@@ -218,6 +219,7 @@ _READ_OPS: Final[frozenset[Operation]] = frozenset(
         Operation.READ_GROUP,
         Operation.LOOKUP,
         Operation.FIELDS_GET,
+        Operation.DEFAULT_GET,
         Operation.DIAGNOSE_ACCESS,
         Operation.DIAGNOSE_ROUTING,
         Operation.HELP,
