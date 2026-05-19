@@ -163,14 +163,37 @@ MODEL_DENYLIST: Final[frozenset[str]] = frozenset(
 # send messages, post log notes, manage followers, or write into the
 # notification table on a user's behalf.
 #
+# The same "readable as data, never a write side-door into the
+# collaboration layer" rationale extends past the mail.* notification
+# tables: scheduling activities, joining or renaming Discuss channels,
+# and managing channel membership are all acting *as the user* in the
+# communication layer. The MCP routes the only sanctioned outbound
+# action — posting a message — through the twice-gated ``odoo_send_message``
+# tool; every other collaboration-layer write is refused here so it
+# cannot be reached through the generic ``odoo_create`` / ``odoo_write``
+# path.
+#
 # Like :data:`MODEL_DENYLIST`, this is a hard safety invariant: it is
 # NOT overrideable from config. Adding to it tightens; removing should
 # be very rare and reviewed.
 MODEL_WRITE_BLOCKLIST: Final[frozenset[str]] = frozenset(
     {
+        # Messaging / notification tables.
         "mail.message",
         "mail.followers",
         "mail.notification",
+        # Activities — scheduling a to-do / reminder on any record, for
+        # any user, is acting on their behalf in the collaboration layer.
+        "mail.activity",
+        # Discuss channels and their membership: creating / renaming /
+        # archiving a channel, or adding / removing members, is channel
+        # manipulation. Odoo 17+ model names; the ``mail.channel`` /
+        # ``mail.channel.member`` aliases below cover Odoo <= 16 the same
+        # way the denylist keeps legacy ``auth_oauth.provider``.
+        "discuss.channel",
+        "discuss.channel.member",
+        "mail.channel",  # legacy (Odoo <= 16) name for discuss.channel
+        "mail.channel.member",  # legacy (Odoo <= 16) membership model
     }
 )
 

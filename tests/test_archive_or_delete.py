@@ -425,6 +425,28 @@ def test_blocklist_refusal_runs_before_prod_guard(tmp_path: Path) -> None:
     assert fake.unlink_calls == []
 
 
+def test_collaboration_layer_models_are_write_blocked(tmp_path: Path) -> None:
+    """Activities and Discuss channels are read-allowed but write-refused.
+
+    The write-blocklist extends past the mail.* notification tables to
+    the wider collaboration layer: scheduling activities or manipulating
+    Discuss channels through the generic write path is acting as the
+    user, so it is refused the same way as ``mail.message``.
+    """
+    fields = {"id": {"type": "integer"}, "active": {"type": "boolean"}}
+    for model in ("mail.activity", "discuss.channel", "discuss.channel.member"):
+        app, fake = _build_app(tmp_path, fields=fields)
+        dispatcher = Dispatcher(app)
+        payload = _call(
+            dispatcher,
+            {"instance": "dev", "model": model, "ids": [1], "mode": "delete"},
+        )
+        assert payload["ok"] is False, model
+        assert payload["error_code"] == "model_not_allowed", model
+        assert "read-only via the MCP" in payload["error"], model
+        assert fake.unlink_calls == [], model
+
+
 # -- Audit --------------------------------------------------------------------
 
 

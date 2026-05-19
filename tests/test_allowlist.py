@@ -329,11 +329,19 @@ def test_write_blocklist_contents_are_locked_in() -> None:
     closes the side-door that opens when ``mail.message`` and friends
     are made readable by default (v0.13.1 F1) — without it, a write
     path could be used to send messages or post log notes via the MCP.
+    It also covers the wider collaboration layer — activities and
+    Discuss channels — so generic ``odoo_create`` / ``odoo_write`` calls
+    cannot act as the user there either.
     """
     required = {
         "mail.message",
         "mail.followers",
         "mail.notification",
+        "mail.activity",
+        "discuss.channel",
+        "discuss.channel.member",
+        "mail.channel",
+        "mail.channel.member",
     }
     missing = required - MODEL_WRITE_BLOCKLIST
     assert not missing, f"MODEL_WRITE_BLOCKLIST is missing: {sorted(missing)}"

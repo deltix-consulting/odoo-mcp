@@ -10,6 +10,34 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **`MODEL_WRITE_BLOCKLIST` now covers the wider collaboration layer.**
+  The hard, non-overrideable write-blocklist previously covered only
+  `mail.message`, `mail.followers`, and `mail.notification` — readable as
+  data, never writable, so the MCP cannot be used as a side door to send
+  messages or post log notes. The same rationale applies to the rest of
+  the collaboration layer, so the blocklist gains:
+
+    - `mail.activity` — scheduling an activity / reminder on a record, for
+      any user, is acting on their behalf.
+    - `discuss.channel` + `discuss.channel.member` — creating, renaming, or
+      archiving a Discuss channel and adding / removing members is channel
+      manipulation. `mail.channel` / `mail.channel.member` are included as
+      the Odoo ≤ 16 aliases (harmless no-ops on newer versions, mirroring
+      how the denylist keeps the legacy `auth_oauth.provider` entry).
+
+  These models stay fully readable; only `create` / `write` / `archive` /
+  `delete` against them are refused, and — like the existing entries — the
+  refusal runs before prod-guard so an unlocked prod window cannot bypass
+  it. The only sanctioned outbound action remains `odoo_send_message`,
+  which is itself gated behind two independent opt-ins plus dry-run.
+  `mail.compose.message` and `mail.alias` were considered and left out:
+  the former is a transient send-wizard that is inert without a
+  method-execute escape (the MCP has none), and the latter is inbound-mail
+  routing configuration — a different class better suited to a denylist
+  decision by the maintainer than to this write-blocklist.
+
 ### Changed
 
 - **ROADMAP.md gains a full "OAuth authentication to Odoo" section.**
