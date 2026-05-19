@@ -55,6 +55,7 @@ from .security.allowlist import (
     check_model,
     check_operation,
 )
+from .security.document_actions import resolve_document_action
 from .security.domain import sandbox_domain
 from .security.fields import (
     redact_fields_get,
@@ -997,6 +998,97 @@ class Dispatcher:
         self._add_commits_remaining(result, ctx)
         return result
 
+    def _peek_states(
+        self, rt: InstanceRuntime, model: str, record_ids: list[int]
+    ) -> list[dict[str, Any]]:
+        """Best-effort read of each record's ``state`` for a dry-run preview.
+
+        Returns ``[{"id": .., "state": ..}, ...]``. Deliberately reads
+        ONLY ``id`` + ``state`` — ``state`` is a selection field that is
+        never sensitive, so this needs no redaction pass. If the model
+        has no ``state`` field, or the read fails, returns an empty list
+        rather than failing the whole preview.
+        """
+        try:
+            fields_meta = rt.client.fields_get(model)
+            if "state" not in fields_meta:
+                return []
+            rows = rt.client.read(model, record_ids, ["state"])
+            return [{"id": r.get("id"), "state": r.get("state")} for r in rows]
+        except OdooMcpError:
+            return []
+
+    def _run_document_action(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Run a document workflow action (confirm / cancel / post / validate).
+
+        The ``(model, action)`` pair must resolve in the hardcoded
+        ``security.document_actions`` map — the caller never supplies an
+        Odoo method name. Goes through the standard prod-guard pipeline:
+        unlock + dry-run preview + confirmation token + audit, identical
+        to ``odoo_write`` / ``odoo_archive_or_delete``.
+        """
+        _refuse_if_read_only_session()
+        ctx = self._begin("odoo_run_document_action", args, Operation.DOCUMENT_ACTION)
+        assert ctx.model is not None
+        rt, model = ctx.rt, ctx.model
+        _refuse_write_blocklisted(model)
+        record_ids = _require_list_of_int(args, "record_ids")
+        action = _require_str(args, "action")
+        # Raises OperationNotAllowedError if (model, action) is not mapped.
+        method = resolve_document_action(model, action)
+
+        cap = rt.config.max_records_hard_cap
+        if len(record_ids) > cap:
+            raise OdooMcpError(f"Cannot run an action on more than {cap} records at once.")
+
+        self.app.prod_guard.check_write(ctx.instance, rt.config.production)
+        dry_run = self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production)
+
+        if dry_run:
+            states = self._peek_states(rt, model, record_ids)
+            summary = f"{action} ({method}) on {len(record_ids)} {model} record(s)"
+            token = self.app.prod_guard.create_pending(
+                ctx.instance, ctx.op.value, model, summary=summary
+            )
+            self._audit_ok(ctx, {"action": action, "id_count": len(record_ids)}, args, dry_run=True)
+            return {
+                "preview": True,
+                "instance": ctx.instance,
+                "model": model,
+                "action": action,
+                "odoo_method": method,
+                "record_ids": record_ids,
+                "current_states": states,
+                "confirmation_token": token,
+                "note": _DRY_RUN_NOTE.format(tool="odoo_run_document_action"),
+            }
+
+        self._consume_token_on_prod(ctx, args)
+        result = rt.client.call_document_action(model, method, record_ids)
+        # Some Odoo methods (notably stock.picking.button_validate) return
+        # a dict describing a follow-up wizard (backorder / immediate
+        # transfer confirmation) instead of completing. Report that
+        # honestly rather than claiming the action finished.
+        needs_manual = isinstance(result, dict)
+        self._audit_ok(ctx, {"action": action, "id_count": len(record_ids)}, args)
+        out: dict[str, Any] = {
+            "instance": ctx.instance,
+            "model": model,
+            "action": action,
+            "odoo_method": method,
+            "record_ids": record_ids,
+            "committed": not needs_manual,
+        }
+        if needs_manual:
+            out["needs_manual_completion"] = True
+            out["note"] = (
+                "Odoo returned a follow-up wizard (e.g. backorder or "
+                "immediate-transfer confirmation). The action did NOT fully "
+                "complete — finish it in the Odoo UI."
+            )
+        self._add_commits_remaining(out, ctx)
+        return out
+
     def _add_commits_remaining(self, result: dict[str, Any], ctx: _Ctx) -> None:
         """If on prod, expose the post-commit burst budget to the caller."""
         if not ctx.rt.config.production:
@@ -1175,6 +1267,7 @@ _HANDLERS: dict[str, Callable[[Dispatcher, dict[str, Any]], dict[str, Any]]] = {
     "odoo_enable_prod_writes": Dispatcher._enable_prod_writes,
     "odoo_diagnose_access": Dispatcher._diagnose_access,
     "odoo_send_message": Dispatcher._send_message,
+    "odoo_run_document_action": Dispatcher._run_document_action,
 }
 
 

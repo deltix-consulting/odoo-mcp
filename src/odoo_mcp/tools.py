@@ -491,6 +491,63 @@ _TOOL_SEND_MESSAGE = Tool(
 )
 
 
+_TOOL_RUN_DOCUMENT_ACTION = Tool(
+    name="odoo_run_document_action",
+    description=(
+        "Run a document workflow action — confirm / cancel / post / validate — "
+        "on one or more records. This is NOT a generic method runner: the "
+        "(model, action) pair must exist in a hardcoded map. Supported pairs: "
+        "purchase.order confirm|cancel, sale.order confirm|cancel, "
+        "account.move post|cancel, stock.picking validate|cancel. Any other "
+        "pair is refused. Same prod guardrails as odoo_write: on production "
+        "dry_run defaults to true and returns a preview (with each record's "
+        "current state) plus a confirmation_token; a real commit needs "
+        "dry_run=false AND the token. Use this instead of odoo_write to "
+        "change a document's state — writing the state field directly skips "
+        "Odoo's workflow logic (no stock moves, no pickings) and corrupts "
+        'the record. Example: confirm a purchase order — model="purchase.order", '
+        'record_ids=[977], action="confirm".'
+    ),
+    inputSchema={
+        "type": "object",
+        "required": ["instance", "model", "record_ids", "action"],
+        "additionalProperties": False,
+        "properties": {
+            "instance": {"type": "string"},
+            "model": {
+                "type": "string",
+                "description": ("purchase.order, sale.order, account.move, or stock.picking."),
+            },
+            "record_ids": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "minItems": 1,
+                "description": "Record IDs to run the action on.",
+            },
+            "action": {
+                "type": "string",
+                "enum": ["confirm", "cancel", "post", "validate"],
+                "description": (
+                    "Semantic action. Resolved to the Odoo method via the "
+                    "hardcoded map; not all actions apply to all models."
+                ),
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": (
+                    "Preview only — returns each record's current state plus a "
+                    "confirmation_token. Default: true on prod, false on dev."
+                ),
+            },
+            "confirmation_token": {
+                "type": "string",
+                "description": "Token from a prior dry-run call, required to commit on prod.",
+            },
+        },
+    },
+)
+
+
 _TOOL_DIAGNOSE_ACCESS = Tool(
     name="odoo_diagnose_access",
     description=(
@@ -557,4 +614,5 @@ def build_tools() -> list[Tool]:
         _TOOL_ENABLE_PROD_WRITES,
         _TOOL_DIAGNOSE_ACCESS,
         _TOOL_SEND_MESSAGE,
+        _TOOL_RUN_DOCUMENT_ACTION,
     ]

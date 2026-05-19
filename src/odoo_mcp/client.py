@@ -621,6 +621,24 @@ class OdooClient:
             )
         return result
 
+    def call_document_action(self, model: str, method: str, record_ids: list[int]) -> Any:
+        """Invoke a document workflow method on a set of records.
+
+        The only caller is the dispatcher's ``odoo_run_document_action``
+        handler, which resolves ``method`` from the hardcoded
+        ``security.document_actions`` map — the MCP caller never supplies
+        a method name. This is a named wrapper constrained by that map,
+        not a generic ``execute_kw`` surface.
+
+        Returns whatever the Odoo method returns. Workflow methods like
+        ``button_confirm`` / ``action_post`` normally return ``True`` or
+        ``None``; some (notably ``stock.picking.button_validate``) may
+        return a ``dict`` describing a follow-up wizard action — the
+        dispatcher inspects the result and reports that honestly rather
+        than claiming the action completed.
+        """
+        return self._execute(model, method, [record_ids], {})
+
     def unlink(self, model: str, ids: list[int]) -> bool:
         """Permanently delete records. Exposed only via ``odoo_archive_or_delete``."""
         result = self._execute(model, "unlink", [ids], {})

@@ -10,6 +10,68 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-05-16
+
+Driven by real production feedback: a user created a purchase order in
+draft via `odoo_create` and then needed it confirmed so the transport
+planner could work. The MCP could not — it had no way to trigger an
+Odoo workflow action. This release adds that, narrowly.
+
+### Added
+
+- **`odoo_run_document_action` tool.** Runs a document workflow action
+  — `confirm` / `cancel` / `post` / `validate` — on one or more
+  records. **This is not a generic method runner.** The caller names a
+  semantic action; a hardcoded `(model, action) -> Odoo method` map
+  resolves it. The caller can never supply a method name. Supported
+  pairs:
+
+  | Model | Actions |
+  |---|---|
+  | `purchase.order` | confirm (`button_confirm`), cancel (`button_cancel`) |
+  | `sale.order` | confirm (`action_confirm`), cancel (`action_cancel`) |
+  | `account.move` | post (`action_post`), cancel (`button_cancel`) |
+  | `stock.picking` | validate (`button_validate`), cancel (`action_cancel`) |
+
+  Any pair not in the map is refused. The map lives in
+  `src/odoo_mcp/security/document_actions.py` and is non-config-
+  overridable — the same shape as `MODEL_DENYLIST` and
+  `odoo_archive_or_delete`'s mode choice.
+
+  Full prod-guard pipeline: unlock + dry-run + confirmation token +
+  audit, identical to `odoo_write`. The dry-run preview reads and
+  shows each record's current `state` (only `id` + `state` — no
+  sensitive data, no redaction needed).
+
+  When an Odoo method returns a wizard dict instead of completing
+  (notably `stock.picking.button_validate` asking about a backorder),
+  the response carries `committed: false` and
+  `needs_manual_completion: true` rather than claiming success.
+
+- **`Operation.DOCUMENT_ACTION`** added to the closed operation enum
+  and to `_WRITE_OPS`. **`OdooClient.call_document_action`** — a
+  named, map-constrained method wrapper, the same controlled shape as
+  `message_post`. Not a generic `execute_kw`.
+
+### Security
+
+- This release expands the write surface (a new write-class
+  operation). It does NOT add a generic `execute_method`, does NOT
+  let the caller pass an Odoo method name, and does NOT widen the
+  model surface — `odoo_run_document_action` works only on the four
+  models in the hardcoded action map, and each must still pass the
+  per-instance allowlist. Reset-to-draft (`button_draft` /
+  `action_draft`) is deliberately excluded: un-posting an invoice or
+  reverting a confirmed order has accounting / legal implications and
+  would get its own review.
+
+  **Why this matters operationally:** using `odoo_write` to set a
+  document's `state` field directly (e.g. `state="purchase"`) was
+  always technically allowed but is wrong — it skips Odoo's workflow
+  logic, so no pickings / stock moves / downstream automation fire.
+  `odoo_run_document_action` is the correct path and the tool
+  description tells the model so.
+
 ### Changed
 
 - **ROADMAP.md gains a full "OAuth authentication to Odoo" section.**

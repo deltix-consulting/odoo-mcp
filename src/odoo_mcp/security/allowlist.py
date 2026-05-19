@@ -188,6 +188,7 @@ class Operation(StrEnum):
     ARCHIVE = "archive"
     UNLINK = "unlink"
     SEND_MESSAGE = "send_message"  # used only by odoo_send_message
+    DOCUMENT_ACTION = "document_action"  # used only by odoo_run_document_action
     FIELDS_GET = "fields_get"  # used only by odoo_describe_model
     DIAGNOSE_ACCESS = "diagnose_access"  # used only by odoo_diagnose_access
     HELP = "help"  # used only by odoo_help (no Odoo round-trip)
@@ -214,6 +215,7 @@ _WRITE_OPS: Final[frozenset[Operation]] = frozenset(
         Operation.ARCHIVE,
         Operation.UNLINK,
         Operation.SEND_MESSAGE,
+        Operation.DOCUMENT_ACTION,
     }
 )
 
