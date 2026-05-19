@@ -94,3 +94,18 @@ def test_non_admin_user_passes() -> None:
     uid = client.authenticate()
     assert uid == 2
     assert client.is_admin is False
+
+
+def test_failed_auth_points_at_renew_key() -> None:
+    """A falsy uid (wrong / expired key) yields a message that names the
+    most likely Odoo Online cause and the exact command to fix it."""
+    cfg = _make_cfg(production=True)
+    # uid=0 (falsy) is what Odoo returns for a wrong OR expired key —
+    # the two are indistinguishable at the authenticate() call.
+    client = _build_client(cfg, uid=0, has_group=False)
+    with pytest.raises(OdooAuthError) as excinfo:
+        client.authenticate()
+    msg = str(excinfo.value)
+    assert "expired" in msg.lower()
+    assert "renew-key prod" in msg
+    assert "Odoo Online" in msg

@@ -257,7 +257,11 @@ class OdooClient:
         if not uid:
             raise OdooAuthError(
                 f"Authentication against {self._instance.name!r} returned no uid. "
-                f"Check the username, API key, and database name."
+                f"The username, API key, or database name is wrong — or, if this "
+                f"instance is on Odoo Online, the API key may have expired "
+                f"(Odoo Online expires non-admin API keys after 1 day). "
+                f"Run 'odoo-mcp renew-key {self._instance.name}' to generate a "
+                f"fresh key, or 'odoo-mcp doctor' to diagnose."
             )
         if not isinstance(uid, int):
             raise OdooAuthError(f"Unexpected authenticate() return type: {type(uid).__name__}")

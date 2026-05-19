@@ -10,6 +10,18 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-05-16
+
+### Changed
+
+- **Clearer error when authentication returns no uid.** On Odoo Online,
+  non-admin API keys expire after 1 day; an expired key fails
+  `authenticate()` exactly like a wrong key (Odoo returns no uid for
+  both). The error message now names that likely cause and gives the
+  exact fix — `odoo-mcp renew-key <instance>` — instead of the generic
+  "check the username, API key, and database name". No behaviour
+  change, just a message a non-expert can act on.
+
 ## [0.17.0] - 2026-05-16
 
 Driven by real production feedback: a user created a purchase order in
