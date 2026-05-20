@@ -606,12 +606,33 @@ def _generate_api_key_via_password(
 
     new_key = _extract_key_from_make_key_result(action)
     if new_key is None:
+        # Identity-check redirect = Odoo's polite way of saying "the
+        # browser would now ask the user to re-type their password".
+        # We can't render that wizard over JSON-RPC, so surface a
+        # specific message rather than the generic "unrecognised shape".
+        if _is_identity_check_redirect(action):
+            raise _KeyGenError(
+                "Odoo redirected to its identity-check wizard instead of "
+                "returning the new API key. This means our session's "
+                "identity stamp didn't satisfy @check_identity — either the "
+                "tenant uses a stricter identity-check policy than stock "
+                "Odoo, or the session expired between authenticate and "
+                "make_key.\n"
+                "  Workarounds:\n"
+                "    - Try once more right after typing the password "
+                "(the identity stamp is freshest immediately after authenticate).\n"
+                "    - If it still fails, create the key manually in your "
+                "Odoo profile (Account Security → New API Key) and rerun "
+                "this command choosing option 1."
+            )
         raise _KeyGenError(
-            "Odoo accepted the request but did not return the new key in the "
-            "expected shape. This usually means your Odoo version returns the "
-            "key in a wizard form rather than the action context — create the "
-            "key manually in your Odoo profile (Account Security → New API Key) "
-            "and rerun this command choosing option 1."
+            "Odoo accepted the request but did not return the new key in "
+            "the expected shape. Report this to the maintainer with the "
+            f"shape summary below — no key value is included.\n"
+            f"  Shape: {_describe_action_shape(action)}\n"
+            "  Workaround: create the key manually in your Odoo profile "
+            "(Account Security → New API Key) and rerun this command "
+            "choosing option 1."
         )
     return new_key, num_cleaned
 
@@ -690,13 +711,73 @@ def _extract_key_from_make_key_result(action: object) -> str | None:
     if isinstance(action, str) and action:
         return action
     if isinstance(action, dict):
+        # Stock Odoo 17/18 shape: action with context.default_key.
         ctx = action.get("context")
         if isinstance(ctx, dict):
             for field in ("default_key", "default_key_value"):
                 value = ctx.get(field)
                 if isinstance(value, str) and value:
                     return value
+        # Some Odoo forks / older versions surface the key at the top
+        # level of the action instead of nested inside ``context``.
+        for field in ("key", "default_key", "key_value"):
+            value = action.get(field)
+            if isinstance(value, str) and value:
+                return value
+        # params.key — observed on a couple of Odoo Online tenants.
+        params = action.get("params")
+        if isinstance(params, dict):
+            for field in ("key", "default_key"):
+                value = params.get(field)
+                if isinstance(value, str) and value:
+                    return value
     return None
+
+
+def _is_identity_check_redirect(action: object) -> bool:
+    """Detect Odoo's identity-check wizard returned in place of the key.
+
+    When ``@check_identity`` can't validate the in-session credential
+    timestamp, ``make_key`` doesn't raise — it returns an
+    ``ir.actions.act_window`` pointing at the ``res.users.identitycheck``
+    transient wizard. The browser UI opens that wizard so the user can
+    re-type their password. Over JSON-RPC we have no UI to render it,
+    so we surface a specific, actionable message instead of the generic
+    "unrecognised shape" error.
+    """
+    if not isinstance(action, dict):
+        return False
+    res_model = action.get("res_model")
+    if isinstance(res_model, str) and "identitycheck" in res_model.replace(".", "").lower():
+        return True
+    # Some Odoo versions name the action; check that too as a fallback.
+    name = action.get("name")
+    return isinstance(name, str) and "identity" in name.lower()
+
+
+def _describe_action_shape(action: object) -> str:
+    """Build a one-line, key-only summary of a make_key response.
+
+    Includes type / res_model / top-level keys / context keys — never
+    any values, so an unexpected wrapper can be reported by the user
+    without leaking the API key (in case the key IS hiding somewhere
+    we don't probe yet). Used in the "unrecognised shape" error so the
+    next bug report carries diagnostic info instead of forcing us to
+    guess.
+    """
+    if isinstance(action, str):
+        return f"str (length={len(action)})"
+    if not isinstance(action, dict):
+        return type(action).__name__
+    parts = [f"dict keys={sorted(action.keys())}"]
+    for diag_field in ("type", "res_model", "tag"):
+        value = action.get(diag_field)
+        if isinstance(value, str):
+            parts.append(f"{diag_field}={value!r}")
+    ctx = action.get("context")
+    if isinstance(ctx, dict):
+        parts.append(f"context keys={sorted(ctx.keys())}")
+    return ", ".join(parts)
 
 
 def _ask_api_key(url: str, database: str, username: str, instance_name: str) -> str:

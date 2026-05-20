@@ -1060,6 +1060,89 @@ def test_extract_key_from_make_key_raw_string() -> None:
     assert setup_wizard._extract_key_from_make_key_result("legacy-raw-key") == "legacy-raw-key"
 
 
+def test_extract_key_from_make_key_top_level_key() -> None:
+    """Some Odoo forks return the key at the top level, not nested."""
+    assert (
+        setup_wizard._extract_key_from_make_key_result({"key": "top-level-key"}) == "top-level-key"
+    )
+
+
+def test_extract_key_from_make_key_params_key() -> None:
+    """Observed on a couple of Odoo Online tenants: key inside ``params``."""
+    action = {"type": "ir.actions.client", "params": {"key": "in-params-key"}}
+    assert setup_wizard._extract_key_from_make_key_result(action) == "in-params-key"
+
+
+def test_is_identity_check_redirect_by_res_model() -> None:
+    """The canonical identity-check action carries the dotted model name."""
+    assert setup_wizard._is_identity_check_redirect(
+        {"type": "ir.actions.act_window", "res_model": "res.users.identitycheck"}
+    )
+
+
+def test_is_identity_check_redirect_by_action_name() -> None:
+    """Fallback: some Odoo skins drop the res_model but keep an identity name."""
+    assert setup_wizard._is_identity_check_redirect(
+        {"name": "Confirm your identity", "views": [(False, "form")]}
+    )
+
+
+def test_is_identity_check_redirect_negative() -> None:
+    """The normal API-key-ready action must NOT match the identity heuristic."""
+    assert not setup_wizard._is_identity_check_redirect(
+        {"res_model": "res.users.apikeys.show", "context": {"default_key": "k"}}
+    )
+    assert not setup_wizard._is_identity_check_redirect(None)
+    assert not setup_wizard._is_identity_check_redirect("string")
+
+
+def test_describe_action_shape_leaks_no_values() -> None:
+    """Diagnostic summary must surface enough structure for bug reports
+    without ever including the field VALUES (which could contain the
+    very API key we're trying to extract)."""
+    secret = "ZZZ-leaked-key-value-must-not-appear-anywhere-ZZZ"
+    summary = setup_wizard._describe_action_shape(
+        {
+            "type": "ir.actions.act_window",
+            "res_model": "res.users.apikeys.show",
+            "context": {"default_key": secret, "lang": "en_US"},
+        }
+    )
+    assert secret not in summary
+    assert "en_US" not in summary  # context values stay private too
+    # But the keys and the safe identifier fields (type, res_model) are present
+    # so the maintainer can diagnose from the bug report.
+    assert "default_key" in summary
+    assert "res_model" in summary
+    assert "res.users.apikeys.show" in summary
+
+
+def test_generate_api_key_via_password_identity_check_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: when make_key returns the identity-check wizard, the
+    caller gets a *specific* error explaining what happened — not the
+    generic "unrecognised shape" message."""
+    _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "result": {"uid": 5}},
+        {"jsonrpc": "2.0", "result": []},
+        {"jsonrpc": "2.0", "result": 9},
+        {
+            "jsonrpc": "2.0",
+            "result": {
+                "type": "ir.actions.act_window",
+                "res_model": "res.users.identitycheck",
+                "name": "Confirm your identity",
+            },
+        },
+    )
+    with pytest.raises(setup_wizard._KeyGenError, match="identity-check wizard"):
+        setup_wizard._generate_api_key_via_password(
+            "https://x.odoo.com", "db", "u@x.com", "pw", "name"
+        )
+
+
 def test_extract_key_from_make_key_unrecognised_shape_returns_none() -> None:
     """Anything we don't recognise → None so the caller raises the
     "create manually" error instead of writing rubbish to the keychain."""

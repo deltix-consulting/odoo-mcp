@@ -10,6 +10,42 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.17.8] - 2026-05-20
+
+### Fixed
+
+- **Diagnose unrecognised ``make_key`` return shapes instead of
+  failing opaquely.** v0.17.7's web JSON-RPC flow gets past
+  ``@check_identity``'s HTTP-only gate, but on at least one Odoo
+  Online tenant ``make_key`` returns an action shape we don't
+  recognise — and the previous "unrecognised shape" error gave no
+  way to diagnose without leaking the key value in a bug report.
+  Three changes:
+
+  1. **Identity-check redirect detection.** When ``make_key``
+     returns ``ir.actions.act_window`` pointing at
+     ``res.users.identitycheck`` (Odoo's "please re-type your
+     password" wizard, opened by the browser when the in-session
+     identity stamp isn't fresh enough), surface a specific
+     message explaining what happened and how to recover, rather
+     than the generic shape error.
+  2. **Wider key-extraction probes.** Accept the key at the top
+     level of the action (``action["key"]``) and inside
+     ``action["params"]["key"]`` — two shapes observed in the
+     wild — in addition to the canonical
+     ``action["context"]["default_key"]``.
+  3. **Redacted shape summary on the failure path.** When the
+     extractor still can't find the key, the error now includes a
+     one-line shape summary (type / res_model / top-level keys /
+     context keys — NEVER any values) so the maintainer can
+     diagnose from a bug report without the user having to copy
+     the key (which would defeat the point of the OS keychain).
+
+  Five new tests pin all three behaviours: identity-check
+  detection by ``res_model`` and by action ``name``, the wider
+  extractor probes, and a guarantee that the shape summary never
+  leaks field values.
+
 ## [0.17.7] - 2026-05-20
 
 ### Fixed
