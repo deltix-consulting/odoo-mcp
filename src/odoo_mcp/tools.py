@@ -10,6 +10,12 @@ from __future__ import annotations
 
 from mcp.types import Tool
 
+from .security.document_actions import (
+    DOCUMENT_ACTION_MODELS,
+    DOCUMENT_ACTION_VERBS,
+    pairs_summary,
+)
+
 _TOOL_LIST_INSTANCES = Tool(
     name="odoo_list_instances",
     description=(
@@ -491,15 +497,27 @@ _TOOL_SEND_MESSAGE = Tool(
 )
 
 
+def _models_description() -> str:
+    """English-prose join of the supported models, e.g.
+    ``"a.b, c.d, or e.f."`` — used in the ``model`` arg description.
+    """
+    models = list(DOCUMENT_ACTION_MODELS)
+    if len(models) == 1:
+        return f"{models[0]}."
+    if len(models) == 2:
+        return f"{models[0]} or {models[1]}."
+    return ", ".join(models[:-1]) + f", or {models[-1]}."
+
+
 _TOOL_RUN_DOCUMENT_ACTION = Tool(
     name="odoo_run_document_action",
     description=(
-        "Run a document workflow action — confirm / cancel / post / validate — "
+        "Run a document workflow action — "
+        f"{' / '.join(DOCUMENT_ACTION_VERBS)} — "
         "on one or more records. This is NOT a generic method runner: the "
         "(model, action) pair must exist in a hardcoded map. Supported pairs: "
-        "purchase.order confirm|cancel, sale.order confirm|cancel, "
-        "account.move post|cancel, stock.picking validate|cancel. Any other "
-        "pair is refused. Same prod guardrails as odoo_write: on production "
+        f"{pairs_summary()}. Any other pair is refused. Same prod "
+        "guardrails as odoo_write: on production "
         "dry_run defaults to true and returns a preview (with each record's "
         "current state) plus a confirmation_token; a real commit needs "
         "dry_run=false AND the token. Use this instead of odoo_write to "
@@ -516,7 +534,7 @@ _TOOL_RUN_DOCUMENT_ACTION = Tool(
             "instance": {"type": "string"},
             "model": {
                 "type": "string",
-                "description": ("purchase.order, sale.order, account.move, or stock.picking."),
+                "description": _models_description(),
             },
             "record_ids": {
                 "type": "array",
@@ -526,7 +544,7 @@ _TOOL_RUN_DOCUMENT_ACTION = Tool(
             },
             "action": {
                 "type": "string",
-                "enum": ["confirm", "cancel", "post", "validate"],
+                "enum": list(DOCUMENT_ACTION_VERBS),
                 "description": (
                     "Semantic action. Resolved to the Odoo method via the "
                     "hardcoded map; not all actions apply to all models."

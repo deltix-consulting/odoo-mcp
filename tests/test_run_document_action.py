@@ -21,7 +21,9 @@ from odoo_mcp.credentials import Credentials
 from odoo_mcp.dispatcher import Dispatcher, InstanceRuntime, OdooMcpApp
 from odoo_mcp.security.allowlist import ALLOWLIST_WILDCARD
 from odoo_mcp.security.document_actions import (
+    DOCUMENT_ACTION_MODELS,
     DOCUMENT_ACTION_VERBS,
+    pairs_summary,
     resolve_document_action,
     supported_pairs,
 )
@@ -124,8 +126,59 @@ def test_action_verbs_match_map() -> None:
     assert "purchase.order:confirm" in supported_pairs()
 
 
+def test_models_derived_from_map() -> None:
+    assert set(DOCUMENT_ACTION_MODELS) == {
+        "purchase.order",
+        "sale.order",
+        "account.move",
+        "stock.picking",
+    }
+    # Sorted is the documented order so the AI-visible description is
+    # deterministic across Python versions.
+    assert list(DOCUMENT_ACTION_MODELS) == sorted(DOCUMENT_ACTION_MODELS)
+
+
+def test_pairs_summary_groups_by_model() -> None:
+    summary = pairs_summary()
+    # Actions are alphabetically sorted inside each entry so the output is
+    # deterministic across Python versions and dict-insert-order changes.
+    assert "purchase.order cancel|confirm" in summary
+    assert "sale.order cancel|confirm" in summary
+    assert "account.move cancel|post" in summary
+    assert "stock.picking cancel|validate" in summary
+    # Every model appears exactly once.
+    for model in DOCUMENT_ACTION_MODELS:
+        assert summary.count(model) == 1
+
+
 def test_tool_registered() -> None:
     assert "odoo_run_document_action" in {t.name for t in build_tools()}
+
+
+def test_tool_schema_matches_map() -> None:
+    """The tool's schema must derive from the security map — adding a row
+    in :mod:`security.document_actions` should automatically reach the AI.
+
+    Regression guard for a drift bug: prior to this test the description
+    string, the ``model`` arg description, and the ``action`` enum were
+    all hardcoded strings, so a new (model, action) row left the schema
+    stale until someone remembered to edit three other places.
+    """
+    tools = {t.name: t for t in build_tools()}
+    schema = tools["odoo_run_document_action"].inputSchema
+    props = schema["properties"]
+
+    # action enum equals the verbs derived from the map.
+    assert props["action"]["enum"] == list(DOCUMENT_ACTION_VERBS)
+
+    # Every supported model is named in the model description.
+    model_desc = props["model"]["description"]
+    for model in DOCUMENT_ACTION_MODELS:
+        assert model in model_desc
+
+    # Every supported pair appears in the tool description.
+    tool_desc = tools["odoo_run_document_action"].description
+    assert pairs_summary() in tool_desc
 
 
 # ---------------------------------------------------------------------------
