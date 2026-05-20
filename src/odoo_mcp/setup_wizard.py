@@ -426,10 +426,31 @@ def _generate_api_key_via_password(
 
     The single shared implementation behind both ``odoo-mcp renew-key``
     and the setup wizard's "generate the key for me" path. The password
-    is used for exactly two XML-RPC calls (authenticate + _generate)
-    plus an optional cleanup call, and is never returned, logged, or
-    stored — the caller is responsible for dropping its own reference
-    afterwards.
+    is used for exactly three XML-RPC calls (authenticate + create
+    description + make_key) plus an optional cleanup call, and is never
+    returned, logged, or stored — the caller is responsible for
+    dropping its own reference afterwards.
+
+    Generation strategy. Odoo's XML-RPC dispatcher blocks any method
+    whose name starts with ``_`` (raises
+    ``AccessError: "Private methods cannot be called remotely"``).
+    That means the direct call to ``res.users.apikeys._generate`` —
+    which earlier versions of this code attempted — was never going
+    to work against a stock Odoo, including Odoo Online. We instead
+    drive Odoo's own user-facing wizard:
+
+    1. ``create`` a transient ``res.users.apikeys.description`` record
+       with the desired ``name``.
+    2. Call ``make_key()`` on it (no underscore → RPC-callable).
+    3. The wizard returns an ``ir.actions.act_window`` whose
+       ``context.default_key`` carries the freshly minted key string.
+
+    On Odoo ≥17, ``make_key`` is decorated with ``@check_identity``,
+    which requires a recent in-session credential check. Over XML-RPC
+    there is no browser session, so the decorator raises. We catch
+    that path and surface a clear instruction to create the key
+    manually in the Odoo UI — there is no clean way to satisfy the
+    identity check from this script.
 
     Cleanup step: before generating, searches the authenticated user's
     own keys for any row whose ``name`` equals ``key_name`` and
@@ -503,29 +524,114 @@ def _generate_api_key_via_password(
             exc,
         )
 
-    # --- Generate the new key --------------------------------------------
+    # --- Generate the new key via Odoo's own description wizard ----------
+    # The wizard model is a TransientModel; orphan records are GC'd by
+    # Odoo's regular vacuum, so we don't need to unlink on failure.
     try:
-        new_key = models.execute_kw(
+        desc_id = models.execute_kw(
             database,
             uid,
             password,
-            "res.users.apikeys",
-            "_generate",
-            ["rpc", key_name],
+            "res.users.apikeys.description",
+            "create",
+            [{"name": key_name}],
             {},
         )
     except xmlrpc.client.Fault as exc:
-        raise _KeyGenError(
-            f"Odoo refused to generate a new key: {exc.faultString}\n"
-            f"  If the error mentions 'duration' or 'expiration', your Odoo "
-            f"may require a specific argument — generate the key manually."
-        ) from exc
+        raise _KeyGenError(_format_keygen_fault(exc.faultString)) from exc
     except (OSError, ssl.SSLError, TimeoutError) as exc:
         raise _KeyGenError(f"Could not generate key: {type(exc).__name__}: {exc}") from exc
 
-    if not isinstance(new_key, str) or not new_key:
-        raise _KeyGenError(f"Unexpected response from Odoo: {new_key!r}")
+    if not isinstance(desc_id, int) or desc_id <= 0:
+        raise _KeyGenError(f"Unexpected response creating the API-key wizard record: {desc_id!r}")
+
+    try:
+        action = models.execute_kw(
+            database,
+            uid,
+            password,
+            "res.users.apikeys.description",
+            "make_key",
+            [[desc_id]],
+            {},
+        )
+    except xmlrpc.client.Fault as exc:
+        raise _KeyGenError(_format_keygen_fault(exc.faultString)) from exc
+    except (OSError, ssl.SSLError, TimeoutError) as exc:
+        raise _KeyGenError(f"Could not generate key: {type(exc).__name__}: {exc}") from exc
+
+    new_key = _extract_key_from_make_key_result(action)
+    if new_key is None:
+        raise _KeyGenError(
+            "Odoo accepted the request but did not return the new key in the "
+            "expected shape. This usually means your Odoo version returns the "
+            "key in a wizard form rather than the action context — create the "
+            "key manually in your Odoo profile (Account Security → New API Key) "
+            "and rerun this command choosing option 1."
+        )
     return new_key, num_cleaned
+
+
+def _format_keygen_fault(fault_string: str) -> str:
+    """Turn a raw Odoo XML-RPC fault into an actionable user-readable message.
+
+    The three failure modes we've actually seen in the field:
+
+    - "Private methods (...) cannot be called remotely" — legacy code path
+      against an old odoo-mcp; the user is on a version that still tries
+      ``_generate`` directly. Won't trigger from this function anymore,
+      but kept as a hint in case a future Odoo blocks ``make_key`` too.
+    - ``@check_identity`` rejection on Odoo ≥17 — the wizard demands a
+      recent in-session credential check that XML-RPC can't provide.
+    - Anything else: surface the raw message and point at the manual path.
+    """
+    low = fault_string.lower()
+    if "private method" in low and "cannot be called remotely" in low:
+        return (
+            f"Odoo refused the API call: {fault_string}\n"
+            "  Your odoo-mcp is calling a private method directly. Upgrade "
+            "to the latest release (`odoo-mcp update`) — newer versions use "
+            "Odoo's user-facing wizard instead."
+        )
+    if "identity" in low or "re-enter" in low or "reauthenticat" in low:
+        return (
+            f"Odoo requires an in-session identity re-check that cannot be "
+            f"performed over the API: {fault_string}\n"
+            "  Create the key manually:\n"
+            "    1. Open Odoo → top-right menu → My Profile → Account Security.\n"
+            "    2. Click 'New API Key', name it however you like, copy the key.\n"
+            "    3. Rerun this command and choose option 1 to paste it."
+        )
+    return (
+        f"Odoo refused to generate a new key: {fault_string}\n"
+        "  Create the key manually in your Odoo profile "
+        "(Account Security → New API Key) and rerun this command "
+        "choosing option 1 to paste it."
+    )
+
+
+def _extract_key_from_make_key_result(action: object) -> str | None:
+    """Pull the new API key out of ``res.users.apikeys.description.make_key()``.
+
+    Odoo's wizard returns either:
+
+    - an ``ir.actions.act_window`` dict whose ``context.default_key``
+      (or, in some forks, ``context.default_key_value``) holds the key;
+    - or, on very old Odoo versions, the raw key string.
+
+    Returns the key string or None if the shape isn't recognised. The
+    caller turns None into an actionable error.
+    """
+    if isinstance(action, str) and action:
+        return action
+    if isinstance(action, dict):
+        ctx = action.get("context")
+        if isinstance(ctx, dict):
+            for field in ("default_key", "default_key_value"):
+                value = ctx.get(field)
+                if isinstance(value, str) and value:
+                    return value
+    return None
 
 
 def _ask_api_key(url: str, database: str, username: str, instance_name: str) -> str:
@@ -1223,8 +1329,9 @@ def _cmd_renew_key(name: str) -> int:
       2. Prompt for the user's Odoo password (NOT echoed, NOT stored).
       3. Authenticate to Odoo via password — this is allowed for users
          who don't have 2FA enabled.
-      4. Once authenticated, call ``res.users.apikeys._generate`` on
-         the user's own account to produce a fresh key.
+      4. Once authenticated, drive Odoo's own ``API Key Description``
+         wizard (``res.users.apikeys.description.make_key``) to produce
+         a fresh key — the same path the Account Security UI uses.
       5. Write the new key to the OS credential store, overwriting
          the previous (typically expired) one.
       6. Disposal: the password variable is overwritten and dropped

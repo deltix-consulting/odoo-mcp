@@ -88,8 +88,15 @@ def test_renew_key_happy_path(
     common = _mock_common(authenticate_return=42)
     obj = MagicMock()
     # First-time renewal flow: cleanup search returns no stale keys,
-    # then _generate returns the new key.
-    obj.execute_kw.side_effect = [[], "brand-new-fresh-key"]
+    # the description wizard is created (id 99), and make_key returns
+    # an action dict whose context.default_key holds the new key —
+    # this is the shape Odoo 17+ returns from the Account-Security
+    # "New API Key" wizard.
+    make_key_action = {
+        "type": "ir.actions.act_window",
+        "context": {"default_key": "brand-new-fresh-key"},
+    }
+    obj.execute_kw.side_effect = [[], 99, make_key_action]
 
     def fake_proxy(url: str, **_kw: object) -> MagicMock:
         if "/common" in url:
@@ -107,25 +114,31 @@ def test_renew_key_happy_path(
     common.authenticate.assert_called_once_with(
         "deltix", "timon@deltix.pro", "the-real-password", {}
     )
-    # Two execute_kw calls: search (cleanup), then _generate.
-    assert obj.execute_kw.call_count == 2
-    search_args, gen_args = obj.execute_kw.call_args_list
+    # Three execute_kw calls: search (cleanup), description create, make_key.
+    assert obj.execute_kw.call_count == 3
+    search_args, create_args, make_args = obj.execute_kw.call_args_list
     # Search: filtered by name + user_id, on the user's own apikeys.
     assert search_args.args[3] == "res.users.apikeys"
     assert search_args.args[4] == "search"
     domain = search_args.args[5][0]
     assert ("user_id", "=", 42) in domain
     assert any(triple[0] == "name" and triple[1] == "=" for triple in domain)
-    # Generate: called as the authenticated user with the password.
-    assert gen_args.args[0] == "deltix"
-    assert gen_args.args[1] == 42  # uid
-    assert gen_args.args[2] == "the-real-password"
-    assert gen_args.args[3] == "res.users.apikeys"
-    assert gen_args.args[4] == "_generate"
-    assert gen_args.args[5][0] == "rpc"
-    # Name includes instance + hostname.
-    assert "prod" in gen_args.args[5][1]
-    assert " on " in gen_args.args[5][1]
+    # Create: the description wizard record carries the desired name.
+    assert create_args.args[3] == "res.users.apikeys.description"
+    assert create_args.args[4] == "create"
+    desc_payload = create_args.args[5][0]
+    assert isinstance(desc_payload, dict)
+    assert "prod" in desc_payload["name"]
+    assert " on " in desc_payload["name"]  # hostname suffix
+    # make_key: called as the authenticated user with the password on the
+    # description record we just created. The non-underscore method name
+    # is the whole point — Odoo blocks RPC calls to _generate.
+    assert make_args.args[0] == "deltix"
+    assert make_args.args[1] == 42  # uid
+    assert make_args.args[2] == "the-real-password"
+    assert make_args.args[3] == "res.users.apikeys.description"
+    assert make_args.args[4] == "make_key"
+    assert make_args.args[5] == [[99]]
 
     out = capsys.readouterr().out
     assert "New API key stored" in out
@@ -141,8 +154,14 @@ def test_renew_key_cleans_up_stale_keys(
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
     common = _mock_common(authenticate_return=42)
     obj = MagicMock()
-    # search → returns 3 stale ids, unlink → True, _generate → new key.
-    obj.execute_kw.side_effect = [[10, 11, 12], True, "fresh-key"]
+    # search → 3 stale ids, unlink → True, description create → 77,
+    # make_key → action dict carrying the new key.
+    obj.execute_kw.side_effect = [
+        [10, 11, 12],
+        True,
+        77,
+        {"type": "ir.actions.act_window", "context": {"default_key": "fresh-key"}},
+    ]
 
     def fake_proxy(url: str, **_kw: object) -> MagicMock:
         return common if "/common" in url else obj
@@ -150,13 +169,18 @@ def test_renew_key_cleans_up_stale_keys(
     monkeypatch.setattr(xmlrpc.client, "ServerProxy", fake_proxy)
     rc = setup_wizard._cmd_renew_key("prod")
     assert rc == 0
-    assert obj.execute_kw.call_count == 3
+    assert obj.execute_kw.call_count == 4
 
-    # Unlink called with the ids the search returned.
-    _search, unlink, _gen = obj.execute_kw.call_args_list
+    # Unlink called with the ids the search returned; create + make_key
+    # follow on the description wizard.
+    _search, unlink, create, make = obj.execute_kw.call_args_list
     assert unlink.args[3] == "res.users.apikeys"
     assert unlink.args[4] == "unlink"
     assert unlink.args[5] == [[10, 11, 12]]
+    assert create.args[3] == "res.users.apikeys.description"
+    assert create.args[4] == "create"
+    assert make.args[3] == "res.users.apikeys.description"
+    assert make.args[4] == "make_key"
 
     out = capsys.readouterr().out
     assert "Removed 3 stale API key(s)" in out
@@ -176,10 +200,12 @@ def test_renew_key_cleanup_failure_is_best_effort(
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
     common = _mock_common(authenticate_return=42)
     obj = MagicMock()
-    # Search faults; _generate still produces a key.
+    # Search faults; the description wizard still runs and make_key
+    # returns the new key in the action context.
     obj.execute_kw.side_effect = [
         xmlrpc.client.Fault(1, "Access denied to apikeys"),
-        "still-got-fresh-key",
+        55,
+        {"type": "ir.actions.act_window", "context": {"default_key": "still-got-fresh-key"}},
     ]
 
     def fake_proxy(url: str, **_kw: object) -> MagicMock:
@@ -302,7 +328,14 @@ def test_renew_key_generate_fault(
 ) -> None:
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
     common = _mock_common(authenticate_return=7)
-    obj = _mock_object(generate_return=xmlrpc.client.Fault(2, "duration required"))
+    obj = MagicMock()
+    # Cleanup search OK (no stale), then the description create faults —
+    # exercise the user-readable fault formatter on make_key's side of
+    # the wizard call.
+    obj.execute_kw.side_effect = [
+        [],
+        xmlrpc.client.Fault(2, "Access denied to res.users.apikeys.description"),
+    ]
 
     def fake_proxy(url: str, **_kw: object) -> MagicMock:
         return common if "/common" in url else obj
@@ -324,7 +357,13 @@ def test_renew_key_main_dispatch(
     """`odoo-mcp renew-key INSTANCE` reaches the right handler."""
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
     common = _mock_common(authenticate_return=7)
-    obj = _mock_object(generate_return="new-key")
+    obj = MagicMock()
+    # Same three-call shape as the happy path: search, create, make_key.
+    obj.execute_kw.side_effect = [
+        [],
+        11,
+        {"type": "ir.actions.act_window", "context": {"default_key": "new-key"}},
+    ]
 
     def fake_proxy(url: str, **_kw: object) -> MagicMock:
         return common if "/common" in url else obj

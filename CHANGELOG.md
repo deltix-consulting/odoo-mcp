@@ -10,6 +10,48 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.17.6] - 2026-05-20
+
+### Fixed
+
+- **Password-based API-key generation now actually works against
+  stock Odoo, including Odoo Online.** v0.16.4 through v0.17.5
+  attempted ``res.users.apikeys._generate`` directly over XML-RPC.
+  Odoo's RPC dispatcher unconditionally rejects any method whose
+  name starts with ``_`` ("Private methods … cannot be called
+  remotely"), so this path was broken on every stock Odoo from day
+  one — it only ever succeeded on instances with a custom addon
+  exposing the method. Real-world breakage:
+
+  ```
+  Choice [2]: 2
+  Odoo password (will not echo, not stored):
+  Odoo refused to generate a new key: Private methods (such as
+    'res.users.apikeys._generate') cannot be called remotely.
+  ```
+
+  Both ``setup --add`` (option 2) and ``renew-key`` now drive
+  Odoo's own user-facing wizard instead — the same path the
+  Account-Security UI takes:
+
+  1. ``create`` a ``res.users.apikeys.description`` record with the
+     desired name (transient model, auto-GC'd by Odoo's vacuum).
+  2. Call ``make_key()`` on it (no leading underscore → RPC-callable).
+  3. Extract the new key from the returned action's
+     ``context.default_key``.
+
+  Three failure modes get explicit, actionable error messages:
+  ``Private methods…`` (stale client → upgrade), ``@check_identity``
+  rejection on Odoo ≥17 (manual creation required), and any other
+  fault (manual creation + paste). New tests pin:
+
+  - that no underscore-prefixed method is ever sent over RPC,
+  - that each of the three fault paths produces the right message,
+  - that all three known ``make_key`` return shapes (act_window with
+    ``default_key``, with ``default_key_value``, and the legacy raw
+    string) are decoded — and that an unrecognised shape raises
+    rather than writing rubbish to the OS keychain.
+
 ## [0.17.5] - 2026-05-20
 
 ### Fixed

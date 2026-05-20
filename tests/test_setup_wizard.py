@@ -895,8 +895,14 @@ def test_generate_api_key_via_password_happy_path(
     common = MagicMock()
     common.authenticate.return_value = 5
     obj = MagicMock()
-    # Cleanup search returns no stale keys; _generate returns the new key.
-    obj.execute_kw.side_effect = [[], "fresh-generated-key"]
+    # Cleanup search returns no stale keys; description wizard create
+    # returns the transient id; make_key returns the action carrying
+    # the new key in context.default_key.
+    obj.execute_kw.side_effect = [
+        [],
+        7,
+        {"type": "ir.actions.act_window", "context": {"default_key": "fresh-generated-key"}},
+    ]
 
     def fake_proxy(url: str, **_kw: object) -> MagicMock:
         return common if "/common" in url else obj
@@ -919,8 +925,14 @@ def test_generate_api_key_via_password_unlinks_stale_keys(
     common = MagicMock()
     common.authenticate.return_value = 5
     obj = MagicMock()
-    # search → 2 stale ids, unlink → True, _generate → new key.
-    obj.execute_kw.side_effect = [[101, 102], True, "fresh-key"]
+    # search → 2 stale ids, unlink → True, description create → 7,
+    # make_key → action with the new key.
+    obj.execute_kw.side_effect = [
+        [101, 102],
+        True,
+        7,
+        {"type": "ir.actions.act_window", "context": {"default_key": "fresh-key"}},
+    ]
     monkeypatch.setattr(
         xmlrpc.client, "ServerProxy", lambda url, **_kw: common if "/common" in url else obj
     )
@@ -941,6 +953,128 @@ def test_mcp_key_name_includes_hostname() -> None:
     assert name.startswith("odoo-mcp (prod) on ")
     # Whatever the host name is, the suffix is non-empty.
     assert name.split(" on ", 1)[1].strip()
+
+
+# ---------------------------------------------------------------------------
+# `make_key` wizard plumbing — these are the actual reason we exist now that
+# the legacy `_generate` path is gone. Each test pins one shape so a
+# refactor can't quietly regress to "Private methods cannot be called
+# remotely" theatre.
+# ---------------------------------------------------------------------------
+
+
+def test_format_keygen_fault_private_method_points_at_update() -> None:
+    """The old-client diagnostic: if Odoo says "private methods", tell the
+    user to upgrade rather than dump the raw error."""
+    msg = setup_wizard._format_keygen_fault(
+        "Private methods (such as 'res.users.apikeys._generate') cannot be called remotely."
+    )
+    assert "Upgrade" in msg or "upgrade" in msg
+    assert "odoo-mcp update" in msg
+
+
+def test_format_keygen_fault_check_identity_explains_manual_path() -> None:
+    """Odoo 17+'s @check_identity rejection must surface the manual path,
+    because there's no way to satisfy the in-session check over XML-RPC."""
+    msg = setup_wizard._format_keygen_fault(
+        "You cannot leave any password empty. Please re-enter your password to confirm your identity."
+    )
+    assert "identity" in msg.lower() or "re-enter" in msg.lower()
+    assert "Account Security" in msg
+    assert "option 1" in msg
+
+
+def test_format_keygen_fault_generic_points_at_manual_path() -> None:
+    """Any other Odoo fault still gets the manual-creation instructions —
+    the user always has a way forward, even when we don't recognise the error."""
+    msg = setup_wizard._format_keygen_fault("Something went sideways in Odoo.")
+    assert "Something went sideways" in msg
+    assert "Account Security" in msg
+    assert "option 1" in msg
+
+
+def test_extract_key_from_make_key_action_default_key() -> None:
+    """The canonical Odoo 17+ shape: act_window with context.default_key."""
+    action = {
+        "type": "ir.actions.act_window",
+        "context": {"default_key": "abcdef0123456789"},
+    }
+    assert setup_wizard._extract_key_from_make_key_result(action) == "abcdef0123456789"
+
+
+def test_extract_key_from_make_key_action_default_key_value() -> None:
+    """Some Odoo forks use ``default_key_value``; accept that variant too."""
+    action = {"context": {"default_key_value": "forked-key"}}
+    assert setup_wizard._extract_key_from_make_key_result(action) == "forked-key"
+
+
+def test_extract_key_from_make_key_raw_string() -> None:
+    """Very old Odoo versions returned the raw string. Accept it."""
+    assert setup_wizard._extract_key_from_make_key_result("legacy-raw-key") == "legacy-raw-key"
+
+
+def test_extract_key_from_make_key_unrecognised_shape_returns_none() -> None:
+    """Anything we don't recognise → None so the caller raises the
+    "create manually" error instead of writing rubbish to the keychain."""
+    assert setup_wizard._extract_key_from_make_key_result({"foo": "bar"}) is None
+    assert setup_wizard._extract_key_from_make_key_result(None) is None
+    assert setup_wizard._extract_key_from_make_key_result(42) is None
+    assert setup_wizard._extract_key_from_make_key_result({"context": {}}) is None
+
+
+def test_generate_api_key_via_password_uses_make_key_not_underscore_generate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hard guarantee: the new flow never calls a method that starts with
+    an underscore over RPC. Pinning this catches a future refactor that
+    "helpfully" reintroduces the direct ``_generate`` call — which Odoo
+    blocks unconditionally, the failure that motivated this change."""
+    import xmlrpc.client
+    from unittest.mock import MagicMock
+
+    common = MagicMock()
+    common.authenticate.return_value = 5
+    obj = MagicMock()
+    obj.execute_kw.side_effect = [
+        [],
+        9,
+        {"context": {"default_key": "k"}},
+    ]
+    monkeypatch.setattr(
+        xmlrpc.client, "ServerProxy", lambda url, **_kw: common if "/common" in url else obj
+    )
+
+    setup_wizard._generate_api_key_via_password("https://x.odoo.com", "db", "u@x.com", "pw", "name")
+
+    for call in obj.execute_kw.call_args_list:
+        method = call.args[4]
+        assert not method.startswith("_"), (
+            f"Refused to send underscore-prefixed method {method!r} over RPC — "
+            f"Odoo blocks these unconditionally."
+        )
+
+
+def test_generate_api_key_via_password_unrecognised_make_key_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If make_key returns something we can't decode, raise — never silently
+    pass a non-key value through to the caller (who would write it to the
+    OS keychain as if it were a real key)."""
+    import xmlrpc.client
+    from unittest.mock import MagicMock
+
+    common = MagicMock()
+    common.authenticate.return_value = 5
+    obj = MagicMock()
+    obj.execute_kw.side_effect = [[], 9, {"unexpected": "shape"}]
+    monkeypatch.setattr(
+        xmlrpc.client, "ServerProxy", lambda url, **_kw: common if "/common" in url else obj
+    )
+
+    with pytest.raises(setup_wizard._KeyGenError, match="expected shape"):
+        setup_wizard._generate_api_key_via_password(
+            "https://x.odoo.com", "db", "u@x.com", "pw", "name"
+        )
 
 
 def test_generate_api_key_via_password_wrong_password(
