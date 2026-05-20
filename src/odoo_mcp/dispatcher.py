@@ -159,9 +159,14 @@ class OdooMcpApp:
             raise InstanceNotFoundError("Instance name must be a non-empty string.")
         inst = self.instances.get(name)
         if inst is None:
+            # Message is factual — it lists configured instances so a
+            # human-with-typo can self-correct from the audit log /
+            # client UI. The "do not substitute" behavioural directive
+            # lives in the error's ``hint``, which the dispatcher
+            # surfaces separately to the AI. See InstanceNotFoundError.
             raise InstanceNotFoundError(
-                f"Instance {name!r} is not configured. "
-                f"Known instances: {sorted(self.instances.keys())}"
+                f"Instance {name!r} is not configured on this MCP install. "
+                f"Configured instances: {sorted(self.instances.keys())}."
             )
         return inst
 

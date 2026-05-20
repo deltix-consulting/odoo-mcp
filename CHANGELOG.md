@@ -10,6 +10,43 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-05-16
+
+### Security
+
+- **`InstanceNotFoundError` now actively discourages the AI from
+  substituting a different instance.** Real-world failure mode that
+  triggered this: a user asked Claude to "search in the Odoo demo
+  environment". The MCP install had only ``prod`` configured. The AI
+  saw the previous error ("Known instances: ['prod']") and
+  "helpfully" picked ``prod`` on its own — reading production data
+  the user had explicitly NOT asked for. On a write path the same
+  pattern would have triggered a prod-write preview against the
+  wrong dataset; on a read path it's a data-exposure incident.
+
+  The hint returned alongside the error now reads (verbatim):
+
+  > STOP — do not silently retry this call against a different
+  > instance. The user named an instance that does not exist on this
+  > machine; ask the user which instance they meant. Do NOT
+  > substitute another real instance (especially production) based on
+  > similarity or guess.
+
+  The factual message still lists configured instances so a human
+  with a typo can self-correct from the audit log or client UI.
+  The behavioural directive lives in the hint, which the dispatcher
+  surfaces separately on every error response.
+
+  Four new tests pin the hint phrasing (``STOP``, "do not retry",
+  "substitute", "ask the user", "production"), the end-to-end shape
+  of a read call against an unknown instance, the write path
+  (refused at instance lookup, BEFORE any prod-guard logic, with the
+  hint visible), and the empty-instance-name path.
+
+  No code-path change beyond the error message — the dispatcher
+  refused unknown instances before and still does. The change is in
+  what we tell the AI to do with that refusal.
+
 ## [0.17.2] - 2026-05-16
 
 ### Changed

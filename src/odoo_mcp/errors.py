@@ -154,7 +154,21 @@ class InstanceNotFoundError(OdooMcpError):
 
     @property
     def hint(self) -> str:
-        return "Use odoo_list_instances to see configured instances."
+        # Deliberate behavioural instruction: the user explicitly named an
+        # instance that does not exist here, which is a real ambiguity. An
+        # AI that "helpfully" re-issues the call against a different real
+        # instance (e.g. falling back to prod when the user asked for
+        # demo) can read sensitive data or — on an unlocked instance —
+        # trigger a dry-run preview against the wrong dataset. Tell the
+        # AI to surface the ambiguity back to the user rather than
+        # substitute.
+        return (
+            "STOP — do not silently retry this call against a different "
+            "instance. The user named an instance that does not exist on "
+            "this machine; ask the user which instance they meant. Do "
+            "NOT substitute another real instance (especially production) "
+            "based on similarity or guess."
+        )
 
 
 class ModelNotAllowedError(OdooMcpError):
