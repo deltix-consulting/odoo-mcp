@@ -10,6 +10,30 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_run_document_action` tool schema can no longer drift from
+  the security map.** The tool description, the `model` argument
+  description, and the `action` enum in `tools.py` were three
+  hardcoded strings repeating the contents of `_DOCUMENT_ACTIONS` in
+  `security/document_actions.py`. Adding a new `(model, action)` row
+  to the security map silently left those three places stale until
+  someone noticed — so the AI saw an out-of-date list while the
+  resolver enforced the real one. The schema now derives from the map
+  via the existing `DOCUMENT_ACTION_VERBS` plus two new helpers
+  (`DOCUMENT_ACTION_MODELS`, `pairs_summary()`). A new regression test
+  asserts the tool schema and description stay synchronized with the
+  map. As a side effect the action list within each pair is now
+  alphabetical (`cancel|confirm`) rather than insertion-order
+  (`confirm|cancel`) — deterministic across Python versions.
+
+  Found by the daily competitive audit (`audit/2026-05-20`): a
+  competitor (parth-unjiya/odoo-mcp-gateway) ships a workflow-action
+  *explorer* tool, which is the wrong fix for deltix (the existing
+  hardcoded allowlist + dry-run already cover discovery for an
+  AI-callable surface), but reading the comparison surfaced this
+  drift bug in our own schema-generation path.
+
 ## [0.17.5] - 2026-05-20
 
 ### Fixed

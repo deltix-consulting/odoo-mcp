@@ -43,10 +43,32 @@ DOCUMENT_ACTION_VERBS: Final[tuple[str, ...]] = tuple(
     sorted({action for (_model, action) in _DOCUMENT_ACTIONS})
 )
 
+# Distinct models. Same drift-elimination as :data:`DOCUMENT_ACTION_VERBS`:
+# the tool schema enumerates these for the ``model`` argument and must not
+# diverge from the map.
+DOCUMENT_ACTION_MODELS: Final[tuple[str, ...]] = tuple(
+    sorted({model for (model, _action) in _DOCUMENT_ACTIONS})
+)
+
 
 def supported_pairs() -> list[str]:
     """Return ``model:action`` strings for every mapped pair, sorted."""
     return sorted(f"{model}:{action}" for (model, action) in _DOCUMENT_ACTIONS)
+
+
+def pairs_summary() -> str:
+    """Return a one-line summary grouped by model, e.g.
+
+    ``"purchase.order confirm|cancel, sale.order confirm|cancel, ..."``
+
+    Used in the ``odoo_run_document_action`` tool description so the
+    AI-visible list always matches the map.
+    """
+    by_model: dict[str, list[str]] = {}
+    for model, action in _DOCUMENT_ACTIONS:
+        by_model.setdefault(model, []).append(action)
+    parts = [f"{model} {'|'.join(sorted(actions))}" for model, actions in sorted(by_model.items())]
+    return ", ".join(parts)
 
 
 def resolve_document_action(model: str, action: str) -> str:
