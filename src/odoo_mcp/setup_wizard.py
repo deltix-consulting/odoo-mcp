@@ -397,24 +397,50 @@ class _KeyGenError(Exception):
     """Raised by :func:`_generate_api_key_via_password` with a user-readable message."""
 
 
+def _mcp_key_name(instance_name: str) -> str:
+    """Stable, per-install API-key name.
+
+    Includes the OS hostname so each user-on-machine has its own slot
+    in Odoo's ``res.users.apikeys`` table. Two effects:
+
+    - Renewals on this machine find and clean up only this machine's
+      previous key; renewals on another machine never touch it.
+    - When the user opens Odoo profile → Account Security, they can
+      see which key belongs to which laptop at a glance.
+
+    Falls back to ``"unknown-host"`` when ``platform.node()`` returns
+    something empty / weird, so the name is always well-formed.
+    """
+    host = (platform.node() or "").strip() or "unknown-host"
+    return f"odoo-mcp ({instance_name}) on {host}"
+
+
 def _generate_api_key_via_password(
     url: str,
     database: str,
     username: str,
     password: str,
     key_name: str,
-) -> str:
-    """Authenticate with a password and generate a fresh Odoo API key.
+) -> tuple[str, int]:
+    """Authenticate with a password, clean up stale keys, generate a fresh one.
 
     The single shared implementation behind both ``odoo-mcp renew-key``
     and the setup wizard's "generate the key for me" path. The password
-    is used for exactly two XML-RPC calls (authenticate + _generate) and
-    is never returned, logged, or stored — the caller is responsible for
-    dropping its own reference afterwards.
+    is used for exactly two XML-RPC calls (authenticate + _generate)
+    plus an optional cleanup call, and is never returned, logged, or
+    stored — the caller is responsible for dropping its own reference
+    afterwards.
 
-    Returns the new API key string. Raises :class:`_KeyGenError` with a
-    readable message on any failure (wrong password, 2FA, network, Odoo
-    refusing the generate call, unexpected response shape).
+    Cleanup step: before generating, searches the authenticated user's
+    own keys for any row whose ``name`` equals ``key_name`` and
+    unlinks them. This is best-effort — a failure here logs a warning
+    and lets the renewal continue. Without it, daily renewal would
+    accumulate one stale (expired-but-still-listed) key per day in
+    the user's Odoo profile.
+
+    Returns ``(new_key, num_cleaned_up)``. Raises :class:`_KeyGenError`
+    with a readable message on any HARD failure (wrong password, 2FA,
+    network, Odoo refusing the generate call, unexpected response).
     """
     import ssl
     import xmlrpc.client
@@ -437,6 +463,47 @@ def _generate_api_key_via_password(
         raise _KeyGenError("Authentication returned no uid. Check the username and database name.")
 
     models = xmlrpc.client.ServerProxy(f"{base}/xmlrpc/2/object", context=ctx, allow_none=True)
+
+    # --- Cleanup (best-effort) -------------------------------------------
+    # Find this user's own existing keys with the exact same name and
+    # unlink them. ``user_id`` filter is defence in depth — Odoo's ACL
+    # on res.users.apikeys should restrict users to their own rows
+    # anyway, but pinning it makes the intent explicit and survives
+    # a future ACL regression.
+    num_cleaned = 0
+    try:
+        existing_ids = models.execute_kw(
+            database,
+            uid,
+            password,
+            "res.users.apikeys",
+            "search",
+            [[("name", "=", key_name), ("user_id", "=", uid)]],
+            {},
+        )
+        if isinstance(existing_ids, list) and existing_ids:
+            models.execute_kw(
+                database,
+                uid,
+                password,
+                "res.users.apikeys",
+                "unlink",
+                [existing_ids],
+                {},
+            )
+            num_cleaned = len(existing_ids)
+    except (xmlrpc.client.Fault, OSError, ssl.SSLError, TimeoutError) as exc:
+        logger.warning(
+            "Could not clean up old API keys for %r on %r before renewal: "
+            "%s: %s. The new key will still be generated; old keys remain "
+            "in your Odoo profile until you delete them manually.",
+            username,
+            base,
+            type(exc).__name__,
+            exc,
+        )
+
+    # --- Generate the new key --------------------------------------------
     try:
         new_key = models.execute_kw(
             database,
@@ -458,7 +525,7 @@ def _generate_api_key_via_password(
 
     if not isinstance(new_key, str) or not new_key:
         raise _KeyGenError(f"Unexpected response from Odoo: {new_key!r}")
-    return new_key
+    return new_key, num_cleaned
 
 
 def _ask_api_key(url: str, database: str, username: str, instance_name: str) -> str:
@@ -493,8 +560,8 @@ def _ask_api_key(url: str, database: str, username: str, instance_name: str) -> 
             print("Password cannot be empty.")
             sys.exit(1)
         try:
-            key = _generate_api_key_via_password(
-                url, database, username, password, f"odoo-mcp ({instance_name})"
+            key, num_cleaned = _generate_api_key_via_password(
+                url, database, username, password, _mcp_key_name(instance_name)
             )
         except _KeyGenError as exc:
             print(f"  {exc}")
@@ -506,6 +573,8 @@ def _ask_api_key(url: str, database: str, username: str, instance_name: str) -> 
             return api_key
     finally:
         password = ""  # noqa: F841 — deliberate disposal
+    if num_cleaned:
+        print(f"  ✓ Removed {num_cleaned} stale API key(s) on this machine.")
     print("  ✓ API key generated and will be stored in the OS credential store.")
     return key
 
@@ -1200,8 +1269,8 @@ def _cmd_renew_key(name: str) -> int:
             print("Password cannot be empty. Aborted.")
             return 1
         try:
-            new_key = _generate_api_key_via_password(
-                url, database, username, password, f"odoo-mcp ({name})"
+            new_key, num_cleaned = _generate_api_key_via_password(
+                url, database, username, password, _mcp_key_name(name)
             )
         except _KeyGenError as exc:
             print(f"  {exc}")
@@ -1214,6 +1283,8 @@ def _cmd_renew_key(name: str) -> int:
 
     _keychain_set(name, api_key_service, new_key)
     print()
+    if num_cleaned:
+        print(f"  ✓ Removed {num_cleaned} stale API key(s) on this machine.")
     print(f"  ✓ New API key stored in keychain for instance '{name}'.")
     print("  Existing Claude Desktop / Codex sessions will pick it up after restart.")
     print()

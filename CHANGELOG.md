@@ -10,6 +10,52 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-05-16
+
+### Changed
+
+- **`renew-key` (and the setup wizard's "generate key for me" path)
+  now cleans up the previous key before generating a new one.**
+  Without this, daily renewal on Odoo Online (1-day expiry policy)
+  accumulated one stale-but-expired API-key row per day in the user's
+  Odoo profile. After a year: 365 dead rows.
+
+  The fix:
+
+  - Stable per-install key name: `odoo-mcp (<instance>) on <hostname>`.
+    Visible in Odoo profile → Account Security so the user knows which
+    key belongs to which laptop.
+  - Before generating a new key, search the user's own
+    `res.users.apikeys` for rows with that exact name and `unlink` them.
+  - Generate the new key (same name).
+  - Result: at most **one** MCP key per (user, instance, machine) in
+    Odoo at any time.
+
+  Cleanup is **best-effort**: an XML-RPC fault or network error during
+  the cleanup logs a warning and lets the renewal continue. A user who
+  cannot delete their own apikey rows (custom ACL) still gets the new
+  key; old rows accumulate as before until the ACL is fixed.
+
+  Cleanup on **other machines** is never touched — the hostname suffix
+  scopes the deletion to this install only. Manually-created keys with
+  different names are also untouched.
+
+  Onboarding implication: on first install nothing changes (search
+  returns 0 rows). On existing installs the FIRST renewal after this
+  release may unlink the prior `odoo-mcp (<instance>)`-named row only
+  if it happens to match the new format on this exact hostname; older
+  rows from before this release will be silently kept. Operators who
+  want a clean slate can delete them once via the Account Security UI.
+
+### Internal
+
+- `_generate_api_key_via_password()` now returns
+  `tuple[str, int]` — `(new_key, num_cleaned_up)`. Both callers
+  (`renew-key` CLI and `setup` wizard option 2) surface the cleanup
+  count when non-zero.
+- New `_mcp_key_name(instance)` helper centralises the
+  `odoo-mcp (<instance>) on <hostname>` convention.
+
 ## [0.17.1] - 2026-05-16
 
 ### Changed

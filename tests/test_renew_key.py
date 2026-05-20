@@ -86,7 +86,10 @@ def test_renew_key_happy_path(
 ) -> None:
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "the-real-password")
     common = _mock_common(authenticate_return=42)
-    obj = _mock_object(generate_return="brand-new-fresh-key")
+    obj = MagicMock()
+    # First-time renewal flow: cleanup search returns no stale keys,
+    # then _generate returns the new key.
+    obj.execute_kw.side_effect = [[], "brand-new-fresh-key"]
 
     def fake_proxy(url: str, **_kw: object) -> MagicMock:
         if "/common" in url:
@@ -104,19 +107,112 @@ def test_renew_key_happy_path(
     common.authenticate.assert_called_once_with(
         "deltix", "timon@deltix.pro", "the-real-password", {}
     )
-    # Generate called as the authenticated user, using the password.
-    obj.execute_kw.assert_called_once()
-    args = obj.execute_kw.call_args.args
-    assert args[0] == "deltix"
-    assert args[1] == 42  # uid
-    assert args[2] == "the-real-password"
-    assert args[3] == "res.users.apikeys"
-    assert args[4] == "_generate"
-    assert args[5][0] == "rpc"
-    assert "prod" in args[5][1]  # name includes instance
+    # Two execute_kw calls: search (cleanup), then _generate.
+    assert obj.execute_kw.call_count == 2
+    search_args, gen_args = obj.execute_kw.call_args_list
+    # Search: filtered by name + user_id, on the user's own apikeys.
+    assert search_args.args[3] == "res.users.apikeys"
+    assert search_args.args[4] == "search"
+    domain = search_args.args[5][0]
+    assert ("user_id", "=", 42) in domain
+    assert any(triple[0] == "name" and triple[1] == "=" for triple in domain)
+    # Generate: called as the authenticated user with the password.
+    assert gen_args.args[0] == "deltix"
+    assert gen_args.args[1] == 42  # uid
+    assert gen_args.args[2] == "the-real-password"
+    assert gen_args.args[3] == "res.users.apikeys"
+    assert gen_args.args[4] == "_generate"
+    assert gen_args.args[5][0] == "rpc"
+    # Name includes instance + hostname.
+    assert "prod" in gen_args.args[5][1]
+    assert " on " in gen_args.args[5][1]
 
     out = capsys.readouterr().out
     assert "New API key stored" in out
+
+
+def test_renew_key_cleans_up_stale_keys(
+    fake_config: Path,
+    fake_keychain: dict[tuple[str, str], str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When previous renewals left stale rows, they get unlinked before generation."""
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
+    common = _mock_common(authenticate_return=42)
+    obj = MagicMock()
+    # search → returns 3 stale ids, unlink → True, _generate → new key.
+    obj.execute_kw.side_effect = [[10, 11, 12], True, "fresh-key"]
+
+    def fake_proxy(url: str, **_kw: object) -> MagicMock:
+        return common if "/common" in url else obj
+
+    monkeypatch.setattr(xmlrpc.client, "ServerProxy", fake_proxy)
+    rc = setup_wizard._cmd_renew_key("prod")
+    assert rc == 0
+    assert obj.execute_kw.call_count == 3
+
+    # Unlink called with the ids the search returned.
+    _search, unlink, _gen = obj.execute_kw.call_args_list
+    assert unlink.args[3] == "res.users.apikeys"
+    assert unlink.args[4] == "unlink"
+    assert unlink.args[5] == [[10, 11, 12]]
+
+    out = capsys.readouterr().out
+    assert "Removed 3 stale API key(s)" in out
+    assert "New API key stored" in out
+
+
+def test_renew_key_cleanup_failure_is_best_effort(
+    fake_config: Path,
+    fake_keychain: dict[tuple[str, str], str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """If the cleanup search faults, the renewal still succeeds with a warning."""
+    import io
+    import logging
+
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
+    common = _mock_common(authenticate_return=42)
+    obj = MagicMock()
+    # Search faults; _generate still produces a key.
+    obj.execute_kw.side_effect = [
+        xmlrpc.client.Fault(1, "Access denied to apikeys"),
+        "still-got-fresh-key",
+    ]
+
+    def fake_proxy(url: str, **_kw: object) -> MagicMock:
+        return common if "/common" in url else obj
+
+    monkeypatch.setattr(xmlrpc.client, "ServerProxy", fake_proxy)
+
+    # Attach our own handler AND pin the logger level — caplog is flaky
+    # across the full suite because other tests reconfigure module-level
+    # logging (e.g. test_logging.py raises the level to ERROR, which
+    # suppresses our warning at the logger before it ever reaches the
+    # handler). Reading from a stream we own AND restoring the prior
+    # level avoids both failure modes.
+    target_logger = logging.getLogger("odoo_mcp.setup_wizard")
+    captured = io.StringIO()
+    handler = logging.StreamHandler(captured)
+    handler.setLevel(logging.WARNING)
+    prior_level = target_logger.level
+    target_logger.setLevel(logging.WARNING)
+    target_logger.addHandler(handler)
+    try:
+        rc = setup_wizard._cmd_renew_key("prod")
+    finally:
+        target_logger.removeHandler(handler)
+        target_logger.setLevel(prior_level)
+
+    assert rc == 0
+    assert fake_keychain[("prod", "ODOO_MCP_PROD_API_KEY")] == "still-got-fresh-key"
+    assert "clean up old API keys" in captured.getvalue()
+    out = capsys.readouterr().out
+    assert "New API key stored" in out
+    # No "Removed N" line — cleanup didn't actually delete anything.
+    assert "Removed" not in out
 
 
 def test_renew_key_unknown_instance(

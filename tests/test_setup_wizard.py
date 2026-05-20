@@ -860,7 +860,7 @@ def test_ask_api_key_generate_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         setup_wizard,
         "_generate_api_key_via_password",
-        lambda url, db, user, pw, name: "generated-key",
+        lambda url, db, user, pw, name: ("generated-key", 0),
     )
     key = setup_wizard._ask_api_key("https://x.odoo.com", "db", "u@x.com", "prod")
     assert key == "generated-key"
@@ -895,16 +895,52 @@ def test_generate_api_key_via_password_happy_path(
     common = MagicMock()
     common.authenticate.return_value = 5
     obj = MagicMock()
-    obj.execute_kw.return_value = "fresh-generated-key"
+    # Cleanup search returns no stale keys; _generate returns the new key.
+    obj.execute_kw.side_effect = [[], "fresh-generated-key"]
 
     def fake_proxy(url: str, **_kw: object) -> MagicMock:
         return common if "/common" in url else obj
 
     monkeypatch.setattr(xmlrpc.client, "ServerProxy", fake_proxy)
-    key = setup_wizard._generate_api_key_via_password(
+    key, num_cleaned = setup_wizard._generate_api_key_via_password(
         "https://x.odoo.com", "db", "u@x.com", "pw", "odoo-mcp (prod)"
     )
     assert key == "fresh-generated-key"
+    assert num_cleaned == 0
+
+
+def test_generate_api_key_via_password_unlinks_stale_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Search returns stale ids → unlink call fires → num_cleaned reflects it."""
+    import xmlrpc.client
+    from unittest.mock import MagicMock
+
+    common = MagicMock()
+    common.authenticate.return_value = 5
+    obj = MagicMock()
+    # search → 2 stale ids, unlink → True, _generate → new key.
+    obj.execute_kw.side_effect = [[101, 102], True, "fresh-key"]
+    monkeypatch.setattr(
+        xmlrpc.client, "ServerProxy", lambda url, **_kw: common if "/common" in url else obj
+    )
+
+    key, num_cleaned = setup_wizard._generate_api_key_via_password(
+        "https://x.odoo.com", "db", "u@x.com", "pw", "odoo-mcp (prod) on host"
+    )
+    assert key == "fresh-key"
+    assert num_cleaned == 2
+    # unlink was indeed the second call, with the ids the search returned.
+    unlink_call = obj.execute_kw.call_args_list[1]
+    assert unlink_call.args[4] == "unlink"
+    assert unlink_call.args[5] == [[101, 102]]
+
+
+def test_mcp_key_name_includes_hostname() -> None:
+    name = setup_wizard._mcp_key_name("prod")
+    assert name.startswith("odoo-mcp (prod) on ")
+    # Whatever the host name is, the suffix is non-empty.
+    assert name.split(" on ", 1)[1].strip()
 
 
 def test_generate_api_key_via_password_wrong_password(
