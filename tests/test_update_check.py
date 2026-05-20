@@ -160,7 +160,10 @@ def test_read_changelog_security_reads_file(tmp_path: Path):
 
 
 def test_check_for_update_network_down():
-    with patch("odoo_mcp.update_check.urllib.request.urlopen") as m:
+    with (
+        patch("odoo_mcp.update_check.shutil.which", return_value=None),
+        patch("odoo_mcp.update_check.urllib.request.urlopen") as m,
+    ):
         m.side_effect = urllib.error.URLError("offline")
         assert check_for_update("0.1.0") is None
 
@@ -176,7 +179,10 @@ def test_check_for_update_reports_newer():
         def read(self):
             return b'{"tag_name": "v0.2.0"}'
 
-    with patch("odoo_mcp.update_check.urllib.request.urlopen", return_value=_Resp()):
+    with (
+        patch("odoo_mcp.update_check.shutil.which", return_value=None),
+        patch("odoo_mcp.update_check.urllib.request.urlopen", return_value=_Resp()),
+    ):
         result = check_for_update("0.1.0")
     assert result == ("0.1.0", "0.2.0")
 
@@ -192,8 +198,64 @@ def test_check_for_update_already_current():
         def read(self):
             return b'{"tag_name": "0.1.0"}'
 
-    with patch("odoo_mcp.update_check.urllib.request.urlopen", return_value=_Resp()):
+    with (
+        patch("odoo_mcp.update_check.shutil.which", return_value=None),
+        patch("odoo_mcp.update_check.urllib.request.urlopen", return_value=_Resp()),
+    ):
         assert check_for_update("0.1.0") is None
+
+
+# ---------------------------------------------------------------------------
+# gh CLI path is preferred over anonymous urllib
+# ---------------------------------------------------------------------------
+
+
+def test_check_for_update_uses_gh_when_available():
+    """When `gh` is on PATH and returns a tag, urllib must not be called.
+
+    This is the whole point of the gh-first path: avoid the unauth GitHub
+    rate limit that turned attestation verification into "press y" theater.
+    """
+
+    class _Result:
+        returncode = 0
+        stdout = "v0.2.0\n"
+
+    with (
+        patch("odoo_mcp.update_check.shutil.which", return_value="/usr/bin/gh"),
+        patch("odoo_mcp.update_check.subprocess.run", return_value=_Result()) as gh,
+        patch("odoo_mcp.update_check.urllib.request.urlopen") as urlopen,
+    ):
+        result = check_for_update("0.1.0")
+    assert result == ("0.1.0", "0.2.0")
+    assert gh.called
+    assert not urlopen.called
+
+
+def test_check_for_update_falls_back_when_gh_fails():
+    """If gh is on PATH but returns non-zero, fall back to urllib."""
+
+    class _Result:
+        returncode = 1
+        stdout = ""
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return b'{"tag_name": "v0.2.0"}'
+
+    with (
+        patch("odoo_mcp.update_check.shutil.which", return_value="/usr/bin/gh"),
+        patch("odoo_mcp.update_check.subprocess.run", return_value=_Result()),
+        patch("odoo_mcp.update_check.urllib.request.urlopen", return_value=_Resp()),
+    ):
+        result = check_for_update("0.1.0")
+    assert result == ("0.1.0", "0.2.0")
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +264,10 @@ def test_check_for_update_already_current():
 
 
 def test_doctor_update_check_network_error_is_silent(capsys: pytest.CaptureFixture[str]):
-    with patch("odoo_mcp.update_check.urllib.request.urlopen") as m:
+    with (
+        patch("odoo_mcp.update_check.shutil.which", return_value=None),
+        patch("odoo_mcp.update_check.urllib.request.urlopen") as m,
+    ):
         m.side_effect = urllib.error.URLError("offline")
         doctor._print_update_check()
     out = capsys.readouterr().out
@@ -222,7 +287,10 @@ def test_doctor_update_check_reports_available(capsys: pytest.CaptureFixture[str
         def read(self):
             return b'{"tag_name": "v99.0.0"}'
 
-    with patch("odoo_mcp.update_check.urllib.request.urlopen", return_value=_Resp()):
+    with (
+        patch("odoo_mcp.update_check.shutil.which", return_value=None),
+        patch("odoo_mcp.update_check.urllib.request.urlopen", return_value=_Resp()),
+    ):
         doctor._print_update_check()
     out = capsys.readouterr().out
     assert "Update available: 99.0.0" in out

@@ -10,6 +10,34 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.17.4] - 2026-05-20
+
+### Security
+
+- **`odoo-mcp update` now uses the authenticated `gh` CLI to fetch the
+  latest release tag, falling back to anonymous `urllib` only when
+  `gh` is unavailable.** Before this change, every update attempt hit
+  GitHub's unauthenticated API rate limit (60 requests/hour shared per
+  IP — trivially exhausted behind a corporate NAT, by an over-eager
+  update loop, or just bad luck). When the rate-limit hit, the updater
+  printed:
+
+  > Warning: could not determine latest release tag (GitHub API
+  > unreachable). Attestation not verified. Proceed without
+  > verification? [y/N]:
+
+  Every user we observed pressed `y`. That turned the Sigstore-backed
+  build-provenance attestation check — the whole point of the verified
+  update path — into security theater. The installer already requires
+  `gh auth login`, so the authenticated path (5000 req/hour) is the
+  realistic case; users without `gh` keep the historical fallback and
+  are no worse off than before.
+
+  Two new tests pin the behaviour: `gh` is preferred when present, and
+  a non-zero `gh` exit falls back to `urllib`. Existing urllib-mocked
+  tests were updated to also stub `shutil.which` so they exercise the
+  intended fallback path.
+
 ## [0.17.3] - 2026-05-16
 
 ### Security

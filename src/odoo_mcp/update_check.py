@@ -7,6 +7,8 @@ version-parsing / GitHub-latest-release logic without importing each other.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import urllib.error
 import urllib.request
 from typing import TYPE_CHECKING
@@ -14,7 +16,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pathlib import Path
 
-_LATEST_RELEASE_URL = "https://api.github.com/repos/deltix-consulting/odoo-mcp/releases/latest"
+_REPO_SLUG = "deltix-consulting/odoo-mcp"
+_LATEST_RELEASE_URL = f"https://api.github.com/repos/{_REPO_SLUG}/releases/latest"
 _HTTP_TIMEOUT_SECONDS = 5.0
 
 
@@ -60,7 +63,56 @@ def _is_newer(current: tuple[int, ...], candidate: tuple[int, ...]) -> bool:
 
 
 def fetch_latest_tag(url: str = _LATEST_RELEASE_URL) -> str | None:
-    """Fetch the latest release tag from GitHub. Returns None on any failure."""
+    """Fetch the latest release tag from GitHub. Returns None on any failure.
+
+    Tries authenticated ``gh`` CLI first (5000/hour rate limit), falls
+    back to anonymous ``urllib`` (60/hour shared per IP — easy to hit
+    from a corporate NAT, an over-eager update loop, or just bad luck).
+    The fallback path is identical to the historical behaviour, so
+    users without ``gh`` are no worse off than before — but the
+    realistic case (the installer required ``gh auth login``) avoids
+    the rate-limit cliff that turned the install-verify prompt into
+    a "press y to ignore" reflex.
+    """
+    tag = _fetch_latest_tag_via_gh()
+    if tag is not None:
+        return tag
+    return _fetch_latest_tag_via_urllib(url)
+
+
+def _fetch_latest_tag_via_gh() -> str | None:
+    """Use the authenticated ``gh`` CLI. Returns None if gh isn't usable."""
+    gh_path = shutil.which("gh")
+    if gh_path is None:
+        return None
+    try:
+        result = subprocess.run(  # noqa: S603 — gh resolved via shutil.which
+            [
+                gh_path,
+                "release",
+                "view",
+                "--repo",
+                _REPO_SLUG,
+                "--json",
+                "tagName",
+                "--jq",
+                ".tagName",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_HTTP_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    tag = result.stdout.strip()
+    return tag or None
+
+
+def _fetch_latest_tag_via_urllib(url: str) -> str | None:
+    """Anonymous fallback. Hits the unauth GitHub API rate limit easily."""
     try:
         req = urllib.request.Request(  # noqa: S310 — https URL is hard-coded
             url,
