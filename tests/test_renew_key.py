@@ -2,19 +2,77 @@
 
 The command is the daily-renewal flow for Odoo Online where non-admin
 API keys expire after 1 day. It authenticates with the user's password
-once, generates a fresh key, stores it, and discards the password.
-These tests mock the XML-RPC layer so they run offline.
+once via Odoo's web JSON-RPC endpoint (the XML-RPC layer can't satisfy
+the ``@check_identity`` decorator on ``make_key``), creates a fresh
+key, stores it, and discards the password. These tests mock the
+HTTP/JSON-RPC layer via a fake opener so they run offline.
 """
 
 from __future__ import annotations
 
-import xmlrpc.client
+import json
+import urllib.request
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from odoo_mcp import setup_wizard
+
+
+class _FakeResponse:
+    """Minimal context-manager response object that ``urllib.urlopen`` returns."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *_: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._payload
+
+
+def _install_fake_opener(
+    monkeypatch: pytest.MonkeyPatch, *responses: Any
+) -> list[urllib.request.Request]:
+    """Replace ``urllib.request.build_opener`` so opener.open returns the
+    queued *responses* in order. Each response is either a dict
+    (serialised as JSON for the body) or an ``Exception`` (raised when
+    that call fires). Returns the list that captures every Request the
+    code under test sends — used for ordering / payload assertions.
+    """
+    queue = list(responses)
+    captured: list[urllib.request.Request] = []
+
+    def fake_open(req: urllib.request.Request, timeout: float | None = None) -> _FakeResponse:
+        captured.append(req)
+        if not queue:
+            raise AssertionError(
+                f"Unexpected extra HTTP call to {req.full_url} — "
+                f"queue exhausted after {len(captured)} call(s)."
+            )
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return _FakeResponse(json.dumps(item).encode("utf-8"))
+
+    opener = MagicMock()
+    opener.open.side_effect = fake_open
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **_kw: opener)
+    return captured
+
+
+def _request_body(req: urllib.request.Request) -> dict[str, Any]:
+    """Decode a captured Request's JSON-RPC body."""
+    data = req.data
+    assert isinstance(data, (bytes, bytearray)), f"unexpected body type: {type(data)!r}"
+    return json.loads(data.decode("utf-8"))
+
 
 _CONFIG_BODY = """\
 [defaults]
@@ -60,24 +118,6 @@ def fake_keychain(monkeypatch: pytest.MonkeyPatch) -> dict[tuple[str, str], str]
     return store
 
 
-def _mock_common(authenticate_return: object) -> MagicMock:
-    common = MagicMock()
-    if isinstance(authenticate_return, Exception):
-        common.authenticate.side_effect = authenticate_return
-    else:
-        common.authenticate.return_value = authenticate_return
-    return common
-
-
-def _mock_object(generate_return: object) -> MagicMock:
-    obj = MagicMock()
-    if isinstance(generate_return, Exception):
-        obj.execute_kw.side_effect = generate_return
-    else:
-        obj.execute_kw.return_value = generate_return
-    return obj
-
-
 def test_renew_key_happy_path(
     fake_config: Path,
     fake_keychain: dict[tuple[str, str], str],
@@ -85,60 +125,63 @@ def test_renew_key_happy_path(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "the-real-password")
-    common = _mock_common(authenticate_return=42)
-    obj = MagicMock()
-    # First-time renewal flow: cleanup search returns no stale keys,
-    # the description wizard is created (id 99), and make_key returns
-    # an action dict whose context.default_key holds the new key —
-    # this is the shape Odoo 17+ returns from the Account-Security
-    # "New API Key" wizard.
-    make_key_action = {
-        "type": "ir.actions.act_window",
-        "context": {"default_key": "brand-new-fresh-key"},
-    }
-    obj.execute_kw.side_effect = [[], 99, make_key_action]
+    # First-time renewal: authenticate succeeds (uid 42), cleanup search
+    # finds nothing, description record is created (id 99), and make_key
+    # returns the Odoo 17+ action shape carrying the key in context.
+    captured = _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "result": {"uid": 42, "session_id": "sess"}},  # authenticate
+        {"jsonrpc": "2.0", "result": []},  # search (no stale)
+        {"jsonrpc": "2.0", "result": 99},  # description create
+        {
+            "jsonrpc": "2.0",
+            "result": {
+                "type": "ir.actions.act_window",
+                "context": {"default_key": "brand-new-fresh-key"},
+            },
+        },  # make_key
+    )
 
-    def fake_proxy(url: str, **_kw: object) -> MagicMock:
-        if "/common" in url:
-            return common
-        return obj
-
-    monkeypatch.setattr(xmlrpc.client, "ServerProxy", fake_proxy)
     rc = setup_wizard._cmd_renew_key("prod")
     assert rc == 0
-
-    # New key written to keychain.
     assert fake_keychain[("prod", "ODOO_MCP_PROD_API_KEY")] == "brand-new-fresh-key"
+    assert len(captured) == 4
 
-    # Authenticate called with the right args.
-    common.authenticate.assert_called_once_with(
-        "deltix", "timon@deltix.pro", "the-real-password", {}
-    )
-    # Three execute_kw calls: search (cleanup), description create, make_key.
-    assert obj.execute_kw.call_count == 3
-    search_args, create_args, make_args = obj.execute_kw.call_args_list
-    # Search: filtered by name + user_id, on the user's own apikeys.
-    assert search_args.args[3] == "res.users.apikeys"
-    assert search_args.args[4] == "search"
-    domain = search_args.args[5][0]
-    assert ("user_id", "=", 42) in domain
+    # 1) authenticate hits the web JSON-RPC endpoint with db + login + password.
+    auth_req = captured[0]
+    assert auth_req.full_url.endswith("/web/session/authenticate")
+    auth_body = _request_body(auth_req)
+    assert auth_body["params"]["db"] == "deltix"
+    assert auth_body["params"]["login"] == "timon@deltix.pro"
+    assert auth_body["params"]["password"] == "the-real-password"
+
+    # 2) search filters by name AND user_id — the latter is defence in depth
+    #    so even if Odoo's ACL on res.users.apikeys regresses, we still
+    #    only target the authenticated user's own rows.
+    search_req = captured[1]
+    assert search_req.full_url.endswith("/web/dataset/call_kw")
+    search_body = _request_body(search_req)["params"]
+    assert search_body["model"] == "res.users.apikeys"
+    assert search_body["method"] == "search"
+    domain = search_body["args"][0]
+    assert ["user_id", "=", 42] in domain
     assert any(triple[0] == "name" and triple[1] == "=" for triple in domain)
-    # Create: the description wizard record carries the desired name.
-    assert create_args.args[3] == "res.users.apikeys.description"
-    assert create_args.args[4] == "create"
-    desc_payload = create_args.args[5][0]
-    assert isinstance(desc_payload, dict)
+
+    # 3) create on the description wizard with the desired name.
+    create_body = _request_body(captured[2])["params"]
+    assert create_body["model"] == "res.users.apikeys.description"
+    assert create_body["method"] == "create"
+    desc_payload = create_body["args"][0]
     assert "prod" in desc_payload["name"]
-    assert " on " in desc_payload["name"]  # hostname suffix
-    # make_key: called as the authenticated user with the password on the
-    # description record we just created. The non-underscore method name
-    # is the whole point — Odoo blocks RPC calls to _generate.
-    assert make_args.args[0] == "deltix"
-    assert make_args.args[1] == 42  # uid
-    assert make_args.args[2] == "the-real-password"
-    assert make_args.args[3] == "res.users.apikeys.description"
-    assert make_args.args[4] == "make_key"
-    assert make_args.args[5] == [[99]]
+    assert " on " in desc_payload["name"]  # hostname suffix in _mcp_key_name
+
+    # 4) make_key on the description record — the whole point of the rewrite
+    #    is that this method requires an HTTP session (Odoo 17+
+    #    @check_identity), which we now provide.
+    make_body = _request_body(captured[3])["params"]
+    assert make_body["model"] == "res.users.apikeys.description"
+    assert make_body["method"] == "make_key"
+    assert make_body["args"] == [[99]]
 
     out = capsys.readouterr().out
     assert "New API key stored" in out
@@ -152,35 +195,31 @@ def test_renew_key_cleans_up_stale_keys(
 ) -> None:
     """When previous renewals left stale rows, they get unlinked before generation."""
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
-    common = _mock_common(authenticate_return=42)
-    obj = MagicMock()
-    # search → 3 stale ids, unlink → True, description create → 77,
-    # make_key → action dict carrying the new key.
-    obj.execute_kw.side_effect = [
-        [10, 11, 12],
-        True,
-        77,
-        {"type": "ir.actions.act_window", "context": {"default_key": "fresh-key"}},
-    ]
-
-    def fake_proxy(url: str, **_kw: object) -> MagicMock:
-        return common if "/common" in url else obj
-
-    monkeypatch.setattr(xmlrpc.client, "ServerProxy", fake_proxy)
+    captured = _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "result": {"uid": 42}},  # authenticate
+        {"jsonrpc": "2.0", "result": [10, 11, 12]},  # search → stale ids
+        {"jsonrpc": "2.0", "result": True},  # unlink
+        {"jsonrpc": "2.0", "result": 77},  # description create
+        {
+            "jsonrpc": "2.0",
+            "result": {"type": "ir.actions.act_window", "context": {"default_key": "fresh-key"}},
+        },
+    )
     rc = setup_wizard._cmd_renew_key("prod")
     assert rc == 0
-    assert obj.execute_kw.call_count == 4
+    assert len(captured) == 5
 
-    # Unlink called with the ids the search returned; create + make_key
-    # follow on the description wizard.
-    _search, unlink, create, make = obj.execute_kw.call_args_list
-    assert unlink.args[3] == "res.users.apikeys"
-    assert unlink.args[4] == "unlink"
-    assert unlink.args[5] == [[10, 11, 12]]
-    assert create.args[3] == "res.users.apikeys.description"
-    assert create.args[4] == "create"
-    assert make.args[3] == "res.users.apikeys.description"
-    assert make.args[4] == "make_key"
+    # Sequence: authenticate, search, unlink, create, make_key.
+    auth, search, unlink, create, make = captured
+    assert auth.full_url.endswith("/web/session/authenticate")
+    unlink_body = _request_body(unlink)["params"]
+    assert unlink_body["model"] == "res.users.apikeys"
+    assert unlink_body["method"] == "unlink"
+    assert unlink_body["args"] == [[10, 11, 12]]
+    assert _request_body(search)["params"]["method"] == "search"
+    assert _request_body(create)["params"]["method"] == "create"
+    assert _request_body(make)["params"]["method"] == "make_key"
 
     out = capsys.readouterr().out
     assert "Removed 3 stale API key(s)" in out
@@ -198,27 +237,23 @@ def test_renew_key_cleanup_failure_is_best_effort(
     import logging
 
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
-    common = _mock_common(authenticate_return=42)
-    obj = MagicMock()
-    # Search faults; the description wizard still runs and make_key
-    # returns the new key in the action context.
-    obj.execute_kw.side_effect = [
-        xmlrpc.client.Fault(1, "Access denied to apikeys"),
-        55,
-        {"type": "ir.actions.act_window", "context": {"default_key": "still-got-fresh-key"}},
-    ]
+    # Search returns an Odoo application error (not an HTTP error). The
+    # cleanup path catches it and logs a warning; the description wizard
+    # then still runs and make_key succeeds.
+    _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "result": {"uid": 42}},
+        {"jsonrpc": "2.0", "error": {"data": {"message": "Access denied to apikeys"}}},
+        {"jsonrpc": "2.0", "result": 55},
+        {
+            "jsonrpc": "2.0",
+            "result": {
+                "type": "ir.actions.act_window",
+                "context": {"default_key": "still-got-fresh-key"},
+            },
+        },
+    )
 
-    def fake_proxy(url: str, **_kw: object) -> MagicMock:
-        return common if "/common" in url else obj
-
-    monkeypatch.setattr(xmlrpc.client, "ServerProxy", fake_proxy)
-
-    # Attach our own handler AND pin the logger level — caplog is flaky
-    # across the full suite because other tests reconfigure module-level
-    # logging (e.g. test_logging.py raises the level to ERROR, which
-    # suppresses our warning at the logger before it ever reaches the
-    # handler). Reading from a stream we own AND restoring the prior
-    # level avoids both failure modes.
     target_logger = logging.getLogger("odoo_mcp.setup_wizard")
     captured = io.StringIO()
     handler = logging.StreamHandler(captured)
@@ -237,7 +272,6 @@ def test_renew_key_cleanup_failure_is_best_effort(
     assert "clean up old API keys" in captured.getvalue()
     out = capsys.readouterr().out
     assert "New API key stored" in out
-    # No "Removed N" line — cleanup didn't actually delete anything.
     assert "Removed" not in out
 
 
@@ -275,11 +309,9 @@ def test_renew_key_wrong_password(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "wrong")
-    common = _mock_common(authenticate_return=xmlrpc.client.Fault(1, "Access denied"))
-    monkeypatch.setattr(
-        xmlrpc.client,
-        "ServerProxy",
-        lambda url, **_kw: common,
+    _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "error": {"data": {"message": "Access denied"}}},
     )
     rc = setup_wizard._cmd_renew_key("prod")
     assert rc == 1
@@ -295,12 +327,13 @@ def test_renew_key_zero_uid(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """Odoo returns ``{"uid": false}`` on a silent auth failure (e.g. wrong
+    db). Treat that the same as a hard rejection — no uid means no
+    further calls are safe."""
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
-    common = _mock_common(authenticate_return=False)
-    monkeypatch.setattr(
-        xmlrpc.client,
-        "ServerProxy",
-        lambda url, **_kw: common,
+    _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "result": {"uid": False}},
     )
     rc = setup_wizard._cmd_renew_key("prod")
     assert rc == 1
@@ -327,25 +360,52 @@ def test_renew_key_generate_fault(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
-    common = _mock_common(authenticate_return=7)
-    obj = MagicMock()
     # Cleanup search OK (no stale), then the description create faults —
-    # exercise the user-readable fault formatter on make_key's side of
-    # the wizard call.
-    obj.execute_kw.side_effect = [
-        [],
-        xmlrpc.client.Fault(2, "Access denied to res.users.apikeys.description"),
-    ]
-
-    def fake_proxy(url: str, **_kw: object) -> MagicMock:
-        return common if "/common" in url else obj
-
-    monkeypatch.setattr(xmlrpc.client, "ServerProxy", fake_proxy)
+    # exercises the user-readable fault formatter on the wizard side.
+    _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "result": {"uid": 7}},
+        {"jsonrpc": "2.0", "result": []},
+        {
+            "jsonrpc": "2.0",
+            "error": {"data": {"message": "Access denied to res.users.apikeys.description"}},
+        },
+    )
     rc = setup_wizard._cmd_renew_key("prod")
     assert rc == 1
     out = capsys.readouterr().out
     assert "refused to generate" in out
     assert fake_keychain[("prod", "ODOO_MCP_PROD_API_KEY")] == "old-expired-key"
+
+
+def test_renew_key_http_only_fault_surfaces_helpful_message(
+    fake_config: Path,
+    fake_keychain: dict[tuple[str, str], str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The exact failure Timon hit on Odoo Online v0.17.6 before this
+    rewrite: ``@check_identity`` rejects because no HTTP context. If
+    that somehow surfaces again (proxy stripping cookies, mid-session
+    expiry, etc.), the user must see actionable instructions — not a
+    raw stack trace."""
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
+    _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "result": {"uid": 7}},
+        {"jsonrpc": "2.0", "result": []},
+        {"jsonrpc": "2.0", "result": 1},
+        {
+            "jsonrpc": "2.0",
+            "error": {"data": {"message": "Deze methode is alleen toegankelijk via HTTP"}},
+        },
+    )
+    rc = setup_wizard._cmd_renew_key("prod")
+    assert rc == 1
+    out = capsys.readouterr().out
+    # The formatter must mention what to do, not just dump the raw error.
+    assert "Account Security" in out
+    assert "option 1" in out
 
 
 def test_renew_key_main_dispatch(
@@ -356,19 +416,16 @@ def test_renew_key_main_dispatch(
 ) -> None:
     """`odoo-mcp renew-key INSTANCE` reaches the right handler."""
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
-    common = _mock_common(authenticate_return=7)
-    obj = MagicMock()
-    # Same three-call shape as the happy path: search, create, make_key.
-    obj.execute_kw.side_effect = [
-        [],
-        11,
-        {"type": "ir.actions.act_window", "context": {"default_key": "new-key"}},
-    ]
-
-    def fake_proxy(url: str, **_kw: object) -> MagicMock:
-        return common if "/common" in url else obj
-
-    monkeypatch.setattr(xmlrpc.client, "ServerProxy", fake_proxy)
+    _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "result": {"uid": 7}},
+        {"jsonrpc": "2.0", "result": []},
+        {"jsonrpc": "2.0", "result": 11},
+        {
+            "jsonrpc": "2.0",
+            "result": {"type": "ir.actions.act_window", "context": {"default_key": "new-key"}},
+        },
+    )
 
     from odoo_mcp.__main__ import main
 

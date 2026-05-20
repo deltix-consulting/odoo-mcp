@@ -10,6 +10,46 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.17.7] - 2026-05-20
+
+### Fixed
+
+- **Password-based API-key generation now actually works against
+  Odoo Online and any Odoo ≥17.** v0.17.6 switched from
+  ``_generate`` to the public ``make_key`` wizard, but Odoo ≥17
+  decorates ``make_key`` with ``@check_identity`` from
+  ``auth_totp``. That decorator demands a real HTTP ``request``
+  object — XML-RPC has none — so the call still failed with:
+
+  ```
+  Odoo refused to generate a new key: Deze methode is alleen
+    toegankelijk via HTTP
+  ```
+
+  (English: ``This method can only be accessed over HTTP``.) The
+  fix abandons XML-RPC entirely for this command and drives Odoo's
+  **web JSON-RPC** layer instead, exactly as a browser does:
+
+  1. ``POST /web/session/authenticate`` — establishes the session
+     cookie AND stamps ``identity-check-last``, satisfying
+     ``@check_identity`` for the next ~10 minutes.
+  2. ``POST /web/dataset/call_kw`` — drives search + unlink for
+     cleanup, then creates the description wizard record, then
+     calls ``make_key`` on it. All four calls share the same
+     cookie jar so the session is consistent.
+  3. Extract the new key from the returned action's
+     ``context.default_key`` (unchanged from v0.17.6).
+
+  Side benefits: no SSL/XML-RPC dual-proxy setup, simpler error
+  shape (everything is JSON), and the auth-failure path now
+  surfaces the actual Odoo error message rather than an XML-RPC
+  fault code.
+
+  The HTTP-only error path also gets its own actionable formatter
+  in case it surfaces again behind a cookie-stripping proxy or
+  expired session — three new tests pin the messages so a future
+  refactor can't quietly regress them.
+
 ## [0.17.6] - 2026-05-20
 
 ### Fixed

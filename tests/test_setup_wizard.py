@@ -886,28 +886,61 @@ def test_ask_api_key_generate_falls_back_to_manual(
     assert "Falling back to manual entry" in out
 
 
+def _install_fake_opener(monkeypatch: pytest.MonkeyPatch, *responses: Any) -> list[Any]:
+    """Local mirror of the helper in test_renew_key — fake out
+    ``urllib.request.build_opener`` so opener.open returns the queued
+    JSON-RPC responses in order. See test_renew_key for full notes.
+    """
+    import json
+    import urllib.request
+    from unittest.mock import MagicMock
+
+    queue = list(responses)
+    captured: list[Any] = []
+
+    class _FakeResponse:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_):  # type: ignore[no-untyped-def]
+            return False
+
+        def read(self) -> bytes:
+            return self._body
+
+    def fake_open(req: Any, timeout: float | None = None) -> _FakeResponse:
+        captured.append(req)
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return _FakeResponse(json.dumps(item).encode("utf-8"))
+
+    opener = MagicMock()
+    opener.open.side_effect = fake_open
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **_kw: opener)
+    return captured
+
+
 def test_generate_api_key_via_password_happy_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import xmlrpc.client
-    from unittest.mock import MagicMock
-
-    common = MagicMock()
-    common.authenticate.return_value = 5
-    obj = MagicMock()
-    # Cleanup search returns no stale keys; description wizard create
-    # returns the transient id; make_key returns the action carrying
-    # the new key in context.default_key.
-    obj.execute_kw.side_effect = [
-        [],
-        7,
-        {"type": "ir.actions.act_window", "context": {"default_key": "fresh-generated-key"}},
-    ]
-
-    def fake_proxy(url: str, **_kw: object) -> MagicMock:
-        return common if "/common" in url else obj
-
-    monkeypatch.setattr(xmlrpc.client, "ServerProxy", fake_proxy)
+    # Authenticate, cleanup search (no stale), description create, make_key.
+    _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "result": {"uid": 5}},
+        {"jsonrpc": "2.0", "result": []},
+        {"jsonrpc": "2.0", "result": 7},
+        {
+            "jsonrpc": "2.0",
+            "result": {
+                "type": "ir.actions.act_window",
+                "context": {"default_key": "fresh-generated-key"},
+            },
+        },
+    )
     key, num_cleaned = setup_wizard._generate_api_key_via_password(
         "https://x.odoo.com", "db", "u@x.com", "pw", "odoo-mcp (prod)"
     )
@@ -919,33 +952,29 @@ def test_generate_api_key_via_password_unlinks_stale_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Search returns stale ids → unlink call fires → num_cleaned reflects it."""
-    import xmlrpc.client
-    from unittest.mock import MagicMock
+    import json
 
-    common = MagicMock()
-    common.authenticate.return_value = 5
-    obj = MagicMock()
-    # search → 2 stale ids, unlink → True, description create → 7,
-    # make_key → action with the new key.
-    obj.execute_kw.side_effect = [
-        [101, 102],
-        True,
-        7,
-        {"type": "ir.actions.act_window", "context": {"default_key": "fresh-key"}},
-    ]
-    monkeypatch.setattr(
-        xmlrpc.client, "ServerProxy", lambda url, **_kw: common if "/common" in url else obj
+    captured = _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "result": {"uid": 5}},
+        {"jsonrpc": "2.0", "result": [101, 102]},
+        {"jsonrpc": "2.0", "result": True},  # unlink
+        {"jsonrpc": "2.0", "result": 7},
+        {
+            "jsonrpc": "2.0",
+            "result": {"type": "ir.actions.act_window", "context": {"default_key": "fresh-key"}},
+        },
     )
-
     key, num_cleaned = setup_wizard._generate_api_key_via_password(
         "https://x.odoo.com", "db", "u@x.com", "pw", "odoo-mcp (prod) on host"
     )
     assert key == "fresh-key"
     assert num_cleaned == 2
-    # unlink was indeed the second call, with the ids the search returned.
-    unlink_call = obj.execute_kw.call_args_list[1]
-    assert unlink_call.args[4] == "unlink"
-    assert unlink_call.args[5] == [[101, 102]]
+    # Third call (index 2) is the unlink — verify it targets the right ids.
+    unlink_body = json.loads(captured[2].data.decode("utf-8"))["params"]
+    assert unlink_body["model"] == "res.users.apikeys"
+    assert unlink_body["method"] == "unlink"
+    assert unlink_body["args"] == [[101, 102]]
 
 
 def test_mcp_key_name_includes_hostname() -> None:
@@ -973,15 +1002,33 @@ def test_format_keygen_fault_private_method_points_at_update() -> None:
     assert "odoo-mcp update" in msg
 
 
-def test_format_keygen_fault_check_identity_explains_manual_path() -> None:
-    """Odoo 17+'s @check_identity rejection must surface the manual path,
-    because there's no way to satisfy the in-session check over XML-RPC."""
+def test_format_keygen_fault_check_identity_explains_rerun() -> None:
+    """A stale identity stamp on Odoo ≥17 should hint that re-running
+    works (the timestamp gets refreshed within ~10 minutes of
+    authenticate) and fall back to manual creation if it still fails."""
     msg = setup_wizard._format_keygen_fault(
-        "You cannot leave any password empty. Please re-enter your password to confirm your identity."
+        "Please re-enter your password to confirm your identity."
     )
     assert "identity" in msg.lower() or "re-enter" in msg.lower()
-    assert "Account Security" in msg
-    assert "option 1" in msg
+    assert "rerun" in msg.lower() or "Account Security" in msg
+
+
+def test_format_keygen_fault_http_only_gives_actionable_message() -> None:
+    """The exact NL error Timon hit on Odoo Online before the web-JSON-RPC
+    rewrite: ``Deze methode is alleen toegankelijk via HTTP``. Should
+    point at upgrading or manual creation — not just dump the raw text."""
+    msg = setup_wizard._format_keygen_fault("Deze methode is alleen toegankelijk via HTTP")
+    assert "HTTP session" in msg or "HTTP" in msg
+    assert "Account Security" in msg or "odoo-mcp update" in msg
+    assert "option 1" in msg or "manually" in msg.lower()
+
+
+def test_format_keygen_fault_http_only_english_variant() -> None:
+    """English wording of the same error path — pin it explicitly so a
+    locale change in Odoo doesn't slip past the detector."""
+    msg = setup_wizard._format_keygen_fault("This method can only be accessed over HTTP")
+    assert "HTTP" in msg
+    assert "Account Security" in msg or "odoo-mcp update" in msg
 
 
 def test_format_keygen_fault_generic_points_at_manual_path() -> None:
@@ -1025,29 +1072,28 @@ def test_extract_key_from_make_key_unrecognised_shape_returns_none() -> None:
 def test_generate_api_key_via_password_uses_make_key_not_underscore_generate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hard guarantee: the new flow never calls a method that starts with
-    an underscore over RPC. Pinning this catches a future refactor that
-    "helpfully" reintroduces the direct ``_generate`` call — which Odoo
-    blocks unconditionally, the failure that motivated this change."""
-    import xmlrpc.client
-    from unittest.mock import MagicMock
+    """Hard guarantee: the flow never calls a method that starts with an
+    underscore. Pinning this catches a future refactor that "helpfully"
+    reintroduces the direct ``_generate`` call — which Odoo blocks
+    unconditionally, the failure that motivated this whole rewrite."""
+    import json
 
-    common = MagicMock()
-    common.authenticate.return_value = 5
-    obj = MagicMock()
-    obj.execute_kw.side_effect = [
-        [],
-        9,
-        {"context": {"default_key": "k"}},
-    ]
-    monkeypatch.setattr(
-        xmlrpc.client, "ServerProxy", lambda url, **_kw: common if "/common" in url else obj
+    captured = _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "result": {"uid": 5}},
+        {"jsonrpc": "2.0", "result": []},
+        {"jsonrpc": "2.0", "result": 9},
+        {"jsonrpc": "2.0", "result": {"context": {"default_key": "k"}}},
     )
 
     setup_wizard._generate_api_key_via_password("https://x.odoo.com", "db", "u@x.com", "pw", "name")
 
-    for call in obj.execute_kw.call_args_list:
-        method = call.args[4]
+    # Inspect every captured call_kw payload (skip the authenticate one,
+    # which has no ``method`` field — its endpoint is the auth route).
+    for req in captured:
+        if not req.full_url.endswith("/web/dataset/call_kw"):
+            continue
+        method = json.loads(req.data.decode("utf-8"))["params"]["method"]
         assert not method.startswith("_"), (
             f"Refused to send underscore-prefixed method {method!r} over RPC — "
             f"Odoo blocks these unconditionally."
@@ -1060,17 +1106,13 @@ def test_generate_api_key_via_password_unrecognised_make_key_shape(
     """If make_key returns something we can't decode, raise — never silently
     pass a non-key value through to the caller (who would write it to the
     OS keychain as if it were a real key)."""
-    import xmlrpc.client
-    from unittest.mock import MagicMock
-
-    common = MagicMock()
-    common.authenticate.return_value = 5
-    obj = MagicMock()
-    obj.execute_kw.side_effect = [[], 9, {"unexpected": "shape"}]
-    monkeypatch.setattr(
-        xmlrpc.client, "ServerProxy", lambda url, **_kw: common if "/common" in url else obj
+    _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "result": {"uid": 5}},
+        {"jsonrpc": "2.0", "result": []},
+        {"jsonrpc": "2.0", "result": 9},
+        {"jsonrpc": "2.0", "result": {"unexpected": "shape"}},
     )
-
     with pytest.raises(setup_wizard._KeyGenError, match="expected shape"):
         setup_wizard._generate_api_key_via_password(
             "https://x.odoo.com", "db", "u@x.com", "pw", "name"
@@ -1080,13 +1122,25 @@ def test_generate_api_key_via_password_unrecognised_make_key_shape(
 def test_generate_api_key_via_password_wrong_password(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import xmlrpc.client
-    from unittest.mock import MagicMock
-
-    common = MagicMock()
-    common.authenticate.side_effect = xmlrpc.client.Fault(1, "Access denied")
-    monkeypatch.setattr(xmlrpc.client, "ServerProxy", lambda url, **_kw: common)
+    """Auth-step JSON-RPC errors become a 'rejected the password' message
+    with a 2FA hint — this is the most common interactive failure."""
+    _install_fake_opener(
+        monkeypatch,
+        {"jsonrpc": "2.0", "error": {"data": {"message": "Access denied"}}},
+    )
     with pytest.raises(setup_wizard._KeyGenError, match="rejected the password"):
         setup_wizard._generate_api_key_via_password(
             "https://x.odoo.com", "db", "u@x.com", "wrong", "odoo-mcp (prod)"
+        )
+
+
+def test_generate_api_key_via_password_network_error_is_friendly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Connection failures become a single-line readable message; no Python
+    traceback leaks into the user's terminal."""
+    _install_fake_opener(monkeypatch, OSError("Connection refused"))
+    with pytest.raises(setup_wizard._KeyGenError, match="Could not reach Odoo"):
+        setup_wizard._generate_api_key_via_password(
+            "https://x.odoo.com", "db", "u@x.com", "pw", "name"
         )

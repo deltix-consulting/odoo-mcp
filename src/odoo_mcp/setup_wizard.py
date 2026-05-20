@@ -397,6 +397,22 @@ class _KeyGenError(Exception):
     """Raised by :func:`_generate_api_key_via_password` with a user-readable message."""
 
 
+class _JsonRpcError(Exception):
+    """Application-level error returned by Odoo's JSON-RPC dispatcher.
+
+    Wrapper around the ``error.data.message`` (or ``error.message``)
+    payload that Odoo returns inside an HTTP 200. We catch this at
+    strategic points: an auth-step error becomes "wrong password",
+    a make_key error becomes the make_key-specific actionable message.
+    Network / parse failures are surfaced as :class:`_KeyGenError`
+    directly by :func:`_jsonrpc`.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 def _mcp_key_name(instance_name: str) -> str:
     """Stable, per-install API-key name.
 
@@ -426,94 +442,138 @@ def _generate_api_key_via_password(
 
     The single shared implementation behind both ``odoo-mcp renew-key``
     and the setup wizard's "generate the key for me" path. The password
-    is used for exactly three XML-RPC calls (authenticate + create
-    description + make_key) plus an optional cleanup call, and is never
+    is used for exactly one authenticate call plus a handful of model
+    method calls inside the resulting cookie session, and is never
     returned, logged, or stored — the caller is responsible for
     dropping its own reference afterwards.
 
-    Generation strategy. Odoo's XML-RPC dispatcher blocks any method
-    whose name starts with ``_`` (raises
-    ``AccessError: "Private methods cannot be called remotely"``).
-    That means the direct call to ``res.users.apikeys._generate`` —
-    which earlier versions of this code attempted — was never going
-    to work against a stock Odoo, including Odoo Online. We instead
-    drive Odoo's own user-facing wizard:
+    Why this uses Odoo's web JSON-RPC and not XML-RPC. We have hit two
+    successive walls against XML-RPC, both unfixable from the client:
 
-    1. ``create`` a transient ``res.users.apikeys.description`` record
-       with the desired ``name``.
-    2. Call ``make_key()`` on it (no underscore → RPC-callable).
-    3. The wizard returns an ``ir.actions.act_window`` whose
-       ``context.default_key`` carries the freshly minted key string.
+    1. ``res.users.apikeys._generate`` is blocked because the dispatcher
+       rejects any method whose name starts with ``_``.
+    2. ``res.users.apikeys.description.make_key`` — the user-facing
+       wizard the Account-Security UI uses — is decorated with
+       ``@check_identity`` from ``auth_totp``, which requires a real
+       HTTP ``request`` object. Over XML-RPC the call raises
+       ``"This method can only be accessed over HTTP"`` (NL:
+       "Deze methode is alleen toegankelijk via HTTP").
 
-    On Odoo ≥17, ``make_key`` is decorated with ``@check_identity``,
-    which requires a recent in-session credential check. Over XML-RPC
-    there is no browser session, so the decorator raises. We catch
-    that path and surface a clear instruction to create the key
-    manually in the Odoo UI — there is no clean way to satisfy the
-    identity check from this script.
+    The fix is to do exactly what a browser does: authenticate against
+    ``/web/session/authenticate`` (which establishes a session cookie
+    AND stamps ``identity-check-last`` so subsequent ``@check_identity``
+    methods accept the call), then drive the wizard via
+    ``/web/dataset/call_kw``. Both endpoints are HTTP-routed, so
+    ``request`` is populated and the identity check passes for the
+    next ~10 minutes.
 
-    Cleanup step: before generating, searches the authenticated user's
-    own keys for any row whose ``name`` equals ``key_name`` and
-    unlinks them. This is best-effort — a failure here logs a warning
-    and lets the renewal continue. Without it, daily renewal would
-    accumulate one stale (expired-but-still-listed) key per day in
-    the user's Odoo profile.
+    Flow:
+
+    1. ``POST /web/session/authenticate`` with ``db / login / password``.
+       Captures the session cookie via :class:`http.cookiejar.CookieJar`.
+    2. ``POST /web/dataset/call_kw`` to search + unlink stale keys with
+       the same name (best-effort cleanup).
+    3. ``POST /web/dataset/call_kw`` to create a transient
+       ``res.users.apikeys.description`` record.
+    4. ``POST /web/dataset/call_kw`` to call ``make_key()`` on it.
+    5. Extract the new key from the returned action's
+       ``context.default_key``.
 
     Returns ``(new_key, num_cleaned_up)``. Raises :class:`_KeyGenError`
     with a readable message on any HARD failure (wrong password, 2FA,
     network, Odoo refusing the generate call, unexpected response).
     """
+    import http.cookiejar
+    import json
     import ssl
-    import xmlrpc.client
+    import urllib.error
+    import urllib.request
 
     base = url.rstrip("/")
-    ctx = ssl.create_default_context()
-    common = xmlrpc.client.ServerProxy(f"{base}/xmlrpc/2/common", context=ctx, allow_none=True)
+    ssl_ctx = ssl.create_default_context()
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(cookie_jar),
+        urllib.request.HTTPSHandler(context=ssl_ctx),
+    )
+
+    def _jsonrpc(path: str, params: dict[str, Any]) -> Any:
+        """POST a JSON-RPC call to *path*. Returns ``result``.
+
+        Raises :class:`_JsonRpcError` if Odoo returns an application
+        error (``error.data.message``). Raises :class:`_KeyGenError`
+        on network / parse problems — those are unrecoverable at this
+        layer and the caller's structured handling doesn't help.
+        """
+        body = json.dumps({"jsonrpc": "2.0", "method": "call", "params": params}).encode("utf-8")
+        req = urllib.request.Request(  # noqa: S310 — base URL comes from operator config
+            f"{base}{path}",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with opener.open(req, timeout=30) as resp:  # noqa: S310 — same; opener is ours
+                payload_bytes = resp.read()
+        except urllib.error.HTTPError as exc:
+            raise _KeyGenError(f"HTTP {exc.code} from Odoo: {exc.reason}") from exc
+        except (urllib.error.URLError, OSError, ssl.SSLError, TimeoutError) as exc:
+            raise _KeyGenError(f"Could not reach Odoo: {type(exc).__name__}: {exc}") from exc
+        try:
+            payload = json.loads(payload_bytes.decode("utf-8", errors="replace"))
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            raise _KeyGenError(f"Unparseable response from Odoo: {exc}") from exc
+        if isinstance(payload, dict) and "error" in payload:
+            err = payload["error"]
+            data = err.get("data") if isinstance(err, dict) else None
+            message = (
+                (data.get("message") if isinstance(data, dict) else None)
+                or (err.get("message") if isinstance(err, dict) else None)
+                or "unknown Odoo error"
+            )
+            raise _JsonRpcError(str(message))
+        return payload.get("result") if isinstance(payload, dict) else None
+
+    def _call_kw(model: str, method: str, args: list[Any]) -> Any:
+        return _jsonrpc(
+            "/web/dataset/call_kw",
+            {"model": model, "method": method, "args": args, "kwargs": {}},
+        )
+
+    # --- 1. Authenticate -------------------------------------------------
     try:
-        uid = common.authenticate(database, username, password, {})
-    except xmlrpc.client.Fault as exc:
+        auth_result = _jsonrpc(
+            "/web/session/authenticate",
+            {"db": database, "login": username, "password": password},
+        )
+    except _JsonRpcError as exc:
         raise _KeyGenError(
-            f"Odoo rejected the password: {exc.faultString}\n"
-            f"  Common causes: wrong password, or 2FA enabled (password auth "
-            f"is then blocked — create the key manually in your Odoo profile)."
+            f"Odoo rejected the password: {exc.message}\n"
+            "  Common causes: wrong password, or 2FA enabled (password auth "
+            "is then blocked — create the key manually in your Odoo profile)."
         ) from exc
-    except (OSError, ssl.SSLError, TimeoutError) as exc:
-        raise _KeyGenError(f"Could not reach Odoo: {type(exc).__name__}: {exc}") from exc
 
-    if not isinstance(uid, int) or not uid:
+    if not isinstance(auth_result, dict) or not auth_result.get("uid"):
+        # Odoo returns ``{"uid": False}`` on a silent auth failure (e.g.
+        # wrong db). Treat that the same as a hard rejection.
         raise _KeyGenError("Authentication returned no uid. Check the username and database name.")
+    uid = auth_result["uid"]
 
-    models = xmlrpc.client.ServerProxy(f"{base}/xmlrpc/2/object", context=ctx, allow_none=True)
-
-    # --- Cleanup (best-effort) -------------------------------------------
-    # Find this user's own existing keys with the exact same name and
-    # unlink them. ``user_id`` filter is defence in depth — Odoo's ACL
-    # on res.users.apikeys should restrict users to their own rows
-    # anyway, but pinning it makes the intent explicit and survives
-    # a future ACL regression.
+    # --- 2. Cleanup (best-effort) ---------------------------------------
+    # ``user_id`` filter is defence in depth — Odoo's ACL on
+    # res.users.apikeys should already restrict users to their own
+    # rows, but pinning it makes the intent explicit.
     num_cleaned = 0
     try:
-        existing_ids = models.execute_kw(
-            database,
-            uid,
-            password,
+        existing_ids = _call_kw(
             "res.users.apikeys",
             "search",
             [[("name", "=", key_name), ("user_id", "=", uid)]],
-            {},
         )
         if isinstance(existing_ids, list) and existing_ids:
-            models.execute_kw(
-                database,
-                uid,
-                password,
-                "res.users.apikeys",
-                "unlink",
-                [existing_ids],
-                {},
-            )
+            _call_kw("res.users.apikeys", "unlink", [existing_ids])
             num_cleaned = len(existing_ids)
-    except (xmlrpc.client.Fault, OSError, ssl.SSLError, TimeoutError) as exc:
+    except (_JsonRpcError, _KeyGenError) as exc:
         logger.warning(
             "Could not clean up old API keys for %r on %r before renewal: "
             "%s: %s. The new key will still be generated; old keys remain "
@@ -524,41 +584,25 @@ def _generate_api_key_via_password(
             exc,
         )
 
-    # --- Generate the new key via Odoo's own description wizard ----------
+    # --- 3. Create the description wizard record -------------------------
     # The wizard model is a TransientModel; orphan records are GC'd by
     # Odoo's regular vacuum, so we don't need to unlink on failure.
     try:
-        desc_id = models.execute_kw(
-            database,
-            uid,
-            password,
-            "res.users.apikeys.description",
-            "create",
-            [{"name": key_name}],
-            {},
-        )
-    except xmlrpc.client.Fault as exc:
-        raise _KeyGenError(_format_keygen_fault(exc.faultString)) from exc
-    except (OSError, ssl.SSLError, TimeoutError) as exc:
-        raise _KeyGenError(f"Could not generate key: {type(exc).__name__}: {exc}") from exc
+        desc_id = _call_kw("res.users.apikeys.description", "create", [{"name": key_name}])
+    except _JsonRpcError as exc:
+        raise _KeyGenError(_format_keygen_fault(exc.message)) from exc
 
     if not isinstance(desc_id, int) or desc_id <= 0:
         raise _KeyGenError(f"Unexpected response creating the API-key wizard record: {desc_id!r}")
 
+    # --- 4. make_key -----------------------------------------------------
+    # This is the call that requires the HTTP session + identity check
+    # — both satisfied by the authenticate step above. Over XML-RPC
+    # this raises "alleen toegankelijk via HTTP"; here it succeeds.
     try:
-        action = models.execute_kw(
-            database,
-            uid,
-            password,
-            "res.users.apikeys.description",
-            "make_key",
-            [[desc_id]],
-            {},
-        )
-    except xmlrpc.client.Fault as exc:
-        raise _KeyGenError(_format_keygen_fault(exc.faultString)) from exc
-    except (OSError, ssl.SSLError, TimeoutError) as exc:
-        raise _KeyGenError(f"Could not generate key: {type(exc).__name__}: {exc}") from exc
+        action = _call_kw("res.users.apikeys.description", "make_key", [[desc_id]])
+    except _JsonRpcError as exc:
+        raise _KeyGenError(_format_keygen_fault(exc.message)) from exc
 
     new_key = _extract_key_from_make_key_result(action)
     if new_key is None:
@@ -573,17 +617,26 @@ def _generate_api_key_via_password(
 
 
 def _format_keygen_fault(fault_string: str) -> str:
-    """Turn a raw Odoo XML-RPC fault into an actionable user-readable message.
+    """Turn a raw Odoo error message into an actionable user-readable string.
 
-    The three failure modes we've actually seen in the field:
+    The four failure modes we have actually seen in the field:
 
-    - "Private methods (...) cannot be called remotely" — legacy code path
-      against an old odoo-mcp; the user is on a version that still tries
-      ``_generate`` directly. Won't trigger from this function anymore,
-      but kept as a hint in case a future Odoo blocks ``make_key`` too.
-    - ``@check_identity`` rejection on Odoo ≥17 — the wizard demands a
-      recent in-session credential check that XML-RPC can't provide.
-    - Anything else: surface the raw message and point at the manual path.
+    - **Private methods** — "Private methods (...) cannot be called
+      remotely". The XML-RPC dispatcher's veto on any name starting
+      with ``_``. Shouldn't trigger from the current code path
+      (we drive the public wizard) but kept as a hint in case a
+      future client regresses or Odoo blocks ``make_key`` too.
+    - **HTTP-only** — Odoo ≥17 ``@check_identity`` rejecting the call
+      because no HTTP ``request`` is available. NL: "Deze methode is
+      alleen toegankelijk via HTTP". Shouldn't trigger from the
+      current code path (web JSON-RPC provides ``request``) but kept
+      so a misconfigured proxy / failed authenticate is diagnosable.
+    - **Identity re-check** — the same decorator passing the
+      HTTP-only gate but tripping on a stale
+      ``identity-check-last`` timestamp. Means the session is older
+      than ~10 minutes; rerunning works.
+    - **Anything else** — surface the raw message and point at the
+      manual path so the user is never stuck.
     """
     low = fault_string.lower()
     if "private method" in low and "cannot be called remotely" in low:
@@ -593,14 +646,26 @@ def _format_keygen_fault(fault_string: str) -> str:
             "to the latest release (`odoo-mcp update`) — newer versions use "
             "Odoo's user-facing wizard instead."
         )
+    if "only be accessed over http" in low or "alleen toegankelijk via http" in low:
+        return (
+            f"Odoo refused the API call because it requires an HTTP session: "
+            f"{fault_string}\n"
+            "  This odoo-mcp version is supposed to drive Odoo's web JSON-RPC "
+            "layer (which provides the HTTP context this method needs). If you "
+            "see this, the session cookie wasn't carried into the make_key call "
+            "— likely a proxy stripping cookies, a captive portal, or a very "
+            "old odoo-mcp. Upgrade with `odoo-mcp update`, or create the key "
+            "manually (Account Security → New API Key) and rerun choosing "
+            "option 1."
+        )
     if "identity" in low or "re-enter" in low or "reauthenticat" in low:
         return (
-            f"Odoo requires an in-session identity re-check that cannot be "
-            f"performed over the API: {fault_string}\n"
-            "  Create the key manually:\n"
-            "    1. Open Odoo → top-right menu → My Profile → Account Security.\n"
-            "    2. Click 'New API Key', name it however you like, copy the key.\n"
-            "    3. Rerun this command and choose option 1 to paste it."
+            f"Odoo requires an in-session identity re-check that we couldn't "
+            f"satisfy: {fault_string}\n"
+            "  Rerun this command — the identity stamp is fresh for ~10 "
+            "minutes after authenticate. If it still fails, create the key "
+            "manually (Account Security → New API Key) and rerun choosing "
+            "option 1."
         )
     return (
         f"Odoo refused to generate a new key: {fault_string}\n"
@@ -1330,8 +1395,11 @@ def _cmd_renew_key(name: str) -> int:
       3. Authenticate to Odoo via password — this is allowed for users
          who don't have 2FA enabled.
       4. Once authenticated, drive Odoo's own ``API Key Description``
-         wizard (``res.users.apikeys.description.make_key``) to produce
-         a fresh key — the same path the Account Security UI uses.
+         wizard (``res.users.apikeys.description.make_key``) over the
+         **web JSON-RPC** layer to produce a fresh key — the same path
+         the Account Security UI uses. (XML-RPC is blocked here by
+         Odoo's ``@check_identity`` decorator on Odoo ≥17, which
+         demands a real HTTP session.)
       5. Write the new key to the OS credential store, overwriting
          the previous (typically expired) one.
       6. Disposal: the password variable is overwritten and dropped
