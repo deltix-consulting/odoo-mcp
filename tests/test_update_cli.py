@@ -204,3 +204,52 @@ def test_migration_no_op_when_launch_sh_absent(
 
     assert rewrite_calls == []
     assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# `odoo-mcp update --check` must not lie when the fetch fails.
+# Real-world failure: v0.15.10 user behind a NAT hit the anonymous
+# GitHub rate-limit; --check returned None and the old code printed
+# "Up to date (version 0.15.10)" — hiding the very failure that made
+# the verified-update path insecure. The fix distinguishes
+# "unreachable" from "no newer release".
+# ---------------------------------------------------------------------------
+
+
+def test_print_check_reports_unreachable_when_fetch_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(update_cli, "fetch_latest_tag", lambda: None)
+    rc = update_cli._print_check("0.15.10")
+    captured = capsys.readouterr()
+    # Non-zero exit so scripts / CI surface the failure.
+    assert rc == 1
+    # The misleading "Up to date" line must not appear anywhere.
+    assert "Up to date" not in captured.out
+    assert "Up to date" not in captured.err
+    # The real reason goes to stderr — clearly stated, no warning theater.
+    assert "Could not reach GitHub" in captured.err
+    assert "0.15.10" in captured.err
+
+
+def test_print_check_reports_up_to_date_when_current(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(update_cli, "fetch_latest_tag", lambda: "v0.17.4")
+    monkeypatch.setattr(update_cli, "check_for_update", lambda _v: None)
+    rc = update_cli._print_check("0.17.4")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Up to date (version 0.17.4)" in out
+
+
+def test_print_check_reports_update_available(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(update_cli, "fetch_latest_tag", lambda: "v0.17.4")
+    monkeypatch.setattr(update_cli, "check_for_update", lambda _v: ("0.15.10", "0.17.4"))
+    rc = update_cli._print_check("0.15.10")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Update available: 0.17.4" in out
+    assert "0.15.10" in out

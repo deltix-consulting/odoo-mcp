@@ -10,6 +10,25 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.17.5] - 2026-05-20
+
+### Fixed
+
+- **`odoo-mcp update --check` no longer lies "Up to date" when it
+  couldn't reach GitHub.** Real-world failure: a v0.15.10 user behind
+  a corporate NAT hit the anonymous GitHub API rate limit; the fetch
+  returned None and `--check` cheerfully printed
+  ``Up to date (version 0.15.10)`` — hiding exactly the failure mode
+  that v0.17.4 set out to fix. The output now distinguishes:
+
+  - fetch failed → yellow message on stderr ("Could not reach
+    GitHub…") plus a tip about `gh auth login`, exit code 1.
+  - newer release exists → ``Update available: X (you have Y).``
+  - already current → ``Up to date (version Y).``
+
+  Three new tests pin each branch so a future refactor can't quietly
+  reintroduce the silent-failure behaviour.
+
 ## [0.17.4] - 2026-05-20
 
 ### Security

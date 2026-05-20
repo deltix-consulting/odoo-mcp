@@ -194,6 +194,22 @@ def _maybe_register_codex() -> None:
 
 
 def _print_check(current_version: str) -> int:
+    # Fetch the tag directly so we can distinguish "couldn't reach GitHub"
+    # from "no newer release exists". The previous code conflated the two
+    # and cheerfully printed "Up to date" whenever the anonymous GitHub
+    # API rate-limit hit — hiding exactly the failure mode that made the
+    # update prompt insecure.
+    tag = fetch_latest_tag()
+    if tag is None:
+        print(
+            f"{_YELLOW}Could not reach GitHub to check for updates "
+            f"(network error or rate limit). You have {current_version}.{_RESET}\n"
+            f"{_YELLOW}Tip: install the GitHub CLI and run `gh auth login` "
+            f"to use the authenticated 5000/hour limit instead of the "
+            f"anonymous 60/hour shared per IP.{_RESET}",
+            file=sys.stderr,
+        )
+        return 1
     result = check_for_update(current_version)
     if result is None:
         print(f"Up to date (version {current_version}).")
