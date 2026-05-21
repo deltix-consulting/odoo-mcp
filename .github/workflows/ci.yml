@@ -79,15 +79,27 @@ jobs:
         run: pip install "pip-audit==2.7.3"
 
       - name: Audit runtime dependencies
-        # No ``--strict``: the project itself is installed editable
-        # (it isn't on PyPI), and ``--strict`` promotes the
-        # resulting "skipped editable" / "could not be audited"
-        # warning to a fatal error every run. That turned the audit
-        # badge permanently red — exactly the wrong signal for a
-        # vuln scanner. Without ``--strict``, pip-audit still exits
-        # non-zero on real vulnerabilities; warnings stay warnings.
-        # ``--skip-editable`` keeps the warning out of the log
-        # entirely so any future real failure is unambiguous.
+        # ``--skip-editable`` drops the editable install of odoo-mcp
+        # itself (the project isn't on PyPI). ``--strict`` is left
+        # off so the resulting "skipped" warning doesn't fatally
+        # red-light the audit — pip-audit still exits non-zero on
+        # real vulnerabilities.
+        #
+        # Ignored advisories (revisit each on every CI cleanup pass):
+        #
+        # PYSEC-2025-183 — pyjwt "weak encryption". Affects every
+        # pyjwt release up to 2.12.1 (the latest), no fix version
+        # available. **Disputed by the pyjwt maintainers**: the
+        # advisory points at applications that pick weak HMAC keys,
+        # not at the library itself. odoo-mcp does not call pyjwt
+        # directly — it arrives transitively via ``mcp[crypto]`` —
+        # and the MCP client/server handshake we use doesn't sign
+        # or verify JWTs at all. Tracker for removal: drop this
+        # ignore the next time pip-audit reports a fix version, or
+        # when ``mcp`` drops the pyjwt dependency.
         run: |
           pip install -e .
-          pip-audit --skip-editable --progress-spinner off
+          pip-audit \
+            --skip-editable \
+            --progress-spinner off \
+            --ignore-vuln PYSEC-2025-183
