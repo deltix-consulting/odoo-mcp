@@ -29,16 +29,48 @@ process restart.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import secrets
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from threading import Lock
+from typing import Any
 
 from ..errors import ProdGuardError
 
 _UNLOCK_TTL_SECONDS = 15 * 60
 _PENDING_TOKEN_TTL_SECONDS = 5 * 60
 DEFAULT_MAX_COMMITS_PER_UNLOCK = 10
+
+
+def compute_payload_digest(payload: Mapping[str, Any]) -> str:
+    """Return the canonical SHA-256 digest of a write payload.
+
+    The dispatcher computes this at dry-run time (binding the issued
+    confirmation token to the previewed payload) and again at commit
+    time (re-binding from the current call's arguments). Any drift —
+    extra ids, swapped values, an added partner, a flipped mode/action
+    — produces a different digest and the token is rejected.
+
+    Canonicalisation rules:
+
+    * JSON dump with ``sort_keys=True`` so dict-key order on either
+      side of the wire does not matter.
+    * No whitespace separators, so a pretty-printed re-call cannot
+      pass under the same digest as the compact dry-run payload.
+    * ``default=str`` for non-JSON-native values (we currently feed
+      only ints / strs / lists / dicts, but a stray ``date`` from a
+      future caller should fail closed, not crash).
+
+    The digest is purely a fingerprint — it is never used to derive a
+    key, never sent over the wire, and never stored beyond the token's
+    5-minute TTL. SHA-256 is overkill for collision resistance at this
+    use, but it's the cheapest "obviously enough" hash in the stdlib.
+    """
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(slots=True)
@@ -74,6 +106,17 @@ class _PendingWrite:
     # fresh unlock and defeat the review-then-commit property of the
     # dry-run flow.
     unlock_id: float | None
+    # Canonical SHA-256 digest of the write payload (ids, values, body,
+    # partner_ids, mode, action, ...) captured at dry-run time. ``None``
+    # means the token was created without payload binding — the legacy
+    # path used by unit tests of ``consume_pending`` directly; the
+    # consume path then skips the digest check. A non-None value pins
+    # the token to the previewed payload: the consume path requires the
+    # current call's payload to digest to the same value, otherwise an
+    # agent could re-call with a wider scope (more ids, different
+    # values, an added partner, a swapped mode/action) and slip past
+    # the dry-run review.
+    payload_digest: str | None
 
 
 class ProdGuard:
@@ -181,6 +224,7 @@ class ProdGuard:
         summary: str,
         *,
         now: float | None = None,
+        payload_digest: str | None = None,
     ) -> str:
         """Register a pending write and return a one-time confirmation token.
 
@@ -195,6 +239,13 @@ class ProdGuard:
         the consume path's identity check is short-circuited (non-prod
         never goes through ``_consume_token_on_prod`` in the dispatcher
         anyway).
+
+        ``payload_digest`` (canonical SHA-256 of the previewed payload —
+        see :func:`compute_payload_digest`) further pins the token to the
+        exact payload that was reviewed. Omit it and the consume path
+        skips the digest check, matching the no-binding test path; in
+        production the dispatcher always supplies one so an agent cannot
+        upgrade scope between the dry run and the commit.
         """
         current = now if now is not None else time.monotonic()
         token = "conf_" + secrets.token_urlsafe(16)
@@ -223,6 +274,7 @@ class ProdGuard:
                 summary=summary,
                 expires_at=current + _PENDING_TOKEN_TTL_SECONDS,
                 unlock_id=unlock_id,
+                payload_digest=payload_digest,
             )
         return token
 
@@ -234,11 +286,14 @@ class ProdGuard:
         model: str,
         *,
         now: float | None = None,
+        payload_digest: str | None = None,
     ) -> None:
         """Validate and burn a confirmation token.
 
-        Raises :class:`ProdGuardError` if the token is unknown, expired, or
-        doesn't match the (instance, op, model) it was issued for.
+        Raises :class:`ProdGuardError` if the token is unknown, expired,
+        doesn't match the (instance, op, model) it was issued for, or —
+        when the issuing call supplied a ``payload_digest`` — was issued
+        for a different payload than the one being committed now.
         """
         current = now if now is not None else time.monotonic()
         with self._lock:
@@ -256,6 +311,23 @@ class ProdGuard:
                 raise ProdGuardError(
                     f"Confirmation token does not match the current call "
                     f"(expected {pending.instance}/{pending.op}/{pending.model})."
+                )
+            # Payload binding: the token was issued against the previewed
+            # payload (ids, values, body, partner_ids, mode, action, ...).
+            # If the commit re-call carries a different payload, reject —
+            # this is the gate against an agent dry-running a narrow
+            # operation (e.g. ``ids=[1]``) and then committing with the
+            # same token against a wider scope (e.g. ``ids=[1..1000]``).
+            # ``payload_digest=None`` on the stored token means the
+            # issuing call opted out of binding (unit tests of
+            # consume_pending without a dispatcher); the check is then
+            # skipped, matching the no-binding test path.
+            if pending.payload_digest is not None and pending.payload_digest != payload_digest:
+                raise ProdGuardError(
+                    "Confirmation token was issued for a different payload "
+                    "than the one being committed — re-do the dry run with "
+                    "the exact values you intend to commit, then re-use that "
+                    "fresh token."
                 )
             # H1: token must have been issued under the *current* unlock
             # window. If the unlock has expired and been re-acquired

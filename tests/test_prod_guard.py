@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from odoo_mcp.errors import ProdGuardError
-from odoo_mcp.security.prod_guard import ProdGuard
+from odoo_mcp.security.prod_guard import ProdGuard, compute_payload_digest
 
 
 def test_check_write_no_op_on_non_prod() -> None:
@@ -215,3 +215,206 @@ def test_expired_token_error_does_not_echo_token_value() -> None:
         assert "expired" in str(exc).lower()
     else:
         raise AssertionError("expected ProdGuardError")
+
+
+# --- payload digest binding --------------------------------------------------
+
+
+def test_payload_digest_is_canonical() -> None:
+    """Key order in the payload dict must not affect the digest.
+
+    The dispatcher computes the digest from ``args.get(k) for k in ...``,
+    which yields a Python dict whose insertion order can in principle
+    differ between the dry-run call and the commit call (e.g. a client
+    re-serialising JSON differently). The digest must collapse those.
+    """
+    a = compute_payload_digest({"ids": [1, 2, 3], "values": {"name": "X"}})
+    b = compute_payload_digest({"values": {"name": "X"}, "ids": [1, 2, 3]})
+    assert a == b
+
+
+def test_payload_digest_distinguishes_extra_ids() -> None:
+    """The exact scope-upgrade attack: same model+op, more ids."""
+    narrow = compute_payload_digest({"ids": [1], "values": {"active": False}})
+    wide = compute_payload_digest({"ids": [1, 2, 3], "values": {"active": False}})
+    assert narrow != wide
+
+
+def test_payload_digest_distinguishes_swapped_values() -> None:
+    base = compute_payload_digest({"ids": [1], "values": {"name": "Alice"}})
+    swap = compute_payload_digest({"ids": [1], "values": {"name": "Eve"}})
+    assert base != swap
+
+
+def test_payload_digest_distinguishes_added_partner() -> None:
+    base = compute_payload_digest({"record_id": 1, "partner_ids": [10]})
+    add = compute_payload_digest({"record_id": 1, "partner_ids": [10, 11]})
+    assert base != add
+
+
+def test_payload_digest_distinguishes_mode_swap() -> None:
+    """Archive vs. delete is the dangerous mode swap to catch."""
+    arch = compute_payload_digest({"ids": [1, 2], "mode": "archive"})
+    delete = compute_payload_digest({"ids": [1, 2], "mode": "delete"})
+    assert arch != delete
+
+
+def test_token_rejects_extra_ids_on_write() -> None:
+    """An agent that previewed ``ids=[1]`` cannot commit ``ids=[1..1000]``
+    using the same token. This is the AlanOgic C1 attack on write."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    issued_digest = compute_payload_digest({"ids": [1], "values": {"active": False}})
+    token = guard.create_pending(
+        "prod",
+        "write",
+        "res.partner",
+        "s",
+        now=0.0,
+        payload_digest=issued_digest,
+    )
+    wider_digest = compute_payload_digest(
+        {"ids": list(range(1, 1001)), "values": {"active": False}}
+    )
+    with pytest.raises(ProdGuardError, match="different payload"):
+        guard.consume_pending(
+            token, "prod", "write", "res.partner", now=1.0, payload_digest=wider_digest
+        )
+
+
+def test_token_rejects_swapped_values_on_create() -> None:
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    preview = compute_payload_digest({"values": {"name": "Alice", "email": "a@x"}})
+    token = guard.create_pending(
+        "prod",
+        "create",
+        "res.partner",
+        "s",
+        now=0.0,
+        payload_digest=preview,
+    )
+    commit = compute_payload_digest({"values": {"name": "Eve", "email": "eve@evil"}})
+    with pytest.raises(ProdGuardError, match="different payload"):
+        guard.consume_pending(
+            token, "prod", "create", "res.partner", now=1.0, payload_digest=commit
+        )
+
+
+def test_token_rejects_mode_swap_archive_to_delete() -> None:
+    """The same token must not let archive(1,2) become delete(1,2)."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    preview = compute_payload_digest({"ids": [1, 2], "mode": "archive"})
+    token = guard.create_pending(
+        "prod",
+        "archive",
+        "res.partner",
+        "s",
+        now=0.0,
+        payload_digest=preview,
+    )
+    commit = compute_payload_digest({"ids": [1, 2], "mode": "delete"})
+    with pytest.raises(ProdGuardError, match="different payload"):
+        guard.consume_pending(
+            token, "prod", "archive", "res.partner", now=1.0, payload_digest=commit
+        )
+
+
+def test_token_rejects_added_partner_on_send_message() -> None:
+    """An agent that previewed sending to one partner cannot fan out
+    to extra recipients using the issued token."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    preview = compute_payload_digest(
+        {
+            "record_id": 1,
+            "body": "Hello",
+            "subject": None,
+            "partner_ids": [10],
+            "message_type": "comment",
+        }
+    )
+    token = guard.create_pending(
+        "prod",
+        "send_message",
+        "res.partner",
+        "s",
+        now=0.0,
+        payload_digest=preview,
+    )
+    commit = compute_payload_digest(
+        {
+            "record_id": 1,
+            "body": "Hello",
+            "subject": None,
+            "partner_ids": [10, 11, 12],
+            "message_type": "comment",
+        }
+    )
+    with pytest.raises(ProdGuardError, match="different payload"):
+        guard.consume_pending(
+            token, "prod", "send_message", "res.partner", now=1.0, payload_digest=commit
+        )
+
+
+def test_token_rejects_changed_action_on_document_action() -> None:
+    """Swapping `confirm` for `cancel` (or vice versa) on the same
+    records must invalidate the token."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    preview = compute_payload_digest({"record_ids": [1, 2], "action": "confirm"})
+    token = guard.create_pending(
+        "prod",
+        "document_action",
+        "sale.order",
+        "s",
+        now=0.0,
+        payload_digest=preview,
+    )
+    commit = compute_payload_digest({"record_ids": [1, 2], "action": "cancel"})
+    with pytest.raises(ProdGuardError, match="different payload"):
+        guard.consume_pending(
+            token, "prod", "document_action", "sale.order", now=1.0, payload_digest=commit
+        )
+
+
+def test_token_accepts_identical_payload() -> None:
+    """Happy path: re-call with the exact same payload commits cleanly."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    digest = compute_payload_digest({"ids": [1, 2], "values": {"active": False}})
+    token = guard.create_pending(
+        "prod", "write", "res.partner", "s", now=0.0, payload_digest=digest
+    )
+    # Same payload digest recomputed from same inputs.
+    guard.consume_pending(token, "prod", "write", "res.partner", now=1.0, payload_digest=digest)
+
+
+def test_payload_digest_error_does_not_echo_token_value() -> None:
+    """The payload-mismatch error must not leak the token (audit retention)."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    preview = compute_payload_digest({"ids": [1], "values": {"x": 1}})
+    token = guard.create_pending(
+        "prod", "write", "res.partner", "s", now=0.0, payload_digest=preview
+    )
+    commit = compute_payload_digest({"ids": [1, 2], "values": {"x": 1}})
+    try:
+        guard.consume_pending(token, "prod", "write", "res.partner", now=1.0, payload_digest=commit)
+    except ProdGuardError as exc:
+        assert token not in str(exc)
+        assert "different payload" in str(exc).lower()
+    else:
+        raise AssertionError("expected ProdGuardError")
+
+
+def test_consume_skips_digest_check_when_token_has_none() -> None:
+    """No-binding path: legacy unit-test callers of consume_pending that
+    don't supply payload_digest at issue time keep working (the dispatcher
+    always supplies one in production)."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    token = guard.create_pending("prod", "write", "res.partner", "s", now=0.0)
+    # No payload binding at issue → consume can pass any digest, including None.
+    guard.consume_pending(token, "prod", "write", "res.partner", now=1.0)
