@@ -10,6 +10,8 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-05-21
+
 ### Security
 
 - **Confirmation tokens are now bound to the previewed payload, not
