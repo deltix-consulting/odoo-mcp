@@ -79,6 +79,12 @@ jobs:
         run: pip install "pip-audit==2.7.3"
 
       - name: Audit runtime dependencies
+        # ``--skip-editable`` drops the editable install of odoo-mcp
+        # itself — the project isn't on PyPI, so ``--strict`` would
+        # otherwise raise a non-actionable "could not be audited"
+        # error every run and turn the audit badge permanently red,
+        # which trains everyone to ignore it. Runtime third-party
+        # deps are still audited; that's the part we actually want.
         run: |
           pip install -e .
-          pip-audit --strict --progress-spinner off
+          pip-audit --skip-editable --strict --progress-spinner off
