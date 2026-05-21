@@ -358,6 +358,131 @@ def test_prod_commit_requires_unlock_and_token(tmp_path: Path) -> None:
     assert fake.write_calls == [("res.partner", [1], {"active": False})]
 
 
+def test_prod_token_rejects_id_scope_upgrade(tmp_path: Path) -> None:
+    """End-to-end: token issued for archive ids=[1] cannot commit ids=[1..200].
+
+    This is the dispatcher-level wiring check on top of the unit-level
+    prod_guard digest tests. The attack vector: an agent previews a narrow
+    archive, the operator sees ``id_count=1`` and approves, then the agent
+    re-issues the commit with 200 ids and the same token. Pre-fix the
+    commit went through; post-fix the digest binding rejects it.
+    """
+    fields = {"id": {"type": "integer"}, "active": {"type": "boolean"}}
+    app, fake = _build_app(tmp_path, production=True, fields=fields)
+    dispatcher = Dispatcher(app)
+    app.prod_guard.unlock("prod", production=True)
+
+    preview = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "model": "res.partner",
+            "ids": [1],
+            "mode": "archive",
+        },
+    )
+    token = preview["confirmation_token"]
+
+    escalated = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "model": "res.partner",
+            "ids": list(range(1, 201)),
+            "mode": "archive",
+            "dry_run": False,
+            "confirmation_token": token,
+        },
+    )
+    assert escalated["ok"] is False
+    assert escalated["error_code"] == "prod_guard"
+    assert "different payload" in escalated["error"]
+    # The escalated write must not have hit Odoo.
+    assert fake.write_calls == []
+
+
+def test_prod_token_rejects_mode_swap_archive_to_delete(tmp_path: Path) -> None:
+    """End-to-end: token issued for archive cannot commit delete on the
+    same ids. ``mode`` ultimately maps to a different :class:`Operation`
+    in the dispatcher (``archive`` → ``ARCHIVE``, ``delete`` → ``UNLINK``),
+    so this is caught one layer earlier than the digest check — by the
+    existing (instance, op, model) tuple. Defence-in-depth: the digest
+    would also reject this if the op classification ever drifted.
+    """
+    fields = {"id": {"type": "integer"}, "active": {"type": "boolean"}}
+    app, fake = _build_app(tmp_path, production=True, fields=fields)
+    dispatcher = Dispatcher(app)
+    app.prod_guard.unlock("prod", production=True)
+
+    preview = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "model": "res.partner",
+            "ids": [1, 2],
+            "mode": "archive",
+        },
+    )
+    token = preview["confirmation_token"]
+
+    swapped = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "model": "res.partner",
+            "ids": [1, 2],
+            "mode": "delete",
+            "dry_run": False,
+            "confirmation_token": token,
+        },
+    )
+    assert swapped["ok"] is False
+    assert swapped["error_code"] == "prod_guard"
+    assert "does not match" in swapped["error"]
+    # Neither the archive (write) nor the delete (unlink) must have happened.
+    assert fake.write_calls == []
+    assert fake.unlink_calls == []
+
+
+def test_prod_token_rejects_id_upgrade_on_delete(tmp_path: Path) -> None:
+    """End-to-end: delete previewed for ids=[1] cannot commit ids=[1..100].
+
+    delete is the most-dangerous mode — the digest must catch the id-count
+    upgrade here just like it does for archive. Complements the archive
+    test (the existing op check doesn't fire because op stays UNLINK).
+    """
+    app, fake = _build_app(tmp_path, production=True)
+    dispatcher = Dispatcher(app)
+    app.prod_guard.unlock("prod", production=True)
+
+    preview = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "model": "res.partner",
+            "ids": [1],
+            "mode": "delete",
+        },
+    )
+    token = preview["confirmation_token"]
+
+    escalated = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "model": "res.partner",
+            "ids": list(range(1, 101)),
+            "mode": "delete",
+            "dry_run": False,
+            "confirmation_token": token,
+        },
+    )
+    assert escalated["ok"] is False
+    assert escalated["error_code"] == "prod_guard"
+    assert "different payload" in escalated["error"]
+    assert fake.unlink_calls == []
+
+
 # -- Write-blocklist (mail.message etc.) -------------------------------------
 
 

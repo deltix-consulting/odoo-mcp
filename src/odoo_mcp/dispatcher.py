@@ -66,7 +66,7 @@ from .security.fields import (
     validate_write_values,
 )
 from .security.limits import RateLimiter, clamp_limit
-from .security.prod_guard import ProdGuard
+from .security.prod_guard import ProdGuard, compute_payload_digest
 from .security.smart_fields import select_smart_fields
 
 logger = logging.getLogger(__name__)
@@ -722,6 +722,7 @@ class Dispatcher:
                 ctx.op.value,
                 model,
                 summary=f"create {model} (+{n} fields)",
+                payload_digest=compute_payload_digest(_token_payload(ctx.op.value, args)),
             )
             self._audit_ok(ctx, {"field_count": n}, args, dry_run=True)
             return {
@@ -770,6 +771,7 @@ class Dispatcher:
                 ctx.op.value,
                 model,
                 summary=f"write {model} {id_preview} (+{n} fields)",
+                payload_digest=compute_payload_digest(_token_payload(ctx.op.value, args)),
             )
             self._audit_ok(ctx, {"field_count": n, "id_count": len(ids)}, args, dry_run=True)
             return {
@@ -831,7 +833,11 @@ class Dispatcher:
         if dry_run:
             summary = f"{mode} {len(ids)} record(s) of {model}"
             token = self.app.prod_guard.create_pending(
-                ctx.instance, ctx.op.value, model, summary=summary
+                ctx.instance,
+                ctx.op.value,
+                model,
+                summary=summary,
+                payload_digest=compute_payload_digest(_token_payload(ctx.op.value, args)),
             )
             reminder = (
                 "Archiving is reversible — to restore, odoo_write values={'active': true}."
@@ -946,7 +952,11 @@ class Dispatcher:
             preview_body = body if len(body) <= 2000 else body[:2000] + "...[truncated]"
             summary = f"{message_type} on {model}({record_id}) to {len(partner_ids)} partner(s)"
             token = self.app.prod_guard.create_pending(
-                ctx.instance, ctx.op.value, model, summary=summary
+                ctx.instance,
+                ctx.op.value,
+                model,
+                summary=summary,
+                payload_digest=compute_payload_digest(_token_payload(ctx.op.value, args)),
             )
             self._audit_ok(
                 ctx,
@@ -1053,7 +1063,11 @@ class Dispatcher:
             states = self._peek_states(rt, model, record_ids)
             summary = f"{action} ({method}) on {len(record_ids)} {model} record(s)"
             token = self.app.prod_guard.create_pending(
-                ctx.instance, ctx.op.value, model, summary=summary
+                ctx.instance,
+                ctx.op.value,
+                model,
+                summary=summary,
+                payload_digest=compute_payload_digest(_token_payload(ctx.op.value, args)),
             )
             self._audit_ok(ctx, {"action": action, "id_count": len(record_ids)}, args, dry_run=True)
             return {
@@ -1103,7 +1117,13 @@ class Dispatcher:
             result["commits_remaining"] = remaining
 
     def _consume_token_on_prod(self, ctx: _Ctx, args: dict[str, Any]) -> None:
-        """On prod, a valid confirmation token from a prior dry run is required."""
+        """On prod, a valid confirmation token from a prior dry run is required.
+
+        The token's payload digest, captured at ``create_pending`` time, is
+        re-checked here against the current call's payload. An agent that
+        previewed ``ids=[1]`` and tries to commit the same token with
+        ``ids=[1..1000]`` is rejected — see :func:`compute_payload_digest`.
+        """
         if not ctx.rt.config.production:
             return
         token = args.get("confirmation_token")
@@ -1112,7 +1132,14 @@ class Dispatcher:
                 "Commits against production require a confirmation_token from a prior dry run."
             )
         assert ctx.model is not None
-        self.app.prod_guard.consume_pending(token, ctx.instance, ctx.op.value, ctx.model)
+        digest = compute_payload_digest(_token_payload(ctx.op.value, args))
+        self.app.prod_guard.consume_pending(
+            token,
+            ctx.instance,
+            ctx.op.value,
+            ctx.model,
+            payload_digest=digest,
+        )
 
     def _diagnose_access(self, args: dict[str, Any]) -> dict[str, Any]:
         """Report Odoo ACL info for the authenticated user on one model.
@@ -1382,6 +1409,43 @@ _DRY_RUN_NOTE = (
     "This was a dry run. To commit, call {tool} again with "
     "dry_run=false and confirmation_token set to the token above."
 )
+
+
+# Per-operation list of arg keys whose values determine what gets written.
+# The confirmation token's payload digest is computed over exactly these
+# keys (with values taken straight from ``args``). A commit re-call with
+# any of these keys changed — extra ids, swapped values, a different mode
+# or action, an added partner — produces a different digest and the
+# token is rejected. Operations not listed here have no payload binding
+# because they have no write payload to bind (the model and op are
+# already covered by the (instance, op, model) tuple).
+_TOKEN_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
+    Operation.CREATE.value: ("values",),
+    Operation.WRITE.value: ("ids", "values"),
+    Operation.ARCHIVE.value: ("ids", "mode"),
+    Operation.UNLINK.value: ("ids", "mode"),
+    Operation.SEND_MESSAGE.value: (
+        "record_id",
+        "body",
+        "subject",
+        "partner_ids",
+        "message_type",
+    ),
+    Operation.DOCUMENT_ACTION.value: ("record_ids", "action"),
+}
+
+
+def _token_payload(op_value: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Project ``args`` to the subset of keys whose values are payload-bound.
+
+    Used by both the preview path (when issuing a confirmation token) and
+    the commit path (when consuming one). Both sides MUST go through this
+    function so the digest can't drift; adding a write parameter without
+    binding it here would silently widen the attack surface the digest is
+    supposed to close.
+    """
+    keys = _TOKEN_PAYLOAD_KEYS.get(op_value, ())
+    return {k: args.get(k) for k in keys}
 
 
 # ---------------------------------------------------------------------------

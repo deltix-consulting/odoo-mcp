@@ -10,6 +10,47 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **Confirmation tokens are now bound to the previewed payload, not
+  just (instance, op, model).** Previously an agent that ran a dry
+  run for ``odoo_write(ids=[1], values={"active": false})`` and
+  received a confirmation token could re-call the commit with the
+  same token and ``ids=[1, 2, ..., 1000]``: the prod-guard's check
+  validated (instance, op, model) only, so the wider payload slipped
+  through and 1000 records were updated under the cover of an
+  approval the operator gave for one. Same attack shape for
+  ``values`` on create / write, ``partner_ids`` / ``body`` on
+  send_message, ``action`` on run_document_action, and id-count
+  upgrades on archive_or_delete (note: archive↔delete *mode* swaps
+  were already caught one layer earlier by the (op) check, since
+  they map to different ``Operation`` enums).
+
+  ``ProdGuard.create_pending`` and ``consume_pending`` now take an
+  optional ``payload_digest`` (canonical SHA-256 over the previewed
+  payload — see ``compute_payload_digest``). The dispatcher computes
+  the digest at preview time, stores it on the pending token, and
+  re-computes it from the current call's args at commit time. Any
+  drift in the payload-bound keys raises
+  ``"Confirmation token was issued for a different payload"`` and
+  refuses the commit. Tokens issued without a digest (the unit-test
+  path that calls ``consume_pending`` directly) keep working —
+  ``payload_digest=None`` opts out of the check.
+
+  Surfaced by the daily competitive audit
+  (``audit/2026-05-21-payload-digest-token-binding``): the same
+  attack shape — same fix shape — landed in AlanOgic/odoo-mcp-19 as
+  "Bind confirmation tokens to operation payload digest" on
+  2026-05-01.
+
+  16 new tests cover: canonical digest stability across key
+  reordering, all five payload-bound attack vectors (extra ids on
+  write, swapped values on create, added partner on send_message,
+  swapped action on document_action, id-count upgrade on delete),
+  the defence-in-depth case (archive→delete still caught by the op
+  check), the happy path, and a regression that the new error
+  message does not leak the token literal.
+
 ## [0.17.8] - 2026-05-20
 
 ### Fixed
