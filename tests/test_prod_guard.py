@@ -388,9 +388,7 @@ def test_token_accepts_identical_payload() -> None:
         "prod", "write", "res.partner", "s", now=0.0, payload_digest=digest
     )
     # Same payload digest recomputed from same inputs.
-    guard.consume_pending(
-        token, "prod", "write", "res.partner", now=1.0, payload_digest=digest
-    )
+    guard.consume_pending(token, "prod", "write", "res.partner", now=1.0, payload_digest=digest)
 
 
 def test_payload_digest_error_does_not_echo_token_value() -> None:
@@ -403,9 +401,7 @@ def test_payload_digest_error_does_not_echo_token_value() -> None:
     )
     commit = compute_payload_digest({"ids": [1, 2], "values": {"x": 1}})
     try:
-        guard.consume_pending(
-            token, "prod", "write", "res.partner", now=1.0, payload_digest=commit
-        )
+        guard.consume_pending(token, "prod", "write", "res.partner", now=1.0, payload_digest=commit)
     except ProdGuardError as exc:
         assert token not in str(exc)
         assert "different payload" in str(exc).lower()
