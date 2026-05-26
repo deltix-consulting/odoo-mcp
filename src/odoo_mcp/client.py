@@ -606,6 +606,16 @@ class OdooClient:
         kwargs: dict[str, Any] = {
             "body": body,
             "message_type": message_type,
+            # Odoo's ``message_post`` treats a plain ``str`` body as
+            # untrusted text and HTML-escapes it (``<p>`` ⇒ ``&lt;p&gt;``);
+            # a ``markupsafe.Markup`` wrapper opts out of escaping. RPC
+            # transports (XML-RPC and JSON/2) can only ship ``str``, so
+            # without ``body_is_html=True`` an MCP caller posting
+            # ``"<p>Hi</p>"`` lands in the chatter as literal angle-bracket
+            # text and the outbound email shows HTML source. Odoo exposes
+            # ``body_is_html`` for exactly this case ("to be used only for
+            # RPC calls"). The MCP is always RPC; set it unconditionally.
+            "body_is_html": True,
         }
         if subject is not None:
             kwargs["subject"] = subject
