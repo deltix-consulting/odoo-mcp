@@ -19,8 +19,10 @@ The class exposes only the primitives the dispatcher actually needs:
 
 from __future__ import annotations
 
+import base64
 import http.client
 import logging
+import os
 import socket
 import ssl
 import threading
@@ -62,7 +64,17 @@ class _TimeoutHTTPConnection(http.client.HTTPConnection):
 
 
 class _TimeoutHTTPSConnection(http.client.HTTPSConnection):
-    """HTTPSConnection subclass with a mandatory socket timeout and SSL context."""
+    """HTTPSConnection subclass with a mandatory socket timeout and SSL context.
+
+    Honors :meth:`http.client.HTTPConnection.set_tunnel` when called: if a
+    tunnel target has been registered, we open a plain TCP socket to the
+    proxy host, issue the ``CONNECT`` handshake in cleartext, and only
+    then wrap the *same* socket in TLS toward the tunneled (target) host.
+    Without this, our previous ``connect()`` override silently bypassed
+    ``HTTPS_PROXY``: every container running odoo-mcp behind a Squid +
+    iptables egress allowlist hit a 30-second TCP timeout trying to
+    reach Odoo directly. See :func:`_resolve_proxy`.
+    """
 
     def __init__(
         self,
@@ -76,7 +88,20 @@ class _TimeoutHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self) -> None:
         sock = socket.create_connection((self.host, self.port), timeout=self._forced_timeout)
-        self.sock = self._forced_context.wrap_socket(sock, server_hostname=self.host)
+        self.sock = sock
+        # ``_tunnel_host`` and ``_tunnel`` are stdlib-internal but stable
+        # since 3.2 — they're how ``HTTPSConnection`` itself implements
+        # ``set_tunnel``. Typeshed marks them private so mypy can't see
+        # them; the ``getattr`` keeps the dependency explicit and the
+        # type narrow without leaking ``Any`` further.
+        tunnel_host: str | None = getattr(self, "_tunnel_host", None)
+        if tunnel_host:
+            # CONNECT handshake to the proxy, plaintext on the bare TCP
+            # socket. ``_tunnel`` raises on a non-200 response so we
+            # don't silently TLS-wrap a proxy error page.
+            self._tunnel()  # type: ignore[attr-defined]
+        server_hostname = tunnel_host or self.host
+        self.sock = self._forced_context.wrap_socket(self.sock, server_hostname=server_hostname)
 
 
 class _TimeoutTransport(xmlrpc.client.Transport):
@@ -104,8 +129,78 @@ class _TimeoutTransport(xmlrpc.client.Transport):
         return conn
 
 
+def _resolve_proxy(scheme: str, target_host: str) -> tuple[str, int, dict[str, str]] | None:
+    """Resolve the HTTP(S) proxy for *target_host*, honoring ``NO_PROXY``.
+
+    Reads ``HTTPS_PROXY`` (or ``https_proxy``) for HTTPS targets,
+    ``HTTP_PROXY`` (or ``http_proxy``) for HTTP targets, and respects
+    ``NO_PROXY`` / ``no_proxy`` as a comma-separated suffix list (the
+    convention shared by ``curl`` / ``requests`` / ``urllib``). Lowercase
+    env vars beat uppercase if both are set, matching ``urllib`` behavior.
+
+    Returns ``(proxy_host, proxy_port, headers)`` or ``None`` if a direct
+    connection should be used. ``headers`` is empty for unauthenticated
+    proxies; populated with a ``Proxy-Authorization: Basic ...`` header
+    when ``HTTPS_PROXY`` carries userinfo.
+
+    Why this exists: Python's stdlib ``xmlrpc.client`` — unlike
+    ``urllib.request`` — does **not** honor ``HTTPS_PROXY`` automatically.
+    A naive subclass that just adds a timeout (which our previous
+    Transport did) inherits the same gap. In a container with an iptables
+    egress allowlist that only permits the Squid proxy, the resulting
+    direct connect to Odoo silently 30-second-times-out.
+    """
+    no_proxy = os.environ.get("no_proxy") or os.environ.get("NO_PROXY") or ""
+    th = target_host.lower()
+    for raw in no_proxy.split(","):
+        entry = raw.strip().lower()
+        if not entry:
+            continue
+        if entry == "*":
+            return None
+        norm = entry.lstrip(".")
+        if th == norm or th.endswith("." + norm):
+            return None
+
+    if scheme == "https":
+        url = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
+    else:
+        url = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
+    if not url:
+        return None
+
+    # urlparse requires a scheme; tolerate bare ``host:port``.
+    if "://" not in url:
+        url = f"http://{url}"
+    parsed = urlparse(url)
+    proxy_host = parsed.hostname
+    if not proxy_host:
+        return None
+    # Default proxy port: 8080 if the proxy URL is http://, 443 if https://.
+    # In practice ``HTTPS_PROXY=http://squid:3128`` is always portful so
+    # this fallback only fires on malformed config.
+    if parsed.port is not None:
+        proxy_port = parsed.port
+    elif parsed.scheme == "https":
+        proxy_port = 443
+    else:
+        proxy_port = 8080
+
+    headers: dict[str, str] = {}
+    if parsed.username:
+        userinfo = f"{parsed.username}:{parsed.password or ''}"
+        encoded = base64.b64encode(userinfo.encode("utf-8")).decode("ascii")
+        headers["Proxy-Authorization"] = f"Basic {encoded}"
+    return proxy_host, proxy_port, headers
+
+
 class _TimeoutSafeTransport(xmlrpc.client.SafeTransport):
     """HTTPS XML-RPC transport with a per-call timeout and explicit SSL context.
+
+    Also honors ``HTTPS_PROXY`` / ``NO_PROXY`` — see :func:`_resolve_proxy`.
+    When a proxy is configured, we ``CONNECT``-tunnel through it; the TLS
+    handshake still terminates at the Odoo host, so certificate validation
+    keeps working as if the proxy were transparent.
 
     See :class:`_TimeoutTransport` for notes on the override signature.
     """
@@ -123,7 +218,30 @@ class _TimeoutSafeTransport(xmlrpc.client.SafeTransport):
             assert isinstance(cached, http.client.HTTPSConnection)  # noqa: S101
             return cached
         chost, self._extra_headers, _ = self.get_host_info(host)
-        conn = _TimeoutHTTPSConnection(chost, timeout=self._timeout, context=self._ssl_context)
+        # Split out ``host:port`` so set_tunnel gets clean target args. The
+        # IPv6 case (``[::1]:443``) is not handled — Odoo Online is IPv4
+        # and self-hosted Odoo behind a v6-only proxy hasn't been reported.
+        if ":" in chost:
+            target_host, target_port_s = chost.rsplit(":", 1)
+            target_port = int(target_port_s)
+        else:
+            target_host, target_port = chost, 443
+
+        proxy = _resolve_proxy("https", target_host)
+        if proxy is None:
+            conn = _TimeoutHTTPSConnection(chost, timeout=self._timeout, context=self._ssl_context)
+        else:
+            proxy_host, proxy_port, proxy_headers = proxy
+            # Connect TO the proxy; tunnel TO the Odoo host. The SSL
+            # context handshakes against the Odoo host (server_hostname
+            # is set inside ``_TimeoutHTTPSConnection.connect`` once the
+            # tunnel is up).
+            conn = _TimeoutHTTPSConnection(
+                f"{proxy_host}:{proxy_port}",
+                timeout=self._timeout,
+                context=self._ssl_context,
+            )
+            conn.set_tunnel(target_host, target_port, headers=proxy_headers)
         self._connection = host, conn
         return conn
 

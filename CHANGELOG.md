@@ -10,6 +10,41 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-05-21
+
+### Fixed
+
+- **The XML-RPC transport now honors ``HTTPS_PROXY`` / ``NO_PROXY``.**
+  Python's stdlib ``xmlrpc.client`` — unlike ``urllib.request`` —
+  does NOT pick up ``HTTPS_PROXY`` from the environment. Our
+  ``_TimeoutSafeTransport`` was a thin timeout-adding subclass, so
+  it inherited the same gap. Containers running odoo-mcp behind a
+  Squid + iptables egress allowlist (the now-standard tenant shape)
+  silently 30-second-timed-out on every authenticate / call: the
+  Bun-side ``odooAuthenticate`` went through the proxy and worked
+  (HTTP 200 in 53ms), the Python child went direct, hit the
+  ``DOCKER-USER -j DROP`` rule, and died.
+
+  ``_TimeoutSafeTransport`` now consults ``HTTPS_PROXY`` /
+  ``https_proxy`` (lowercase wins, matching urllib), honors
+  ``NO_PROXY`` as a comma-separated suffix list including ``*``
+  and leading-dot variants, and CONNECT-tunnels through the proxy
+  via ``HTTPSConnection.set_tunnel``. The TLS handshake still
+  terminates at the Odoo host — certificate validation continues
+  to verify the Odoo cert, not the proxy's. Authenticated proxies
+  (``http://user:pass@squid:3128``) are supported via
+  ``Proxy-Authorization: Basic …`` headers on the tunnel.
+
+  Twelve new tests pin the env-var resolution (``HTTPS_PROXY`` vs
+  ``HTTP_PROXY`` per target scheme, lowercase precedence, suffix
+  matching, ``*`` short-circuit, basic-auth extraction, bare
+  ``host:port`` tolerance) and the transport integration (tunnel
+  set when proxy configured, direct when not, ``NO_PROXY``
+  beats ``HTTPS_PROXY`` at the transport level too).
+
+  HTTP-via-HTTP-proxy is intentionally still unsupported — every
+  reported affected setup is Odoo Online (HTTPS) behind Squid.
+
 ## [0.18.0] - 2026-05-21
 
 ### Security
