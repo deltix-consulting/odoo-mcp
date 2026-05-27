@@ -10,6 +10,28 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-05-21
+
+### Changed
+
+- **Admin-refusal error now names concrete safe groups and the
+  prompt-injection risk of opting out.** Observed in the field:
+  operators hitting the "Refusing to use admin credentials" error
+  often re-created their "MCP Agent" Odoo user with the Settings
+  group again, because the error said "grant only the groups it
+  needs" without naming any. The new message:
+
+  - **Lists a safe starter set** — Sales (User), CRM (User),
+    Inventory (User), Accounting (Billing) — and explicitly tells
+    the operator NOT to grant Settings / Administration.
+  - **Names the risk of opt-out** in plain language: setting
+    ``refuse_admin_on_production = false`` means "one
+    prompt-injection can then write anywhere". The previous
+    "NOT recommended" phrasing read like routine config advice.
+
+  Two new tests pin the safe-group list and the prompt-injection
+  language so a future refactor can't quietly weaken the message.
+
 ## [0.18.1] - 2026-05-21
 
 ### Fixed

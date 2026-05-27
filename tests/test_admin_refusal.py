@@ -66,6 +66,39 @@ def test_admin_credentials_refused_on_production_by_default() -> None:
     assert "rotate-key" in msg
 
 
+def test_admin_refusal_message_lists_concrete_safe_groups() -> None:
+    """Operators hitting this error need an actionable list of WHICH groups
+    are safe to grant — otherwise the most common failure mode is
+    "MCP Agent" being created with full admin again because that was
+    the path of least resistance. Spell out Sales / CRM / Inventory /
+    Accounting as a starting set, and call out Settings as the trap.
+    """
+    cfg = _make_cfg(production=True)
+    client = _build_client(cfg, uid=1, has_group=False)
+    with pytest.raises(OdooAuthError) as excinfo:
+        client.authenticate()
+    msg = str(excinfo.value)
+    # The "safe" groups must be enumerated, not described abstractly.
+    assert "Sales" in msg
+    assert "CRM" in msg
+    assert "Inventory" in msg
+    # And the trap group must be explicitly named so it can't be missed.
+    assert "Settings" in msg
+    assert "DO NOT" in msg or "do not" in msg.lower()
+
+
+def test_admin_refusal_message_names_the_prompt_injection_risk() -> None:
+    """The opt-out language must surface the actual consequence: a single
+    prompt-injection can then write anywhere. Without this, opt-out
+    reads like a routine config tweak."""
+    cfg = _make_cfg(production=True)
+    client = _build_client(cfg, uid=1, has_group=False)
+    with pytest.raises(OdooAuthError) as excinfo:
+        client.authenticate()
+    msg = str(excinfo.value)
+    assert "prompt-injection" in msg or "prompt injection" in msg.lower()
+
+
 def test_admin_credentials_allowed_on_production_when_opted_out(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
