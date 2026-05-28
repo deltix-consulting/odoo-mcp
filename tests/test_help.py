@@ -156,3 +156,53 @@ def test_help_and_list_instances_are_read_ops() -> None:
     assert is_read(Operation.LIST_INSTANCES)
     assert not is_write(Operation.HELP)
     assert not is_write(Operation.LIST_INSTANCES)
+
+
+def test_help_verbose_documents_m2m_command_tuples(tmp_path: Path) -> None:
+    """A common_patterns entry must show the [[4, id]] / [[6, 0, [ids]]] shape.
+
+    The #1 stumble we see in agent usage is writing many2many fields as a
+    flat id list (e.g. ``tag_ids=[7, 12]``). Odoo silently treats the first
+    int as a command, so the write does the wrong thing without raising —
+    the kind of footgun the cookbook exists to flag.
+    """
+    app = _build_app(tmp_path)
+    dispatcher = Dispatcher(app)
+
+    payload = _call(dispatcher, "odoo_help", {"verbose": True})
+    patterns = payload["common_patterns"]
+    assert isinstance(patterns, list)
+    m2m_patterns = [p for p in patterns if isinstance(p, dict) and "many2many" in p.get("goal", "")]
+    assert len(m2m_patterns) == 1, "expected exactly one m2m write pattern"
+    example = m2m_patterns[0]["example"]
+    assert isinstance(example, dict)
+    # The example must actually demonstrate command-tuple syntax (a list
+    # whose elements are themselves 2- or 3-element lists), not a flat
+    # id list — that's the whole point of the example.
+    tag_ids = example["values"]["tag_ids"]
+    assert isinstance(tag_ids, list) and tag_ids
+    assert all(isinstance(cmd, list) and len(cmd) in (2, 3) for cmd in tag_ids)
+
+
+def test_help_verbose_documents_many2one_id_rule(tmp_path: Path) -> None:
+    """The cookbook must say many2one writes take an integer id, not a name.
+
+    Pinned because the rule is non-obvious to agents that have just used
+    odoo_lookup or odoo_search_read (where names appear everywhere) and
+    then try to write the name back.
+    """
+    app = _build_app(tmp_path)
+    dispatcher = Dispatcher(app)
+
+    payload = _call(dispatcher, "odoo_help", {"verbose": True})
+    gotchas = payload["gotchas"]
+    assert isinstance(gotchas, list)
+    blob = "\n".join(g for g in gotchas if isinstance(g, str))
+    assert "many2one" in blob.lower()
+    assert "integer id" in blob.lower() or "integer ID" in blob
+    # And the corresponding common-patterns entry must point at odoo_lookup
+    # as the resolver for name -> id.
+    patterns = payload["common_patterns"]
+    m2o_patterns = [p for p in patterns if isinstance(p, dict) and "many2one" in p.get("goal", "")]
+    assert m2o_patterns, "expected at least one many2one write pattern"
+    assert any("odoo_lookup" in (p.get("use", "") + str(p.get("example", ""))) for p in m2o_patterns)

@@ -10,6 +10,27 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **``odoo_help`` cookbook now covers write-side shapes for many2many
+  and many2one fields.** Two new ``common_patterns`` entries (m2m write
+  with command tuples, m2o write via lookup -> id) plus two new
+  ``gotchas`` bullets pinning the same rules. Surfaced by the daily
+  competitive audit (``audit/2026-05-28-help-write-patterns``):
+  pantalytics/odoo-mcp-pro PR #42 (OPEN, 2026-05-26) ships a
+  ``_validate_m2m_values`` heuristic plus M2M/M2O/HTML guidance on the
+  ``create_record`` / ``update_record`` tool docstrings, and the
+  malformed-write patterns it catches (flat id list, bare command
+  tuple, dict syntax) come up repeatedly in agent usage. Deltix's
+  design intentionally keeps tool descriptions terse and pushes
+  cookbook content into the opt-in ``odoo_help`` tool (see #6), so
+  this lands as cookbook entries rather than tool-description bloat
+  or pre-write validation. Writes already go through prod-guard +
+  dry-run + token, and Odoo rejects malformed values with its own
+  error — the value here is letting an agent self-correct *before*
+  the round trip by reading ``odoo_help(verbose=True)`` once per
+  session.
+
 ## [0.18.2] - 2026-05-21
 
 ### Changed
