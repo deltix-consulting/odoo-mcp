@@ -1555,6 +1555,30 @@ _HELP_COMMON_PATTERNS: list[dict[str, Any]] = [
         "goal": "See what fields exist on a model",
         "use": "odoo_describe_model",
     },
+    {
+        "goal": "Write to a many2many field (e.g. tag_ids on crm.lead)",
+        "use": "odoo_write with Odoo command tuples",
+        "example": {
+            "instance": "prod",
+            "model": "crm.lead",
+            "ids": [42],
+            # Odoo command tuples — NOT a flat id list. Stable across Odoo 8-19+.
+            #   [[4, id]]       link existing record
+            #   [[3, id]]       unlink (do not delete)
+            #   [[6, 0, [ids]]] replace the whole set
+            "values": {"tag_ids": [[4, 7], [4, 12]]},
+        },
+    },
+    {
+        "goal": "Write to a many2one field (e.g. partner_id)",
+        "use": "odoo_lookup -> id, then odoo_write",
+        "example": (
+            "1) odoo_lookup(model='res.partner', query='Acme') -> id=123. "
+            "2) odoo_write(values={'partner_id': 123}). "
+            "Pass the integer id, NOT the display name — many2one writes are "
+            "always by id."
+        ),
+    },
 ]
 
 
@@ -1573,6 +1597,15 @@ _HELP_GOTCHAS: list[str] = [
     "confirmation_token from a prior dry run to commit.",
     "To remove records, use odoo_archive_or_delete. Always offer archive "
     "(reversible: active=False) before permanent delete (unlink).",
+    "Many2many writes use Odoo command tuples, not flat id lists. A bare "
+    "[7, 12] is silently treated as [[7, 12]] (a single command tuple with "
+    "command 7) — almost never what you want. Use [[4, 7], [4, 12]] to add, "
+    "[[6, 0, [7, 12]]] to replace. Check the field's type via "
+    "odoo_describe_model first.",
+    "Many2one fields take an integer id, not the display name. Resolve names "
+    "via odoo_lookup before writing — odoo_write(values={'partner_id': "
+    "'Acme'}) raises on Odoo's side, odoo_write(values={'partner_id': 123}) "
+    "is correct.",
 ]
 
 
