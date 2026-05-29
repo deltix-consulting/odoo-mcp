@@ -1422,6 +1422,100 @@ def _cmd_list() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: setup --scheduler-config [--format=json|env|cli]
+# ---------------------------------------------------------------------------
+
+
+_SCHEDULER_FORMATS = ("json", "env", "cli")
+
+
+def _cmd_scheduler_config(fmt: str) -> int:
+    """Print the snippet a non-Claude scheduler needs to load odoo-mcp.
+
+    Triggering scenario (real, reported May 2026): a Decisions / n8n /
+    custom cron agent fires a scheduled prompt, the spawned Claude
+    session has no MCP servers wired up, the agent reports "Odoo MCP
+    niet geladen", and no facturen get checked. We can't auto-write
+    into an external scheduler's config — there's no shared format —
+    but we can emit the exact snippet the operator needs to paste,
+    in the shape that scheduler expects.
+
+    Why this lives in the CLI rather than as docs: the absolute path
+    to ``odoo-mcp`` is host-specific (``~/.local/bin/odoo-mcp`` on
+    macOS, an arbitrary ``uv tool`` directory elsewhere), so a static
+    README snippet is wrong on ~half of installs. Generating it
+    locally guarantees the path matches the host.
+
+    Output format ``json`` mirrors the
+    ``{"mcpServers": {"odoo-mcp": {"command": ..., "args": ...}}}``
+    shape understood by Claude Desktop, the Anthropic CLI, and most
+    MCP-aware schedulers we've seen. ``env`` emits shell-style
+    ``KEY=VALUE`` lines for setups that take env vars instead of a
+    structured config. ``cli`` emits the bare ``command + args``
+    string for shell-based schedulers that just spawn a process.
+
+    No registration side effects — the operator copies the output.
+    """
+    fmt_norm = fmt.lower().strip() or "json"
+    if fmt_norm not in _SCHEDULER_FORMATS:
+        print(
+            f"Unknown format {fmt!r}. Use one of: {', '.join(_SCHEDULER_FORMATS)}.",
+            file=sys.stderr,
+        )
+        return 2
+
+    command_path = _resolve_odoo_mcp_command()
+
+    print(
+        "# Paste the snippet below into your scheduler's MCP-server config.",
+        file=sys.stderr,
+    )
+    print(
+        "# This is the same shape Claude Desktop / Anthropic CLI use; most",
+        file=sys.stderr,
+    )
+    print("# MCP-aware schedulers (Decisions, n8n, custom cron) accept it.", file=sys.stderr)
+    print(file=sys.stderr)
+
+    if fmt_norm == "json":
+        snippet = {
+            "mcpServers": {
+                "odoo-mcp": {
+                    "command": command_path,
+                    "args": ["launch"],
+                }
+            }
+        }
+        print(json.dumps(snippet, indent=2))
+    elif fmt_norm == "env":
+        # Shell-style env vars. Useful when a scheduler reads MCP config
+        # from environment rather than a structured file (rare but real
+        # — some Decisions deployments do this).
+        print(f"ODOO_MCP_COMMAND={command_path}")
+        print("ODOO_MCP_ARGS=launch")
+    else:  # cli
+        # Bare command line — for schedulers that spawn a process and
+        # speak MCP over stdio without their own config layer.
+        print(f"{command_path} launch")
+
+    print(file=sys.stderr)
+    print(
+        "# Verify after pasting: trigger one scheduled job and check that",
+        file=sys.stderr,
+    )
+    print(
+        "# tools 'odoo_search_read' / 'odoo_write' / 'odoo_create' appear",
+        file=sys.stderr,
+    )
+    print(
+        "# in the agent's tool list. If they don't, the scheduler's MCP",
+        file=sys.stderr,
+    )
+    print("# loader didn't pick up this snippet — check the agent's logs.", file=sys.stderr)
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: setup --rotate-key NAME
 # ---------------------------------------------------------------------------
 
@@ -1784,6 +1878,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_add()
         if "--remove" in args:
             return _cmd_remove()
+        if "--scheduler-config" in args:
+            # Optional ``--format=…``; default json.
+            fmt = _extract_flag_value(args, "--format") or "json"
+            return _cmd_scheduler_config(fmt)
         return _cmd_setup()
     except KeyboardInterrupt:
         print("\n\nSetup cancelled.")

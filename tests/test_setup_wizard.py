@@ -1227,3 +1227,88 @@ def test_generate_api_key_via_password_network_error_is_friendly(
         setup_wizard._generate_api_key_via_password(
             "https://x.odoo.com", "db", "u@x.com", "pw", "name"
         )
+
+
+# ---------------------------------------------------------------------------
+# `odoo-mcp setup --scheduler-config` — emit the snippet a non-Claude
+# scheduler (n8n, Decisions, custom cron) needs to load odoo-mcp.
+#
+# Triggering scenario: a scheduled cron job ran with no MCP loaded, the
+# spawned agent reported "Odoo MCP niet geladen", no invoices got
+# checked. We can't auto-write into an external scheduler's config but
+# we can print the exact snippet to paste, with the host-specific
+# absolute path resolved.
+# ---------------------------------------------------------------------------
+
+
+def test_scheduler_config_json_emits_mcp_servers_shape(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(setup_wizard, "_resolve_odoo_mcp_command", lambda: "/abs/path/odoo-mcp")
+    rc = setup_wizard.main(["--scheduler-config"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    # The snippet itself is on stdout so it can be redirected straight
+    # into a file; instructions go to stderr.
+    import json as _json
+
+    payload = _json.loads(captured.out)
+    assert payload == {
+        "mcpServers": {
+            "odoo-mcp": {
+                "command": "/abs/path/odoo-mcp",
+                "args": ["launch"],
+            }
+        }
+    }
+    # Instructions on stderr point at verification.
+    assert "tool list" in captured.err or "tools" in captured.err
+
+
+def test_scheduler_config_env_format_emits_keyvalue_lines(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(setup_wizard, "_resolve_odoo_mcp_command", lambda: "/abs/path/odoo-mcp")
+    rc = setup_wizard.main(["--scheduler-config", "--format=env"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ODOO_MCP_COMMAND=/abs/path/odoo-mcp" in out
+    assert "ODOO_MCP_ARGS=launch" in out
+
+
+def test_scheduler_config_cli_format_emits_bare_command(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(setup_wizard, "_resolve_odoo_mcp_command", lambda: "/abs/path/odoo-mcp")
+    rc = setup_wizard.main(["--scheduler-config", "--format=cli"])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    assert out == "/abs/path/odoo-mcp launch"
+
+
+def test_scheduler_config_rejects_unknown_format(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Mistyped formats must exit non-zero — silently falling back to
+    JSON would hide the typo and the operator would paste an unexpected
+    shape into their scheduler config."""
+    monkeypatch.setattr(setup_wizard, "_resolve_odoo_mcp_command", lambda: "/abs/path/odoo-mcp")
+    rc = setup_wizard.main(["--scheduler-config", "--format=yaml"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "yaml" in err.lower()
+    assert "json" in err.lower()  # Suggests the valid options
+
+
+def test_scheduler_config_format_with_space_separator(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--format env`` (space-separated) must work the same as
+    ``--format=env``; this is the default ``_extract_flag_value``
+    behaviour and the test pins it so a refactor can't quietly
+    break script-friendly invocations."""
+    monkeypatch.setattr(setup_wizard, "_resolve_odoo_mcp_command", lambda: "/abs/path/odoo-mcp")
+    rc = setup_wizard.main(["--scheduler-config", "--format", "env"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ODOO_MCP_COMMAND=" in out

@@ -10,6 +10,37 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-05-21
+
+### Added
+
+- **``odoo-mcp setup --scheduler-config [--format=json|env|cli]``** —
+  print the snippet a non-Claude scheduler (Decisions, n8n, custom
+  cron) needs to load odoo-mcp. Triggering scenario: a scheduled
+  cron job ran with no MCP wired up, the spawned agent reported
+  "Odoo MCP niet geladen" and no facturen got checked. We can't
+  auto-write into an arbitrary scheduler's config — there's no
+  shared format — but we can emit the exact snippet the operator
+  pastes, with the host-specific absolute path to ``odoo-mcp``
+  resolved locally so it matches the install.
+
+  Three formats:
+
+  - ``json`` (default): the ``{"mcpServers": {"odoo-mcp": ...}}``
+    shape understood by Claude Desktop, the Anthropic CLI, and
+    most MCP-aware schedulers.
+  - ``env``: shell-style ``KEY=VALUE`` for schedulers that read
+    MCP config from environment instead of a structured file.
+  - ``cli``: bare ``<command> launch`` string for shell-based
+    schedulers that just spawn a stdio process.
+
+  The snippet goes to stdout (so it can be redirected straight
+  into a file); the instructions and verification hint go to
+  stderr. Five new tests cover all three formats, an explicit
+  rejection of unknown formats (so a typo doesn't silently fall
+  back to JSON), and the ``--format env`` space-separated
+  invocation in addition to ``--format=env``.
+
 ## [0.18.2] - 2026-05-21
 
 ### Changed
