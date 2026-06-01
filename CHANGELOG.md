@@ -10,6 +10,42 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-05-29
+
+### Changed
+
+- **Dry-run previews now surface ``commits_remaining`` and a one-line
+  no-cost guarantee.** Real-world failure: an agent hit the burst
+  limit on production writes and reported "counts dry-runs too" —
+  WRONGLY, because dry-runs never decremented. The actual code was
+  correct; the bug was UX. Dry-run responses carried no
+  ``commits_remaining`` field at all, so the agent had no
+  observation that would refute its incorrect prior, and
+  defensively shrank its batch size ("switching to one group of 5
+  per unlock") — wasting throughput the budget was designed to
+  allow.
+
+  Every preview now includes:
+
+  - ``commits_remaining`` — the unchanged budget value, identical
+    to what the commit path returns, so an agent doing ten
+    consecutive dry-runs can SEE the counter holds steady.
+  - ``commits_remaining_note`` — text payload spelling out
+    "This is a dry-run; commits_remaining is unchanged. Only a
+    successful commit decrements the burst budget."
+
+  The ``ProdGuardError`` raised when the budget is actually
+  exhausted now also says "Dry-runs do NOT count toward this
+  budget; only successful commits do" — so even an agent that
+  never read the no-cost note gets the explanation at failure time.
+
+  Both fields are prod-only — non-prod previews omit them so dev
+  users aren't misled into thinking the budget applies on their
+  sandbox. Three new dispatcher-level tests pin the preview
+  contract (present on prod, absent on dev, never moves across
+  repeated dry-runs); one prod_guard test pins the error-message
+  language.
+
 ## [0.19.0] - 2026-05-21
 
 ### Added

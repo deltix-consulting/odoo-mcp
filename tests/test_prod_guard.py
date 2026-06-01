@@ -103,8 +103,15 @@ def test_burst_limit_enforced() -> None:
     guard.consume_pending(t2, "prod", "create", "res.partner", now=3.0)
     # Third commit -> burst limit
     t3 = guard.create_pending("prod", "create", "res.partner", "s", now=4.0)
-    with pytest.raises(ProdGuardError, match="Burst limit reached"):
+    with pytest.raises(ProdGuardError, match="Burst limit reached") as excinfo:
         guard.consume_pending(t3, "prod", "create", "res.partner", now=5.0)
+    # The error must spell out that dry-runs DON'T count. Agents in the
+    # field were defensively shrinking batch sizes because the message
+    # didn't say so — wasting throughput the burst budget was meant to
+    # allow. Pin the language explicitly.
+    msg = str(excinfo.value)
+    assert "Dry-runs do NOT count" in msg or "dry-runs do not count" in msg.lower()
+    assert "successful commits" in msg.lower()
 
 
 def test_dry_runs_dont_count_toward_burst() -> None:

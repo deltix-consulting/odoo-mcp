@@ -576,3 +576,79 @@ def test_audit_entry_contains_mode(tmp_path: Path) -> None:
     assert details.get("mode") == "delete"
     # The args-shape block also carries the scalar mode string.
     assert details["args"]["mode"] == "delete"
+
+
+# ---------------------------------------------------------------------------
+# Dry-run previews must expose commits_remaining so agents can SEE the
+# budget is unchanged across dry-runs.
+#
+# Real-world failure (logged at v0.19.x): an agent hit the burst limit
+# and reported "counts dry-runs too" — wrongly, because dry-runs don't
+# decrement. But because the dry-run response carried no commits_remaining
+# field, the agent had no evidence to refute its own belief, and shrank
+# its batch size defensively. The fix: surface the unchanged budget in
+# every preview plus a one-line note that calls out the no-cost guarantee.
+# ---------------------------------------------------------------------------
+
+
+def test_archive_dry_run_returns_commits_remaining(tmp_path: Path) -> None:
+    """The preview must expose the burst budget AND a clarifying note,
+    so a sequence of dry-runs leaves no ambiguity about whether they cost
+    anything."""
+    fields = {"id": {"type": "integer"}, "active": {"type": "boolean"}}
+    app, _ = _build_app(tmp_path, production=True, fields=fields)
+    dispatcher = Dispatcher(app)
+    app.prod_guard.unlock("prod", production=True, max_commits=7)
+
+    first = _call(
+        dispatcher,
+        {"instance": "prod", "model": "res.partner", "ids": [1], "mode": "archive"},
+    )
+    assert first["preview"] is True
+    assert first["commits_remaining"] == 7
+    # The no-cost guarantee must be stated in words too — a numeric
+    # field alone wasn't enough to dislodge the agent's wrong prior.
+    note = first.get("commits_remaining_note", "")
+    assert "dry-run" in note.lower()
+    assert "unchanged" in note.lower()
+
+
+def test_repeated_dry_runs_do_not_decrement_commits_remaining(tmp_path: Path) -> None:
+    """End-to-end regression: ten dry-runs in a row leave commits_remaining
+    at the configured maximum. The previous behavior (no field at all)
+    forced agents to guess; the contract now is "you can SEE it didn't
+    move"."""
+    fields = {"id": {"type": "integer"}, "active": {"type": "boolean"}}
+    app, _ = _build_app(tmp_path, production=True, fields=fields)
+    dispatcher = Dispatcher(app)
+    app.prod_guard.unlock("prod", production=True, max_commits=5)
+
+    for _ in range(10):
+        preview = _call(
+            dispatcher,
+            {"instance": "prod", "model": "res.partner", "ids": [1, 2], "mode": "archive"},
+        )
+        assert preview["preview"] is True
+        assert preview["commits_remaining"] == 5
+
+
+def test_dev_dry_run_omits_commits_remaining(tmp_path: Path) -> None:
+    """commits_remaining is a prod-only concept; non-prod previews must
+    not carry the field — surfacing it on dev would mislead users into
+    thinking the budget applies there too."""
+    fields = {"id": {"type": "integer"}, "active": {"type": "boolean"}}
+    app, _ = _build_app(tmp_path, production=False, fields=fields)
+    dispatcher = Dispatcher(app)
+    preview = _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "model": "res.partner",
+            "ids": [1],
+            "mode": "archive",
+            "dry_run": True,
+        },
+    )
+    assert preview["preview"] is True
+    assert "commits_remaining" not in preview
+    assert "commits_remaining_note" not in preview

@@ -357,7 +357,9 @@ class ProdGuard:
                 if state.commits_remaining <= 0:
                     raise ProdGuardError(
                         "Burst limit reached for this unlock — the configured "
-                        "number of commits have already been performed. Call "
-                        "odoo_enable_prod_writes again to renew."
+                        "number of commits have already been performed. "
+                        "Dry-runs do NOT count toward this budget; only "
+                        "successful commits do. Call odoo_enable_prod_writes "
+                        "again to renew."
                     )
                 state.commits_remaining -= 1

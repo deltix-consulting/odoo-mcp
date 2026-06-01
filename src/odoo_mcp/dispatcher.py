@@ -725,7 +725,7 @@ class Dispatcher:
                 payload_digest=compute_payload_digest(_token_payload(ctx.op.value, args)),
             )
             self._audit_ok(ctx, {"field_count": n}, args, dry_run=True)
-            return {
+            preview: dict[str, Any] = {
                 "preview": True,
                 "instance": ctx.instance,
                 "model": model,
@@ -733,6 +733,8 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_create"),
             }
+            self._add_commits_remaining(preview, ctx, dry_run=True)
+            return preview
 
         self._consume_token_on_prod(ctx, args)
         new_id = rt.client.create(model, validated)
@@ -774,7 +776,7 @@ class Dispatcher:
                 payload_digest=compute_payload_digest(_token_payload(ctx.op.value, args)),
             )
             self._audit_ok(ctx, {"field_count": n, "id_count": len(ids)}, args, dry_run=True)
-            return {
+            preview: dict[str, Any] = {
                 "preview": True,
                 "instance": ctx.instance,
                 "model": model,
@@ -783,6 +785,8 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_write"),
             }
+            self._add_commits_remaining(preview, ctx, dry_run=True)
+            return preview
 
         self._consume_token_on_prod(ctx, args)
         ok = rt.client.write(model, ids, validated)
@@ -853,7 +857,7 @@ class Dispatcher:
                 args,
                 dry_run=True,
             )
-            return {
+            preview: dict[str, Any] = {
                 "preview": True,
                 "instance": ctx.instance,
                 "model": model,
@@ -863,6 +867,8 @@ class Dispatcher:
                 "reminder": reminder,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_archive_or_delete"),
             }
+            self._add_commits_remaining(preview, ctx, dry_run=True)
+            return preview
 
         self._consume_token_on_prod(ctx, args)
         if mode == "archive":
@@ -969,7 +975,7 @@ class Dispatcher:
                 args,
                 dry_run=True,
             )
-            return {
+            preview_result: dict[str, Any] = {
                 "preview": True,
                 "instance": ctx.instance,
                 "model": model,
@@ -982,6 +988,8 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_send_message"),
             }
+            self._add_commits_remaining(preview_result, ctx, dry_run=True)
+            return preview_result
 
         self._consume_token_on_prod(ctx, args)
         message_id = rt.client.message_post(
@@ -1070,7 +1078,7 @@ class Dispatcher:
                 payload_digest=compute_payload_digest(_token_payload(ctx.op.value, args)),
             )
             self._audit_ok(ctx, {"action": action, "id_count": len(record_ids)}, args, dry_run=True)
-            return {
+            preview: dict[str, Any] = {
                 "preview": True,
                 "instance": ctx.instance,
                 "model": model,
@@ -1081,6 +1089,8 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_run_document_action"),
             }
+            self._add_commits_remaining(preview, ctx, dry_run=True)
+            return preview
 
         self._consume_token_on_prod(ctx, args)
         result = rt.client.call_document_action(model, method, record_ids)
@@ -1108,13 +1118,34 @@ class Dispatcher:
         self._add_commits_remaining(out, ctx)
         return out
 
-    def _add_commits_remaining(self, result: dict[str, Any], ctx: _Ctx) -> None:
-        """If on prod, expose the post-commit burst budget to the caller."""
+    def _add_commits_remaining(
+        self, result: dict[str, Any], ctx: _Ctx, *, dry_run: bool = False
+    ) -> None:
+        """Expose the post-commit burst budget to the caller (prod only).
+
+        Also called from dry-run paths so the agent can SEE the budget
+        is unchanged across previews. Without this, an agent that
+        dry-runs five things and then hits a burst-limit error has no
+        evidence that dry-runs don't count, and defensively shrinks its
+        batch size — losing exactly the throughput the burst budget was
+        meant to allow.
+
+        On dry-run paths we also stamp ``commits_remaining_note``
+        making the no-cost guarantee explicit. The agent reads model
+        output as text; a numeric field alone isn't enough to dislodge
+        an incorrect prior.
+        """
         if not ctx.rt.config.production:
             return
         remaining = self.app.prod_guard.commits_remaining(ctx.instance)
-        if remaining is not None:
-            result["commits_remaining"] = remaining
+        if remaining is None:
+            return
+        result["commits_remaining"] = remaining
+        if dry_run:
+            result["commits_remaining_note"] = (
+                "This is a dry-run; commits_remaining is unchanged. "
+                "Only a successful commit decrements the burst budget."
+            )
 
     def _consume_token_on_prod(self, ctx: _Ctx, args: dict[str, Any]) -> None:
         """On prod, a valid confirmation token from a prior dry run is required.
