@@ -574,6 +574,41 @@ _TOOL_DIAGNOSE_ACCESS = Tool(
 )
 
 
+_TOOL_DIAGNOSE_ROUTING = Tool(
+    name="odoo_diagnose_routing",
+    description=(
+        "Diagnose Odoo's stock-routing config for a (product, warehouse) "
+        "pair. Returns: the product's active routes (own + template + "
+        "warehouse-derived), the warehouse's delivery/reception config, "
+        "and every candidate stock.rule that could fire — each with its "
+        "source/destination locations and picking_type_id. Use this when "
+        "a sale_order/purchase_order produces an unexpected transfer "
+        "type (e.g. 'TR-LAAD' instead of 'LAAD') and you need to know "
+        "which stock.rule Odoo would evaluate. Read-only. Does NOT "
+        "predict the winning rule — that depends on sequence + "
+        "location-chain + custom overrides; the tool lists the "
+        "candidates and the operator/agent picks the match. "
+        'Example: instance="prod", product_id=8, warehouse_id=2.'
+    ),
+    inputSchema={
+        "type": "object",
+        "required": ["instance", "product_id", "warehouse_id"],
+        "additionalProperties": False,
+        "properties": {
+            "instance": {"type": "string"},
+            "product_id": {
+                "type": "integer",
+                "description": "ID of the product.product record being shipped.",
+            },
+            "warehouse_id": {
+                "type": "integer",
+                "description": "ID of the stock.warehouse the order targets.",
+            },
+        },
+    },
+)
+
+
 _TOOL_HELP = Tool(
     name="odoo_help",
     description=(
@@ -613,6 +648,7 @@ def build_tools() -> list[Tool]:
         _TOOL_ARCHIVE_OR_DELETE,
         _TOOL_ENABLE_PROD_WRITES,
         _TOOL_DIAGNOSE_ACCESS,
+        _TOOL_DIAGNOSE_ROUTING,
         _TOOL_SEND_MESSAGE,
         _TOOL_RUN_DOCUMENT_ACTION,
     ]

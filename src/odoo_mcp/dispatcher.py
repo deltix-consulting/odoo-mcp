@@ -1206,6 +1206,192 @@ class Dispatcher:
             **rights,
         }
 
+    def _diagnose_routing(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Report Odoo's procurement routing config for (product, warehouse).
+
+        Read-only diagnostic tool. Walks the routes that COULD apply to
+        *product_id* against *warehouse_id*, then lists every
+        ``stock.rule`` matching one of those routes plus the warehouse.
+        The caller sees which rule(s) Odoo could fire on confirm —
+        and therefore which ``picking_type_id`` the resulting transfer
+        gets.
+
+        Honest non-prediction. Odoo's runtime rule resolution involves
+        rule sequence, location-chain matching, MTO chains, custom
+        overrides shipped by third-party modules, and (in 17+)
+        per-route warehouse selectability. Re-implementing that
+        client-side would drift on every Odoo release. The tool
+        deliberately returns the CANDIDATE set + relevant flags, and
+        lets the operator / agent identify the winner by inspection.
+
+        Allowlist bypass. The six models this tool reads
+        (``product.product``, ``product.template``, ``stock.warehouse``,
+        ``stock.route``, ``stock.rule``, ``stock.location``) are
+        operator-configuration models, never carry business data, and
+        are hard-coded — the tool can't be asked to read anything
+        else. Bypassing the per-instance ``allowed_models`` for these
+        therefore doesn't widen the data-exposure surface; it just
+        makes the tool work without each operator having to remember
+        to allowlist six routing tables.
+        """
+        ctx = self._begin(
+            "odoo_diagnose_routing",
+            args,
+            Operation.DIAGNOSE_ROUTING,
+            require_model=False,
+        )
+        product_id = _require_int(args, "product_id")
+        warehouse_id = _require_int(args, "warehouse_id")
+        rt = ctx.rt
+
+        # --- product + template + categ-derived routes -----------------
+        product_rows = rt.client.search_read(
+            "product.product",
+            [("id", "=", product_id)],
+            ["id", "name", "default_code", "product_tmpl_id", "route_ids", "categ_id"],
+            limit=1,
+            offset=0,
+            order=None,
+        )
+        if not product_rows:
+            raise OdooMcpError(f"product.product id={product_id} not found.")
+        product = product_rows[0]
+        tmpl_ref = product.get("product_tmpl_id")
+        tmpl_id = tmpl_ref[0] if isinstance(tmpl_ref, list) and tmpl_ref else None
+
+        template: dict[str, Any] | None = None
+        if isinstance(tmpl_id, int):
+            tmpl_rows = rt.client.search_read(
+                "product.template",
+                [("id", "=", tmpl_id)],
+                ["id", "name", "route_ids", "categ_id"],
+                limit=1,
+                offset=0,
+                order=None,
+            )
+            template = tmpl_rows[0] if tmpl_rows else None
+
+        # --- warehouse -------------------------------------------------
+        wh_rows = rt.client.search_read(
+            "stock.warehouse",
+            [("id", "=", warehouse_id)],
+            [
+                "id",
+                "name",
+                "code",
+                "delivery_steps",
+                "reception_steps",
+                "sale_route_id",
+                "purchase_route_id",
+                "mto_pull_id",
+                "lot_stock_id",
+                "view_location_id",
+            ],
+            limit=1,
+            offset=0,
+            order=None,
+        )
+        if not wh_rows:
+            raise OdooMcpError(f"stock.warehouse id={warehouse_id} not found.")
+        warehouse = wh_rows[0]
+
+        # --- collect candidate route ids -------------------------------
+        candidate_route_ids: set[int] = set()
+        for ref in product.get("route_ids") or []:
+            if isinstance(ref, int):
+                candidate_route_ids.add(ref)
+        if template:
+            for ref in template.get("route_ids") or []:
+                if isinstance(ref, int):
+                    candidate_route_ids.add(ref)
+        # ``sale_route_id`` is a stock.route — include its id in the
+        # candidate route set. ``mto_pull_id`` is a stock.rule (MTO
+        # chain helper), not a route, so we surface it on the warehouse
+        # block above but do not add it here.
+        wh_sale_ref = warehouse.get("sale_route_id")
+        if isinstance(wh_sale_ref, list) and wh_sale_ref:
+            candidate_route_ids.add(wh_sale_ref[0])
+
+        routes: list[dict[str, Any]] = []
+        if candidate_route_ids:
+            routes = rt.client.search_read(
+                "stock.route",
+                [("id", "in", list(candidate_route_ids))],
+                [
+                    "id",
+                    "name",
+                    "sequence",
+                    "active",
+                    "product_selectable",
+                    "product_categ_selectable",
+                    "warehouse_selectable",
+                    "sale_selectable",
+                    "warehouse_ids",
+                ],
+                limit=50,
+                offset=0,
+                order="sequence asc, id asc",
+            )
+
+        # --- rules on those routes + this warehouse --------------------
+        rules: list[dict[str, Any]] = []
+        if candidate_route_ids:
+            rules = rt.client.search_read(
+                "stock.rule",
+                [
+                    ("route_id", "in", list(candidate_route_ids)),
+                    "|",
+                    ("warehouse_id", "=", warehouse_id),
+                    ("warehouse_id", "=", False),
+                ],
+                [
+                    "id",
+                    "name",
+                    "sequence",
+                    "active",
+                    "route_id",
+                    "action",
+                    "location_src_id",
+                    "location_dest_id",
+                    "picking_type_id",
+                    "procure_method",
+                    "group_propagation_option",
+                    "auto",
+                    "warehouse_id",
+                ],
+                limit=200,
+                offset=0,
+                order="sequence asc, id asc",
+            )
+
+        self._audit_ok(
+            ctx,
+            {
+                "product_id": product_id,
+                "warehouse_id": warehouse_id,
+                "candidate_route_count": len(routes),
+                "candidate_rule_count": len(rules),
+            },
+            args,
+        )
+        return {
+            "instance": ctx.instance,
+            "product": product,
+            "template": template,
+            "warehouse": warehouse,
+            "candidate_routes": routes,
+            "candidate_rules": rules,
+            "note": (
+                "These are the candidates Odoo evaluates at procurement "
+                "time. The winning rule depends on sequence, "
+                "location-chain matching, MTO chains, and any custom "
+                "overrides shipped by installed modules. This tool does "
+                "NOT predict the winner — inspect candidate_rules to "
+                "see which picking_type_id each would produce, and "
+                "which would match your scheduled procurement."
+            ),
+        }
+
     def _enable_prod_writes(self, args: dict[str, Any]) -> dict[str, Any]:
         _refuse_if_read_only_session()
         instance_name = _require_str(args, "instance")
@@ -1329,6 +1515,7 @@ _HANDLERS: dict[str, Callable[[Dispatcher, dict[str, Any]], dict[str, Any]]] = {
     "odoo_archive_or_delete": Dispatcher._archive_or_delete,
     "odoo_enable_prod_writes": Dispatcher._enable_prod_writes,
     "odoo_diagnose_access": Dispatcher._diagnose_access,
+    "odoo_diagnose_routing": Dispatcher._diagnose_routing,
     "odoo_send_message": Dispatcher._send_message,
     "odoo_run_document_action": Dispatcher._run_document_action,
 }

@@ -10,6 +10,48 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-06-12
+
+### Added
+
+- **New tool `odoo_diagnose_routing`** — read-only inspector that
+  answers "which `stock.rule` and `picking_type_id` could fire for
+  this (product, warehouse) pair?". Built in response to a real
+  field incident: a deltix SO produced a `TR-LAAD` picking
+  (scenario B) instead of the expected `LAAD` (scenario A), and the
+  agent investigating it had no way to introspect
+  `stock.route` / `stock.rule` from inside its sandbox.
+
+  Inputs: `instance`, `product_id`, `warehouse_id`.
+  Returns: the product + its template, the warehouse config
+  (delivery/reception steps, `sale_route_id`, `mto_pull_id`),
+  every candidate `stock.route` reachable from the product or
+  warehouse, and every candidate `stock.rule` on those routes
+  matching the warehouse (or wildcard) — each rule with its
+  source/destination locations, `picking_type_id`, action,
+  procure-method, and sequence.
+
+  Deliberately does NOT predict the winning rule. Odoo's runtime
+  rule resolution involves sequence, location-chain matching, MTO
+  chains, and custom overrides from installed modules; replicating
+  that client-side would drift on every Odoo release. The tool's
+  response is the candidate set + a note that calls out the
+  no-prediction guarantee — and a test pins the absence of any
+  `winning_rule` / `predicted_picking_type` field so a refactor
+  can't quietly add prediction back.
+
+  Allowlist bypass for six operator-configuration models
+  (`product.product`, `product.template`, `stock.warehouse`,
+  `stock.route`, `stock.rule`, `stock.location`) — none carry
+  business data, and a test pins the model set so future changes
+  can't silently widen it.
+
+  Eight new tests cover: read-op classification, tool registration
+  order, happy-path candidate enumeration, the non-prediction
+  guarantee, the six-model touch limit, allowlist-bypass without
+  config changes, and honest failure on unknown product or
+  warehouse ids.
+
 ## [0.20.0] - 2026-06-12
 
 ### Added
