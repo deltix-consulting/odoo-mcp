@@ -110,6 +110,48 @@ def test_map_resolves_known_pairs() -> None:
     assert resolve_document_action("stock.picking", "validate") == "button_validate"
 
 
+def test_map_resolves_cancel_pairs() -> None:
+    """Pin every cancel target so a refactor can't drop one silently.
+
+    Reviewing operators / auditors should be able to read this list and
+    immediately see which production records an agent can cancel. The
+    inverse-coverage test below pins what we deliberately DO NOT expose.
+    """
+    assert resolve_document_action("purchase.order", "cancel") == "button_cancel"
+    assert resolve_document_action("sale.order", "cancel") == "action_cancel"
+    assert resolve_document_action("account.move", "cancel") == "button_cancel"
+    assert resolve_document_action("stock.picking", "cancel") == "action_cancel"
+    # v0.20.0 additions:
+    assert resolve_document_action("mrp.production", "cancel") == "action_cancel"
+    assert resolve_document_action("account.payment", "cancel") == "action_cancel"
+    assert resolve_document_action("hr.leave", "cancel") == "action_cancel"
+    assert resolve_document_action("hr.expense.sheet", "cancel") == "action_cancel"
+
+
+def test_deliberately_excluded_cancel_targets() -> None:
+    """Pin what we DO NOT expose, so a future "let's just add this row"
+    PR has to delete this test (and explain why) instead of slipping
+    past code review.
+
+    - ``hr.leave`` cancel is the user-side withdraw. ``action_refuse``
+      is the manager-side rejection — that's an HR decision, not an
+      agent action.
+    - ``hr.expense`` (singular) is a single line on a sheet. Cancelling
+      a line out of band would leave the parent sheet inconsistent;
+      callers must cancel the sheet.
+    """
+    from odoo_mcp.errors import OperationNotAllowedError
+
+    # hr.leave does NOT expose refuse — only the user's own cancel.
+    with pytest.raises(OperationNotAllowedError):
+        resolve_document_action("hr.leave", "refuse")
+
+    # hr.expense (singular) is intentionally not in the map; callers
+    # cancel via hr.expense.sheet.
+    with pytest.raises(OperationNotAllowedError):
+        resolve_document_action("hr.expense", "cancel")
+
+
 def test_map_rejects_unknown_pair() -> None:
     from odoo_mcp.errors import OperationNotAllowedError
 

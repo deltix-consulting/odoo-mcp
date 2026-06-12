@@ -10,6 +10,36 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-06-12
+
+### Added
+
+- **`odoo_run_document_action` now supports cancel for four more
+  models**, broadening AI-driven cancel-workflow coverage from sales
+  + purchase + invoicing + delivery into manufacturing, payments
+  and HR. Each new row goes through the same dry-run + confirmation
+  token + payload-digest pipeline as the existing actions:
+
+  | model | action | Odoo method |
+  |---|---|---|
+  | `mrp.production` | `cancel` | `action_cancel` |
+  | `account.payment` | `cancel` | `action_cancel` |
+  | `hr.leave` | `cancel` | `action_cancel` |
+  | `hr.expense.sheet` | `cancel` | `action_cancel` |
+
+  Deliberately NOT exposed (each is its own row in the test pin so a
+  future "let's just add this" PR has to delete the test and explain
+  why):
+
+  - `hr.leave` *refuse* — manager-side rejection, an HR decision
+    that should go through the UI not an agent.
+  - `hr.expense` (singular) *cancel* — Odoo manages expense state
+    through the parent sheet; per-line cancel leaves the sheet
+    inconsistent.
+
+  Two new tests pin the additions, and one inverse-coverage test
+  pins the exclusions.
+
 ## [0.19.1] - 2026-05-29
 
 ### Changed
