@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from odoo_mcp.security.fields import compile_extra_patterns
 from odoo_mcp.security.smart_fields import (
     DEFAULT_SMART_FIELDS_LIMIT,
     select_smart_fields,
@@ -185,3 +186,79 @@ def test_smart_fields_always_returns_at_least_id() -> None:
         _meta({"id": "integer", "vat": "char", "create_uid": "many2one"}),
     )
     assert out == ["id"]
+
+
+# -- Model-specific priority extras (routing / logistics) ----------------------
+
+
+def test_extras_surface_routing_fields_on_warehouse() -> None:
+    """delivery_steps decides 1-step vs multi-step delivery — the single
+    most common answer to "why did this SO confirm into the wrong picking
+    type". It must be visible in a default read."""
+    out = select_smart_fields(
+        "stock.warehouse",
+        _meta(
+            {
+                "id": "integer",
+                "name": "char",
+                "delivery_steps": "selection",
+                "reception_steps": "selection",
+                "delivery_route_id": "many2one",
+                "partner_id": "many2one",
+            }
+        ),
+    )
+    assert "delivery_steps" in out
+    assert "delivery_route_id" in out
+
+
+def test_extras_bypass_heavy_type_skip_for_route_ids() -> None:
+    # route_ids is many2many — normally dropped as heavy. The extras pass
+    # lets it through because the ID list IS the signal.
+    out = select_smart_fields(
+        "product.template",
+        _meta({"id": "integer", "name": "char", "route_ids": "many2many"}),
+    )
+    assert "route_ids" in out
+
+
+def test_extras_do_not_leak_to_other_models() -> None:
+    # A m2m named route_ids on an unrelated model stays heavy-skipped.
+    out = select_smart_fields(
+        "x.custom.model",
+        _meta({"id": "integer", "name": "char", "route_ids": "many2many"}),
+    )
+    assert "route_ids" not in out
+
+
+def test_extras_never_bypass_sensitive_policy() -> None:
+    # Hypothetical: if an extras field ever collided with a sensitive
+    # pattern, redaction must win over the extras pass.
+    meta = _meta({"id": "integer", "name": "char", "route_id": "many2one"})
+    out = select_smart_fields(
+        "sale.order.line",
+        meta,
+        extra_redacted=compile_extra_patterns(["route_id"]),
+    )
+    assert "route_id" not in out
+
+
+def test_extras_present_on_stock_rule() -> None:
+    out = select_smart_fields(
+        "stock.rule",
+        _meta(
+            {
+                "id": "integer",
+                "name": "char",
+                "action": "selection",
+                "picking_type_id": "many2one",
+                "route_id": "many2one",
+                "location_src_id": "many2one",
+                "location_dest_id": "many2one",
+                "procure_method": "selection",
+                "sequence": "integer",
+            }
+        ),
+    )
+    for f in ("action", "picking_type_id", "route_id", "procure_method", "sequence"):
+        assert f in out, f"{f} missing from stock.rule smart defaults"

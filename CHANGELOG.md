@@ -10,6 +10,88 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-06-12
+
+Efficiency release. Driven by an audit of 2,794 real-world tool calls
+(10.6% failure rate): the dominant cost of an agent session is the
+number of calls and failures, not per-call latency. Every change below
+removes a failure class or a forced round-trip observed in the field.
+
+### Fixed
+
+- **Domain sandbox: implicit-AND domains accepted.** The polish-arity
+  validator rejected Odoo-valid domains mixing implicit AND with
+  explicit operators (e.g. `[leaf, '|', leaf, leaf]`) with "Malformed
+  domain: expected a single top-level expression". Odoo's
+  `normalize_domain` joins leftover top-level expressions with an
+  implicit AND; the sandbox now does the same. Underfed `& | !`
+  operators are still rejected.
+- **Help cookbook no longer teaches a rejected pattern.** The first
+  `common_patterns` example used a dotted domain
+  (`stage_id.name`) that the sandbox itself refuses — the most
+  frequent domain rejection in audit logs traced back to agents
+  copying it. Replaced with a sandbox-valid example; a new test pins
+  every cookbook domain to pass `sandbox_domain`.
+- **Transport: failed requests no longer poison the keep-alive
+  connection.** A timeout or protocol error mid-request left the
+  cached HTTP connection in the `Request-sent` state, failing every
+  subsequent call with `ResponseNotReady` until restart. Both
+  transports now drop the cached connection on any request failure.
+
+### Changed
+
+- **Prod-guard unlock renews in place.** Calling
+  `odoo_enable_prod_writes` while a window is still active now resets
+  the expiry and commit budget but keeps the window identity, so
+  confirmation tokens issued before the renewal stay consumable —
+  hitting the burst limit mid-batch no longer forces re-doing
+  reviewed dry runs. An *expired* window still gets a fresh identity
+  (stale tokens never survive a real expiry).
+- **`odoo_diagnose_access` reports MCP-blocked models instead of
+  failing on them.** For a model blocked by the denylist or a
+  strict-mode allowlist it returns `mcp_blocked: true` with the
+  reason and the config key to change (`allowed_models` in
+  `~/.odoo-mcp/config.toml`) — previously it raised the very error
+  the caller was trying to diagnose. Permitted models additionally
+  report `write_blocked_via_mcp`.
+- **`ModelNotAllowedError` hint is actionable** — names
+  `odoo_diagnose_access` and the `allowed_models` config key instead
+  of "contact your MCP administrator".
+
+### Added
+
+- **`res.users` readable through a hard identity-field whitelist.**
+  Resolving `user_id` to a name/login/email is the most common
+  relational lookup in CRM flows; the full denylist entry produced a
+  steady stream of dead-end calls (43 in the audited logs, plus the
+  `user_id.login` dotted-domain workaround attempts it provoked).
+  Reads now expose exactly `id, name, display_name, login, email,
+  active, partner_id, company_id, lang, tz, share` — enforced at the
+  dispatcher's single `fields_get` choke point
+  (`restrict_fields_meta`), so describe/smart-fields/explicit
+  `fields=`/domains/responses all see the same truncated model.
+  Auth state (password, TOTP, API keys, `groups_id`) and the
+  inherited `res.partner` PII surface stay invisible; every write
+  path is refused via `MODEL_WRITE_BLOCKLIST` regardless of
+  prod-guard state. Tests pin the whitelist contents.
+- **Logistics smart-field defaults.** Default reads on
+  `sale.order(.line)`, `product.template/product`,
+  `stock.warehouse/picking/move/rule/route` now include the
+  behavior-deciding routing fields (`route_id(s)`, `delivery_steps`,
+  `picking_type_id`, `rule_id`, ...) that the generic heuristics
+  dropped as heavy types or crowded out past the 25-field cap. An
+  agent comparing a good and a bad sale order can now SEE the
+  routing difference in default reads.
+- **Cookbook patterns for the two workflows agents kept failing:**
+  tracing a relation in two calls (dotted domains are rejected; batch
+  many2one resolution with one `odoo_read`, never one call per id)
+  and explaining an unexpected transfer type via
+  `odoo_diagnose_routing` + the route-precedence checklist.
+  `odoo_diagnose_routing` is now listed in `odoo_help` (it was
+  missing entirely). The terse-help size budget moved 1700 -> 1900
+  chars to fit the 16th tool entry.
+
+
 ## [0.21.0] - 2026-06-12
 
 ### Added

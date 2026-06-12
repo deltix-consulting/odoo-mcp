@@ -6,12 +6,14 @@ import pytest
 
 from odoo_mcp.errors import ConfigError, FieldPolicyError
 from odoo_mcp.security.fields import (
+    MODEL_FIELD_WHITELIST,
     compile_extra_patterns,
     is_always_redacted,
     is_always_redacted_with_extra,
     is_default_hidden,
     redact_fields_get,
     redact_response,
+    restrict_fields_meta,
     validate_aggregate_fields,
     validate_groupby,
     validate_requested_fields,
@@ -596,3 +598,50 @@ def test_redact_response_drops_field_with_no_type_info() -> None:
     )
     assert out == [{"id": 1, "name": "Acme"}]
     assert "mystery_field" not in out[0]
+
+
+# -- Hard per-model read whitelist (res.users) --------------------------------
+
+
+def test_restrict_fields_meta_noop_for_unlisted_model() -> None:
+    meta = {"id": {"type": "integer"}, "vat": {"type": "char"}}
+    assert restrict_fields_meta("res.partner", meta) is meta
+
+
+def test_restrict_fields_meta_filters_res_users() -> None:
+    """res.users inherits all of res.partner via _inherits and carries
+    auth state on top — only the whitelisted identity fields survive."""
+    meta = {
+        "id": {"type": "integer"},
+        "name": {"type": "char"},
+        "login": {"type": "char"},
+        "email": {"type": "char"},
+        "password": {"type": "char"},
+        "totp_secret": {"type": "char"},
+        "groups_id": {"type": "many2many"},
+        "vat": {"type": "char"},  # inherited partner PII
+        "bank_ids": {"type": "one2many"},
+    }
+    out = restrict_fields_meta("res.users", meta)
+    assert set(out) == {"id", "name", "login", "email"}
+
+
+def test_res_users_whitelist_is_identity_only() -> None:
+    """Pin the whitelist: additions need review, and nothing auth-shaped
+    (password, totp, apikeys, groups) may ever appear here."""
+    wl = MODEL_FIELD_WHITELIST["res.users"]
+    assert wl == frozenset(
+        {
+            "id",
+            "name",
+            "display_name",
+            "login",
+            "email",
+            "active",
+            "partner_id",
+            "company_id",
+            "lang",
+            "tz",
+            "share",
+        }
+    )

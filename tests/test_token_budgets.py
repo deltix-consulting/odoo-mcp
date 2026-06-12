@@ -344,9 +344,10 @@ def test_help_default_under_1500_chars(tmp_path: Path) -> None:
 
     payload, size = _call(dispatcher, "odoo_help", {})
     assert payload["ok"] is True
-    # 1700 chars is the practical floor: tools list + summary + 1 instance
-    # block ~= 1.6k. The verbose response on the same fixture is ~3k.
-    assert size < 1700, f"default help payload too large: {size} chars"
+    # 1900 chars is the practical floor: tools list (16 entries, incl.
+    # odoo_diagnose_routing since v0.22.0) + summary + 1 instance block
+    # ~= 1.8k. The verbose response on the same fixture is ~3.5k.
+    assert size < 1900, f"default help payload too large: {size} chars"
     assert "tools" in payload
     # Default mode has no cookbook.
     assert "common_patterns" not in payload

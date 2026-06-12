@@ -87,6 +87,67 @@ _PRIORITY_FIELDS: Final[tuple[str, ...]] = (
     "invoice_date",
 )
 
+# Per-model priority extras. Fields that decide *behavior* on these models
+# — which route fires, which picking type a confirm produces — but that the
+# generic heuristics would drop: route_ids is many2many (a "heavy" type),
+# delivery_steps doesn't match any priority name, and on wide models like
+# stock.picking the alphabetical fill pass crowds the routing fields out
+# past the 25-field cap. Field incident that motivated this: an agent
+# comparing a good and a bad sale order could not see WHY one confirmed
+# into a different picking type, because every routing field was invisible
+# in default reads. Extras bypass the heavy-type skip (deliberately: an
+# ID list like route_ids is exactly the signal wanted here) but never the
+# sensitive-field policy.
+_MODEL_PRIORITY_EXTRAS: Final[dict[str, tuple[str, ...]]] = {
+    "sale.order": ("warehouse_id", "commitment_date"),
+    "sale.order.line": ("route_id", "product_id"),
+    "product.template": ("route_ids",),
+    "product.product": ("route_ids",),
+    "stock.warehouse": (
+        "delivery_steps",
+        "reception_steps",
+        "delivery_route_id",
+        "reception_route_id",
+        "pick_type_id",
+        "out_type_id",
+        "in_type_id",
+    ),
+    "stock.picking": (
+        "picking_type_id",
+        "location_id",
+        "location_dest_id",
+        "group_id",
+        "origin",
+        "scheduled_date",
+    ),
+    "stock.move": (
+        "picking_type_id",
+        "location_id",
+        "location_dest_id",
+        "rule_id",
+        "group_id",
+        "product_id",
+    ),
+    "stock.rule": (
+        "action",
+        "picking_type_id",
+        "route_id",
+        "location_src_id",
+        "location_dest_id",
+        "procure_method",
+        "sequence",
+        "warehouse_id",
+    ),
+    "stock.route": (
+        "rule_ids",
+        "product_selectable",
+        "product_categ_selectable",
+        "warehouse_selectable",
+        "warehouse_ids",
+        "sequence",
+    ),
+}
+
 # Hard cap on how many fields smart selection returns. 25 is enough for
 # any realistic interactive use — if you need more, pass an explicit list.
 DEFAULT_SMART_FIELDS_LIMIT: Final[int] = 25
@@ -118,14 +179,14 @@ def select_smart_fields(
     selected: list[str] = []
     seen: set[str] = set()
 
-    def _consider(fname: str) -> None:
+    def _consider(fname: str, *, allow_heavy: bool = False) -> None:
         if fname in seen:
             return
         meta = fields_meta.get(fname)
         if meta is None:
             return
         ftype = str(meta.get("type") or "")
-        if ftype in _HEAVY_TYPES:
+        if ftype in _HEAVY_TYPES and not allow_heavy:
             return
         if fname in _AUDIT_FIELDS:
             return
@@ -156,6 +217,15 @@ def select_smart_fields(
             _consider(fname)
             if len(selected) >= limit:
                 return selected
+
+    # Model-specific extras — behavior-deciding fields (routing config)
+    # that the generic passes would drop or crowd out. allow_heavy lets
+    # route_ids / rule_ids (m2m / o2m ID lists) through; binary and html
+    # never appear in the extras tables so nothing bulky can slip in.
+    for fname in _MODEL_PRIORITY_EXTRAS.get(model, ()):
+        _consider(fname, allow_heavy=True)
+        if len(selected) >= limit:
+            return selected
 
     # Fill pass — alphabetical, deterministic.
     for fname in sorted(fields_meta.keys()):

@@ -122,3 +122,38 @@ def test_malformed_polish_expression_rejected() -> None:
     # '&' needs two operands but only one follows.
     with pytest.raises(DomainSandboxError):
         sandbox_domain(["&", ("name", "=", "x")], FIELDS)
+
+
+def test_implicit_and_mixed_with_explicit_or_is_ok() -> None:
+    """Odoo's normalize_domain joins leftover top-level expressions with
+    an implicit AND, so a leaf followed by an OR-pair is a valid domain.
+    This shape used to be wrongly rejected (v0.21.0 and earlier)."""
+    domain = [("active", "=", True), "|", ("name", "=", "a"), ("email", "=", "b")]
+    assert sandbox_domain(domain, FIELDS) == domain
+
+
+def test_explicit_or_followed_by_implicit_and_leaf_is_ok() -> None:
+    domain = ["|", ("name", "=", "a"), ("email", "=", "b"), ("active", "=", True)]
+    assert sandbox_domain(domain, FIELDS) == domain
+
+
+def test_multiple_or_groups_implicit_and_is_ok() -> None:
+    domain = [
+        "|",
+        ("name", "=", "a"),
+        ("email", "=", "b"),
+        "|",
+        ("state", "=", "draft"),
+        ("active", "=", True),
+    ]
+    assert sandbox_domain(domain, FIELDS) == domain
+
+
+def test_trailing_underfed_operator_still_rejected() -> None:
+    with pytest.raises(DomainSandboxError, match="fewer than 2"):
+        sandbox_domain([("name", "=", "x"), "|", ("active", "=", True)], FIELDS)
+
+
+def test_dotted_rejection_suggests_two_call_pattern() -> None:
+    with pytest.raises(DomainSandboxError, match="two calls"):
+        sandbox_domain([("partner_id.name", "=", "Acme")], FIELDS)

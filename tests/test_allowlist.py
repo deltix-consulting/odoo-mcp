@@ -100,11 +100,15 @@ def test_check_operation_accepts_new_aggregate_ops() -> None:
 # -- Denylist / open-mode -----------------------------------------------------
 
 
-def test_denylist_blocks_res_users_even_in_open_mode() -> None:
-    # Open mode = wildcard in the allowed set.
+def test_res_users_is_readable_but_never_writable() -> None:
+    """res.users moved off the full denylist (v0.22.0): resolving a
+    user_id to a name/login is the most common relational lookup in CRM
+    flows. Reads pass the model check (field exposure is separately
+    capped by fields.MODEL_FIELD_WHITELIST); writes stay refused via
+    MODEL_WRITE_BLOCKLIST."""
     allowed = frozenset({ALLOWLIST_WILDCARD})
-    with pytest.raises(ModelNotAllowedError, match="denylist"):
-        check_model("res.users", allowed)
+    check_model("res.users", allowed)  # read path: no raise
+    assert "res.users" in MODEL_WRITE_BLOCKLIST
 
 
 def test_denylist_blocks_ir_config_parameter() -> None:
@@ -114,11 +118,11 @@ def test_denylist_blocks_ir_config_parameter() -> None:
 
 
 def test_denylist_blocks_even_in_strict_mode_override() -> None:
-    # Safety invariant: even if a misguided user put res.users on their
+    # Safety invariant: even if a misguided user put res.groups on their
     # strict allowlist, it should still be denied.
-    allowed = frozenset({"res.users", "res.partner"})
+    allowed = frozenset({"res.groups", "res.partner"})
     with pytest.raises(ModelNotAllowedError, match="denylist"):
-        check_model("res.users", allowed)
+        check_model("res.groups", allowed)
 
 
 def test_open_mode_allows_any_non_denied_model() -> None:
@@ -149,7 +153,7 @@ def test_strict_mode_unchanged() -> None:
 
 def test_model_denylist_covers_expected_categories() -> None:
     # Sanity: the five buckets are all represented.
-    assert "res.users" in MODEL_DENYLIST
+    assert "res.groups" in MODEL_DENYLIST
     assert "ir.config_parameter" in MODEL_DENYLIST
     assert "ir.actions.server" in MODEL_DENYLIST
     assert "mail.template" in MODEL_DENYLIST
@@ -166,8 +170,9 @@ def test_denylist_contents_are_locked_in() -> None:
     Removing entries: should be very rare and require explicit review.
     """
     required = {
-        # Auth / user / group
-        "res.users",
+        # Auth / user / group. res.users itself is deliberately absent:
+        # readable through the hard field whitelist, write-blocked via
+        # MODEL_WRITE_BLOCKLIST (see test_res_users_is_readable_but_never_writable).
         "res.users.log",
         "res.users.apikeys",
         "res.users.apikeys.description",
@@ -268,8 +273,10 @@ def test_rights_modification_models_all_denied() -> None:
     allowed = frozenset({ALLOWLIST_WILDCARD})
 
     rights_models: dict[str, list[str]] = {
+        # res.users is not in this list: reads are allowed (capped by the
+        # hard field whitelist); the rights-modification vector is writes,
+        # which MODEL_WRITE_BLOCKLIST refuses unconditionally.
         "direct user / group membership": [
-            "res.users",
             "res.users.log",
             "res.groups",
             "res.users.role",
@@ -334,6 +341,7 @@ def test_write_blocklist_contents_are_locked_in() -> None:
         "mail.message",
         "mail.followers",
         "mail.notification",
+        "res.users",
     }
     missing = required - MODEL_WRITE_BLOCKLIST
     assert not missing, f"MODEL_WRITE_BLOCKLIST is missing: {sorted(missing)}"

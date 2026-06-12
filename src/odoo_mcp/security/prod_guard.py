@@ -142,6 +142,15 @@ class ProdGuard:
         Returns the expiry timestamp (monotonic seconds) so the caller can
         communicate when writes will auto-relock. The unlock also gets a
         burst budget of ``max_commits`` real commits; dry-runs don't count.
+
+        Re-unlocking while a window is still active **renews it in place**:
+        expiry and commit budget reset, but the window identity
+        (``unlocked_at``) is preserved, so confirmation tokens issued under
+        it stay consumable. This is what makes the burst-limit error's
+        "call odoo_enable_prod_writes again to renew" advice cheap to follow
+        — no re-doing dry runs that were already reviewed. An *expired*
+        window still gets a fresh identity, so stale tokens from before the
+        expiry can never be replayed against a later unlock.
         """
         if not production:
             raise ProdGuardError(
@@ -150,11 +159,17 @@ class ProdGuard:
         current = now if now is not None else time.monotonic()
         expiry = current + _UNLOCK_TTL_SECONDS
         with self._lock:
-            self._unlocked[instance] = _UnlockState(
-                expires_at=expiry,
-                commits_remaining=max_commits,
-                unlocked_at=current,
-            )
+            state = self._unlocked.get(instance)
+            if state is not None and state.expires_at >= current:
+                # Active window: renew in place, keep the identity.
+                state.expires_at = expiry
+                state.commits_remaining = max_commits
+            else:
+                self._unlocked[instance] = _UnlockState(
+                    expires_at=expiry,
+                    commits_remaining=max_commits,
+                    unlocked_at=current,
+                )
         return expiry
 
     def is_unlocked(self, instance: str, *, now: float | None = None) -> bool:
@@ -360,6 +375,8 @@ class ProdGuard:
                         "number of commits have already been performed. "
                         "Dry-runs do NOT count toward this budget; only "
                         "successful commits do. Call odoo_enable_prod_writes "
-                        "again to renew."
+                        "again to renew the budget — confirmation tokens you "
+                        "already hold stay valid across the renewal, so just "
+                        "retry this commit afterwards."
                     )
                 state.commits_remaining -= 1

@@ -310,17 +310,19 @@ def test_config_rejects_unknown_default_key(tmp_path: Path) -> None:
 # -----------------------------------------------------------------------------
 
 
-def test_model_not_allowed_hint_no_workaround() -> None:
+def test_model_not_allowed_hint_is_actionable() -> None:
     from odoo_mcp.errors import ModelNotAllowedError
 
     err = ModelNotAllowedError("blocked")
     hint = err.hint
     assert hint is not None
-    assert "administrator" in hint.lower()
-    # Old hint suggested odoo_list_instances and "ask your administrator
-    # to add this model to the config" — drop the second half.
+    # The hint names the exact config key and the diagnose tool — "contact
+    # your administrator" dead-ends were a top source of wasted agent turns.
+    assert "allowed_models" in hint
+    assert "odoo_diagnose_access" in hint
+    # ...but never suggests the denylist can be bypassed.
+    assert "cannot be re-enabled" in hint
     assert "odoo_list_instances" not in hint
-    assert "add this model" not in hint
 
 
 def test_prod_guard_hint_no_workaround() -> None:

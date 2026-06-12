@@ -178,7 +178,13 @@ class ModelNotAllowedError(OdooMcpError):
 
     @property
     def hint(self) -> str:
-        return "Contact your MCP administrator if this model should be available."
+        return (
+            "Run odoo_diagnose_access(model=...) to see whether the block is "
+            "MCP policy or an Odoo ACL. Strict-mode allowlists are configured "
+            "per instance via the 'allowed_models' key in "
+            "~/.odoo-mcp/config.toml; models on the built-in denylist cannot "
+            "be re-enabled there."
+        )
 
 
 class OperationNotAllowedError(OdooMcpError):

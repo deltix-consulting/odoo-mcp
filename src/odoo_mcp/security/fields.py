@@ -164,6 +164,52 @@ _DEFAULT_HIDDEN: Final[dict[str, frozenset[str]]] = {
     "calendar.attendee": frozenset({"access_token"}),
 }
 
+# Hard per-model READ whitelist. For models listed here, only these fields
+# exist as far as the MCP is concerned: describe_model shows only them,
+# smart selection picks only from them, explicit ``fields=`` requests and
+# domain leaves on anything else are rejected, and responses are filtered.
+# Enforced via :func:`restrict_fields_meta` at the dispatcher's single
+# fields_get choke point, so no individual tool can forget it.
+#
+# Like the denylist, this is a safety invariant — NOT config-overridable.
+# res.users inherits all of res.partner via _inherits, so without this the
+# model would expose password/2FA/OAuth state plus the full partner PII
+# surface. The whitelist keeps exactly what "who is user 42?" needs.
+MODEL_FIELD_WHITELIST: Final[dict[str, frozenset[str]]] = {
+    "res.users": frozenset(
+        {
+            "id",
+            "name",
+            "display_name",
+            "login",
+            "email",
+            "active",
+            "partner_id",
+            "company_id",
+            "lang",
+            "tz",
+            "share",
+        }
+    ),
+}
+
+
+def restrict_fields_meta(
+    model: str, fields_meta: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Filter a ``fields_get`` payload down to the model's read whitelist.
+
+    No-op for models without a whitelist entry. Applied before the metadata
+    feeds smart selection, field validation, domain sandboxing, or
+    redaction — downstream code then treats non-whitelisted fields exactly
+    like fields that don't exist on the model.
+    """
+    whitelist = MODEL_FIELD_WHITELIST.get(model)
+    if whitelist is None:
+        return fields_meta
+    return {name: meta for name, meta in fields_meta.items() if name in whitelist}
+
+
 _BINARY_PLACEHOLDER_PREFIX: Final[str] = "<binary:"
 
 # Whitelisted aggregation functions for read_group `fields` entries.

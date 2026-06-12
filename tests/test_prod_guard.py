@@ -162,6 +162,52 @@ def test_token_rejected_after_unlock_expires_and_renews() -> None:
         guard.consume_pending(token, "prod", "create", "res.partner", now=10.0)
 
 
+def test_renewal_while_active_keeps_tokens_valid() -> None:
+    """Re-unlocking while the window is still active renews it in place:
+    the budget resets but the window identity is preserved, so tokens
+    issued before the renewal stay consumable. This is the fix for the
+    field-observed churn where a burst-limit renewal forced agents to
+    re-do dry runs they had already reviewed.
+    """
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0, max_commits=1)
+    token = guard.create_pending("prod", "create", "res.partner", "s", now=0.0)
+    # Renew mid-window (e.g. after hitting the burst limit).
+    guard.unlock("prod", production=True, now=10.0, max_commits=5)
+    assert guard.commits_remaining("prod", now=10.0) == 5
+    # The pre-renewal token commits fine under the renewed window.
+    guard.consume_pending(token, "prod", "create", "res.partner", now=11.0)
+    assert guard.commits_remaining("prod", now=12.0) == 4
+
+
+def test_renewal_after_expiry_still_invalidates_tokens() -> None:
+    """An expired window gets a fresh identity on re-unlock — renewal
+    in place applies only while the previous window is still active.
+    Keeps the H1 property: stale tokens never survive a real expiry.
+    """
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    token = guard.create_pending("prod", "create", "res.partner", "s", now=0.0)
+    # Lapse the window early (simulated — keeps the token inside its own
+    # 5-min TTL so the *window* check is what fires, not token expiry).
+    guard._unlocked["prod"].expires_at = 5.0  # noqa: SLF001 — test stages the expiry
+    # Re-unlock after the lapse: unlock() sees an expired state and must
+    # mint a fresh identity instead of renewing in place.
+    guard.unlock("prod", production=True, now=10.0)
+    with pytest.raises(ProdGuardError, match="different unlock window"):
+        guard.consume_pending(token, "prod", "create", "res.partner", now=11.0)
+
+
+def test_burst_error_promises_token_survival() -> None:
+    """The burst-limit error tells the agent its tokens survive the
+    renewal — pin that language so the advice stays true and stated."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0, max_commits=0)
+    token = guard.create_pending("prod", "create", "res.partner", "s", now=0.0)
+    with pytest.raises(ProdGuardError, match="stay valid across the renewal"):
+        guard.consume_pending(token, "prod", "create", "res.partner", now=1.0)
+
+
 def test_token_accepted_when_unlock_was_only_touched() -> None:
     """A touch() within the same unlock must not invalidate tokens —
     only re-acquiring the unlock does. This guards the H1 fix from

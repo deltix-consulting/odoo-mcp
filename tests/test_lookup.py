@@ -174,10 +174,25 @@ def test_lookup_blocked_by_denylist(tmp_path: Path) -> None:
     dispatcher = Dispatcher(app)
     payload = _call(
         dispatcher,
-        {"instance": "dev", "model": "res.users", "query": "admin"},
+        {"instance": "dev", "model": "res.groups", "query": "admin"},
     )
     assert payload["ok"] is False
     assert payload["error_code"] == "model_not_allowed"
+
+
+def test_lookup_res_users_allowed_for_identity_resolution(tmp_path: Path) -> None:
+    """res.users left the denylist in v0.22.0 — resolving a salesperson
+    user_id to a name is the most common relational lookup in CRM flows.
+    Reads expose only the identity-field whitelist; writes stay blocked."""
+    app, fake = _build_app(tmp_path)
+    fake.next_results = [{"id": 7, "display_name": "Alice"}]
+    dispatcher = Dispatcher(app)
+    payload = _call(
+        dispatcher,
+        {"instance": "dev", "model": "res.users", "query": "alice"},
+    )
+    assert payload["ok"] is True
+    assert payload["results"] == [{"id": 7, "display_name": "Alice"}]
 
 
 def test_lookup_audit_records_op(tmp_path: Path) -> None:

@@ -104,7 +104,39 @@ class _TimeoutHTTPSConnection(http.client.HTTPSConnection):
         self.sock = self._forced_context.wrap_socket(self.sock, server_hostname=server_hostname)
 
 
-class _TimeoutTransport(xmlrpc.client.Transport):
+class _ConnectionRecyclingMixin:
+    """Drop the cached keep-alive connection when a request fails.
+
+    The stdlib transports cache one ``HTTPConnection`` in ``_connection``
+    and return it unconditionally. A request that dies mid-flight (socket
+    timeout after send, protocol error) leaves that connection in the
+    ``Request-sent`` state — every later call on it then fails with
+    ``ResponseNotReady`` until the process restarts. Closing on failure
+    means the *next* call dials a fresh connection instead of inheriting
+    the poisoned one. The stdlib's own once-only retry inside
+    ``Transport.request`` (RemoteDisconnected / ECONNRESET) still runs
+    first; we only see the exception once that retry is also exhausted.
+    """
+
+    # Parameter types are Any on purpose: the stdlib transports type these
+    # via typeshed-private aliases (_HostType / SizedBuffer) that we can't
+    # name here, and the mixin must stay signature-compatible with both
+    # Transport and SafeTransport in the MRO.
+    def request(
+        self,
+        host: Any,
+        handler: Any,
+        request_body: Any,
+        verbose: Any = False,
+    ) -> Any:
+        try:
+            return super().request(host, handler, request_body, verbose)  # type: ignore[misc]
+        except Exception:
+            self.close()  # type: ignore[attr-defined]
+            raise
+
+
+class _TimeoutTransport(_ConnectionRecyclingMixin, xmlrpc.client.Transport):
     """XML-RPC transport with a per-call timeout.
 
     Overrides ``make_connection`` to inject our timeout-aware HTTPConnection.
@@ -194,7 +226,7 @@ def _resolve_proxy(scheme: str, target_host: str) -> tuple[str, int, dict[str, s
     return proxy_host, proxy_port, headers
 
 
-class _TimeoutSafeTransport(xmlrpc.client.SafeTransport):
+class _TimeoutSafeTransport(_ConnectionRecyclingMixin, xmlrpc.client.SafeTransport):
     """HTTPS XML-RPC transport with a per-call timeout and explicit SSL context.
 
     Also honors ``HTTPS_PROXY`` / ``NO_PROXY`` — see :func:`_resolve_proxy`.

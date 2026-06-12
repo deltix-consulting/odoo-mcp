@@ -19,7 +19,9 @@ This module enforces a strict subset of the domain language:
 * Logical operators must be ``'&'``, ``'|'``, or ``'!'`` and must respect
   their arity (``&`` / ``|`` consume two subsequent expressions, ``!``
   consumes one) — otherwise Odoo's polish-notation parser would silently
-  accept a malformed expression.
+  accept a malformed expression. Multiple top-level expressions are fine:
+  Odoo joins them with an implicit AND (``normalize_domain`` prepends the
+  missing ``'&'`` operators), so ``[leaf, '|', leaf, leaf]`` is valid.
 
 The caller is expected to have already validated the model against the
 allowlist. This sandbox is defense in depth.
@@ -106,10 +108,13 @@ def _validate_leaf(leaf: Any, known_fields: frozenset[str]) -> tuple[str, str, A
         raise DomainSandboxError(f"Leaf field must be a non-empty string, got {field!r}.")
     if "." in field:
         # This is THE main thing we're guarding against.
+        base = field.split(".", 1)[0]
         raise DomainSandboxError(
             f"Dotted field traversal in domains is not allowed: {field!r}. "
             f"This protects against cross-model reads (e.g. 'create_uid.login'). "
-            f"Query the related model directly instead."
+            f"Do it in two calls instead: (1) find the matching ids on the "
+            f"related model with odoo_lookup or odoo_search_read, then "
+            f"(2) re-run this call filtering on ({base!r}, 'in', [<those ids>])."
         )
     if field not in known_fields:
         raise DomainSandboxError(
@@ -150,8 +155,11 @@ def _validate_polish_arity(domain: list[Any]) -> None:
     """Verify that the polish-notation expression is well-formed.
 
     We walk the list simulating a stack: each logical operator consumes the
-    right number of subsequent expressions. If the stack doesn't reduce to
-    exactly one expression at the end, the domain is malformed.
+    right number of subsequent expressions. Odoo joins any number of
+    leftover top-level expressions with an implicit AND (its
+    ``normalize_domain`` prepends the missing ``'&'`` operators), so ending
+    with *more* than one expression is valid — only an operator that
+    can't find its operands makes the domain malformed.
     """
     # Odoo convention: implicit AND of all leaves, so a bare list of leaves is
     # always valid. The only time polish arity matters is when explicit & / |
@@ -178,7 +186,10 @@ def _validate_polish_arity(domain: list[Any]) -> None:
                 # consumes 1, produces 1 — count unchanged
         else:
             count += 1
-    if count != 1:
+    # count > 1 is fine (implicit AND of the leftover expressions); the
+    # operator checks above already rejected every underfed & / | / !.
+    # count < 1 can't happen for a non-empty domain, but fail closed anyway.
+    if count < 1:
         raise DomainSandboxError(
-            f"Malformed domain: expected a single top-level expression, got {count}."
+            "Malformed domain: no top-level expression left after applying operators."
         )

@@ -117,13 +117,38 @@ def test_diagnose_access_calls_check_for_each_op(tmp_path: Path) -> None:
     assert sorted(ops) == ["create", "read", "unlink", "write"]
 
 
-def test_diagnose_access_rejects_denied_model(tmp_path: Path) -> None:
+def test_diagnose_access_reports_denied_model_instead_of_failing(tmp_path: Path) -> None:
+    """The whole point of the tool is explaining access state — a model
+    blocked by MCP policy must come back as a structured report (with the
+    reason and the config key), not as the same error the caller is
+    trying to diagnose. No Odoo RPC happens for blocked models."""
+    fake = _FakeClient()
+    app = _build(tmp_path, fake)
+    payload = _call(Dispatcher(app), {"instance": "dev", "model": "res.groups"})
+    assert payload["ok"] is True
+    assert payload["mcp_blocked"] is True
+    assert "denylist" in payload["mcp_block_reason"].lower()
+    assert "allowed_models" in payload["note"]
+    assert fake.calls == []
+
+
+def test_diagnose_access_flags_write_blocklist(tmp_path: Path) -> None:
+    """res.users is readable (field-whitelisted) but the MCP refuses all
+    writes — the report must say so even when Odoo ACLs allow writing."""
     fake = _FakeClient()
     app = _build(tmp_path, fake)
     payload = _call(Dispatcher(app), {"instance": "dev", "model": "res.users"})
-    # res.users is on the denylist — rejected before any RPC call.
+    assert payload["ok"] is True
+    assert payload["mcp_blocked"] is False
+    assert payload["write_blocked_via_mcp"] is True
+
+
+def test_diagnose_access_malformed_model_name_still_fails(tmp_path: Path) -> None:
+    fake = _FakeClient()
+    app = _build(tmp_path, fake)
+    payload = _call(Dispatcher(app), {"instance": "dev", "model": "res partner;drop"})
     assert payload["ok"] is False
-    assert "denylist" in payload["error"].lower()
+    assert "invalid characters" in payload["error"]
     assert fake.calls == []
 
 

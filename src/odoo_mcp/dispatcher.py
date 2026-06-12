@@ -54,12 +54,14 @@ from .security.allowlist import (
     Operation,
     check_model,
     check_operation,
+    classify_model_block,
 )
 from .security.document_actions import resolve_document_action
 from .security.domain import sandbox_domain
 from .security.fields import (
     redact_fields_get,
     redact_response,
+    restrict_fields_meta,
     validate_aggregate_fields,
     validate_groupby,
     validate_requested_fields,
@@ -340,6 +342,17 @@ class Dispatcher:
             True,
         )
 
+    def _fields_meta(self, rt: InstanceRuntime, model: str) -> dict[str, dict[str, Any]]:
+        """``fields_get`` filtered through the hard per-model read whitelist.
+
+        The single choke point: every tool's view of a model's fields goes
+        through here, so a whitelisted model (res.users) can't leak
+        non-whitelisted fields via any code path — smart selection, explicit
+        ``fields=``, domain leaves, groupby, and response redaction all key
+        off this metadata.
+        """
+        return restrict_fields_meta(model, rt.client.fields_get(model))
+
     # ---- Handlers ---------------------------------------------------------
 
     def _help(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -416,7 +429,7 @@ class Dispatcher:
             keep = {"type", "string", "required", "_sensitive"}
         raw = redact_fields_get(
             ctx.model,
-            ctx.rt.client.fields_get(ctx.model),
+            self._fields_meta(ctx.rt, ctx.model),
             instance_overrides=ctx.rt.config.sensitive_fields,
             extra_redacted=ctx.rt.extra_redacted,
         )
@@ -477,7 +490,7 @@ class Dispatcher:
         # Clamp the caller's limit to the instance's hard cap.
         effective_limit = min(raw_limit, rt.config.max_records_hard_cap)
 
-        fields_meta = rt.client.fields_get(model)
+        fields_meta = self._fields_meta(rt, model)
         results = rt.client.lookup(model, query, effective_limit)
         # Even though we only requested id + display_name, run the result
         # through the redactor so a model whose display_name is sensitive
@@ -514,7 +527,7 @@ class Dispatcher:
         allow_sensitive = frozenset(args.get("allow_sensitive_fields") or [])
         offset = _offset(args)
 
-        fields_meta = rt.client.fields_get(model)
+        fields_meta = self._fields_meta(rt, model)
         known = frozenset(fields_meta.keys())
         overrides = rt.config.sensitive_fields
         fields, smart = self._resolve_read_fields(
@@ -581,7 +594,7 @@ class Dispatcher:
     def _search_count(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_search_count", args, Operation.SEARCH_COUNT)
         assert ctx.model is not None
-        known = frozenset(ctx.rt.client.fields_get(ctx.model).keys())
+        known = frozenset(self._fields_meta(ctx.rt, ctx.model).keys())
         domain = sandbox_domain(args.get("domain") or [], known)
         count = ctx.rt.client.search_count(ctx.model, domain)
         self._audit_ok(
@@ -602,7 +615,7 @@ class Dispatcher:
         offset = _offset(args)
         lazy = bool(args.get("lazy", True))
 
-        known = frozenset(rt.client.fields_get(model).keys())
+        known = frozenset(self._fields_meta(rt, model).keys())
         overrides = rt.config.sensitive_fields
         fields = validate_aggregate_fields(
             model,
@@ -666,7 +679,7 @@ class Dispatcher:
         if len(ids) > cap:
             raise OdooMcpError(f"Cannot read more than {cap} ids at once.")
 
-        fields_meta = rt.client.fields_get(model)
+        fields_meta = self._fields_meta(rt, model)
         known = frozenset(fields_meta.keys())
         overrides = rt.config.sensitive_fields
         fields, smart = self._resolve_read_fields(
@@ -712,7 +725,7 @@ class Dispatcher:
         values = _require_dict(args, "values")
         self.app.prod_guard.check_write(ctx.instance, rt.config.production)
 
-        known = frozenset(rt.client.fields_get(model).keys())
+        known = frozenset(self._fields_meta(rt, model).keys())
         validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
         n = len(validated)
 
@@ -762,7 +775,7 @@ class Dispatcher:
         if len(ids) > cap:
             raise OdooMcpError(f"Cannot write to more than {cap} ids at once.")
 
-        known = frozenset(rt.client.fields_get(model).keys())
+        known = frozenset(self._fields_meta(rt, model).keys())
         validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
         n = len(validated)
 
@@ -824,7 +837,7 @@ class Dispatcher:
 
         # Archive needs an 'active' field on the model; delete is unconditional.
         if mode == "archive":
-            fields_meta = rt.client.fields_get(model)
+            fields_meta = self._fields_meta(rt, model)
             if "active" not in fields_meta:
                 raise FieldPolicyError(
                     f"Model {model!r} has no 'active' field — cannot archive. "
@@ -1033,7 +1046,7 @@ class Dispatcher:
         rather than failing the whole preview.
         """
         try:
-            fields_meta = rt.client.fields_get(model)
+            fields_meta = self._fields_meta(rt, model)
             if "state" not in fields_meta:
                 return []
             rows = rt.client.read(model, record_ids, ["state"])
@@ -1173,16 +1186,40 @@ class Dispatcher:
         )
 
     def _diagnose_access(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Report Odoo ACL info for the authenticated user on one model.
+        """Report access state for the authenticated user on one model.
 
-        Calls ``check_access_rights(op, raise_exception=False)`` for the four
-        canonical operations. The model still has to pass the MCP allowlist
-        — diagnose is read-only but operates inside our security envelope.
-        Pure introspection: no record reads, no writes.
+        Two layers, both covered:
+
+        * **MCP policy** — if the model is blocked by the denylist or a
+          strict-mode allowlist, this tool *reports* that (with the reason
+          and the config key to change) instead of failing with the same
+          error the caller is trying to diagnose. No Odoo round-trip in
+          that case.
+        * **Odoo ACLs** — for permitted models, calls
+          ``check_access_rights(op, raise_exception=False)`` for the four
+          canonical operations. Pure introspection: no record reads.
         """
-        ctx = self._begin("odoo_diagnose_access", args, Operation.DIAGNOSE_ACCESS)
-        assert ctx.model is not None
-        rt, model = ctx.rt, ctx.model
+        ctx = self._begin(
+            "odoo_diagnose_access", args, Operation.DIAGNOSE_ACCESS, require_model=False
+        )
+        rt = ctx.rt
+        model = _require_str(args, "model")
+        block_reason = classify_model_block(model, rt.config.allowed_models)
+        if block_reason is not None:
+            self._audit_ok(ctx, {"model": model, "mcp_blocked": True}, args)
+            return {
+                "instance": ctx.instance,
+                "model": model,
+                "mcp_blocked": True,
+                "mcp_block_reason": block_reason,
+                "note": (
+                    "Blocked by the MCP's own model policy — Odoo ACLs were "
+                    "not consulted. Strict-mode allowlists live under the "
+                    "'allowed_models' key per instance in "
+                    "~/.odoo-mcp/config.toml; built-in denylist entries "
+                    "cannot be re-enabled."
+                ),
+            }
         rights: dict[str, bool] = {}
         for op in ("read", "write", "create", "unlink"):
             try:
@@ -1199,6 +1236,11 @@ class Dispatcher:
         return {
             "instance": ctx.instance,
             "model": model,
+            "mcp_blocked": False,
+            # Models like res.users / mail.message are readable but the MCP
+            # refuses every write path regardless of Odoo ACLs — surface
+            # that so a "can_write: true" from Odoo isn't misread.
+            "write_blocked_via_mcp": model in MODEL_WRITE_BLOCKLIST,
             "uid": rt.client.uid,
             "login": rt.client.username,
             "is_admin": rt.client.is_admin,
@@ -1700,7 +1742,14 @@ _HELP_TOOLS_TERSE: list[dict[str, str]] = [
         "purpose": "Archive (reversible) or delete (permanent). Always ask user which.",
     },
     {"name": "odoo_enable_prod_writes", "purpose": "Unlock prod writes for 15 minutes."},
-    {"name": "odoo_diagnose_access", "purpose": "Read/write/create/unlink rights on a model."},
+    {
+        "name": "odoo_diagnose_access",
+        "purpose": "Why is a model blocked? MCP policy + Odoo ACL rights.",
+    },
+    {
+        "name": "odoo_diagnose_routing",
+        "purpose": "Stock rules + picking types for a (product, warehouse) pair.",
+    },
 ]
 
 
@@ -1725,9 +1774,37 @@ _HELP_COMMON_PATTERNS: list[dict[str, Any]] = [
             "model": "crm.lead",
             "domain": [
                 ["type", "=", "opportunity"],
-                ["stage_id.name", "!=", "Won"],
+                ["probability", "<", 100],
             ],
         },
+    },
+    {
+        "goal": "Filter on a related record's value (dotted domains are rejected)",
+        "use": "odoo_lookup then odoo_search_read",
+        "example": (
+            "Want leads in stage 'Won'? Domains like ['stage_id.name', '=', 'Won'] "
+            "are rejected by the sandbox. Two calls: "
+            "1) odoo_lookup(model='crm.stage', query='Won') -> ids. "
+            "2) odoo_search_read(model='crm.lead', domain=[['stage_id', 'in', [<ids>]]]). "
+            "Same pattern resolves the other direction: a many2one value in a "
+            "result (e.g. partner_id: [42, 'Acme']) reads in ONE batched call — "
+            "odoo_read(model='res.partner', ids=[42, ...]) — never one call per id."
+        ),
+    },
+    {
+        "goal": "Explain an unexpected transfer/picking type after confirming an order",
+        "use": "odoo_diagnose_routing",
+        "example": (
+            "An SO confirmed into the wrong operation type (two-step trailer "
+            "flow instead of direct delivery)? The decision lives in routing "
+            "config, not on the order. 1) odoo_diagnose_routing(instance='prod', "
+            "product_id=<product.product id>, warehouse_id=<stock.warehouse id>) "
+            "— lists the warehouse's delivery_steps + every candidate stock.rule "
+            "with its picking_type_id. 2) Check overrides in precedence order: "
+            "route_id on the sale.order.line, route_ids on the product, then the "
+            "warehouse delivery route. Default reads on these models include the "
+            "routing fields."
+        ),
     },
     {
         "goal": "Dashboard-style aggregation (leads per stage, revenue per month)",
@@ -1778,15 +1855,19 @@ _HELP_COMMON_PATTERNS: list[dict[str, Any]] = [
 
 _HELP_GOTCHAS: list[str] = [
     "Dotted-field traversal in domains is rejected (no 'create_uid.login'). "
-    "Filter by relation value instead.",
+    "Two calls instead: resolve ids on the related model first, then filter "
+    "with ('relation_field', 'in', [ids]). See common_patterns.",
     "Sensitive fields (vat, ssnid, bank_ids, private_email, ...) require "
     "allow_sensitive_fields=['NAME', ...] per-call.",
     "Password/api_key/token fields are ALWAYS redacted. Opting in does not unlock them.",
     "Model access: each instance is either in 'open' mode (any model allowed "
     "except a hardcoded denylist of ~25 auth / ACL / code / config models "
-    "like res.users, ir.config_parameter, ir.actions.server, mail.template, "
+    "like ir.config_parameter, ir.actions.server, mail.template, "
     "ir.attachment) or 'strict' mode (enumerated allowlist). Check "
-    "odoo_list_instances for the mode per instance.",
+    "odoo_list_instances for the mode per instance; odoo_diagnose_access "
+    "reports why a specific model is blocked.",
+    "res.users is readable for resolving user_id values (name, login, email "
+    "and a few identity fields only) but never writable through the MCP.",
     "On production, writes default to dry_run=true. Pass dry_run=false AND a "
     "confirmation_token from a prior dry run to commit.",
     "To remove records, use odoo_archive_or_delete. Always offer archive "

@@ -54,7 +54,14 @@ MODEL_DENYLIST: Final[frozenset[str]] = frozenset(
         # Rights-modification vector: any write to these can grant or
         # revoke privileges. Reading them also leaks per-user permission
         # shape. Full denylist (read + write), not config-overridable.
-        "res.users",
+        #
+        # NOTE: res.users itself is NOT here. It moved to
+        # MODEL_WRITE_BLOCKLIST + a hard read-field whitelist (see
+        # fields.MODEL_FIELD_WHITELIST): resolving a user_id to a name /
+        # login / email is the single most common relational lookup in
+        # CRM and sales flows, and blocking it outright produced a steady
+        # stream of dead-end calls in the field. Reads expose only the
+        # whitelisted identity fields; every write path stays refused.
         "res.users.log",
         "res.users.apikeys",
         "res.users.apikeys.description",
@@ -171,6 +178,11 @@ MODEL_WRITE_BLOCKLIST: Final[frozenset[str]] = frozenset(
         "mail.message",
         "mail.followers",
         "mail.notification",
+        # Readable only through the hard field whitelist in
+        # fields.MODEL_FIELD_WHITELIST (identity fields: name, login,
+        # email, ...). Writes would be rights modification — refused
+        # regardless of prod-guard state.
+        "res.users",
     }
 )
 
@@ -269,6 +281,26 @@ def check_model(model: str, allowed: frozenset[str]) -> None:
             f"Model {model!r} is not on the allowlist for this instance. "
             f"Allowed models: {sorted(allowed)}"
         )
+
+
+def classify_model_block(model: str, allowed: frozenset[str]) -> str | None:
+    """Return the policy reason ``model`` is blocked, or ``None`` if allowed.
+
+    Same pipeline as :func:`check_model`, but *policy* blocks (denylist,
+    strict allowlist) come back as a string instead of raising — this is
+    what lets ``odoo_diagnose_access`` report "blocked by the MCP, not by
+    Odoo ACLs" instead of dying on the very model it was asked to diagnose.
+    Shape violations (injection-looking names) still raise: there is
+    nothing to diagnose about a malformed name.
+    """
+    try:
+        check_model(model, allowed)
+    except ModelNotAllowedError as exc:
+        msg = str(exc)
+        if "invalid characters" in msg or "non-empty string" in msg:
+            raise
+        return msg
+    return None
 
 
 def check_operation(op: Operation | str) -> Operation:
