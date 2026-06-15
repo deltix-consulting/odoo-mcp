@@ -69,6 +69,7 @@ _VALID_INSTANCE_KEYS: Final[frozenset[str]] = frozenset(
         "max_commits_per_unlock",
         "smart_fields_overrides",
         "external_comms_enabled",
+        "attachment_source_paths",
     }
 )
 
@@ -122,6 +123,24 @@ class InstanceConfig:
     # Default ``False`` — the safe stance is "the MCP cannot email
     # anyone unless the operator explicitly enables it".
     external_comms_enabled: bool = False
+    # Directories the MCP is allowed to read from when
+    # ``odoo_create_attachment`` is called with ``source_path`` instead
+    # of inline ``datas_base64``. Each entry is the realpath of an
+    # absolute directory (resolved at config-load time). The
+    # ``source_path`` argument is rejected if the file doesn't resolve
+    # (via realpath) to within ONE of these directories — closing the
+    # ``../../etc/passwd`` and symlink-escape cases at validation time.
+    #
+    # Default: empty tuple. ``source_path`` is then refused outright;
+    # the agent must inline a (small, <5KB) base64 payload via
+    # ``datas_base64``. Operators opt in by listing directories under
+    # the [instances.NAME] section, e.g.:
+    #
+    #     attachment_source_paths = [
+    #         "/var/run/odoo-mcp/inbox",
+    #         "/home/api-server/.claude-api-server/attachments",
+    #     ]
+    attachment_source_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +338,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
     max_commits = _require_int(entry, "max_commits_per_unlock", 10, minimum=1, maximum=1000)
     smart_overrides = _parse_smart_fields_overrides(entry.get("smart_fields_overrides"), name)
     external_comms = bool(entry.get("external_comms_enabled", False))
+    attachment_paths = _parse_attachment_source_paths(entry.get("attachment_source_paths"), name)
 
     return InstanceConfig(
         name=name,
@@ -338,6 +358,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         max_commits_per_unlock=max_commits,
         smart_fields_overrides=smart_overrides,
         external_comms_enabled=external_comms,
+        attachment_source_paths=attachment_paths,
     )
 
 
@@ -434,6 +455,53 @@ def _require_str(raw: dict[str, Any], key: str, section: str) -> str:
         raise ConfigError(f"[{section}].{key} is required and must be a string")
     value: str = raw[key]
     return value
+
+
+def _parse_attachment_source_paths(raw: Any, instance_name: str) -> tuple[str, ...]:
+    """Validate + normalise the per-instance attachment source-path allowlist.
+
+    Each entry must be an absolute path string. We resolve it via
+    ``os.path.realpath`` AT CONFIG-LOAD TIME so symlink swaps after
+    startup don't change the allowlist — operators get the same
+    well-defined view of where the MCP is allowed to read from
+    regardless of when the FS was modified.
+
+    Non-existent directories are tolerated: ops sometimes deploy the
+    MCP before the directory is mounted. The runtime check inside
+    ``odoo_create_attachment`` re-resolves the source file at call
+    time and refuses if it doesn't land inside one of these entries.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ConfigError(
+            f"[instances.{instance_name}].attachment_source_paths must be a list of "
+            f"absolute path strings, got {type(raw).__name__}."
+        )
+    resolved: list[str] = []
+    for idx, entry in enumerate(raw):
+        if not isinstance(entry, str):
+            raise ConfigError(
+                f"[instances.{instance_name}].attachment_source_paths[{idx}] must be a "
+                f"string, got {type(entry).__name__}."
+            )
+        if not entry:
+            raise ConfigError(
+                f"[instances.{instance_name}].attachment_source_paths[{idx}] is empty."
+            )
+        if not os.path.isabs(entry):
+            raise ConfigError(
+                f"[instances.{instance_name}].attachment_source_paths[{idx}]: "
+                f"{entry!r} is not an absolute path. Relative paths would resolve "
+                f"against the MCP process's CWD, which is operator-unfriendly and "
+                f"a security footgun — use the absolute form."
+            )
+        # ``realpath`` follows the chain at load time; we'll re-check the
+        # candidate file against this resolved form at call time. Both
+        # sides realpath, so a symlink that crosses the boundary at
+        # runtime is refused.
+        resolved.append(os.path.realpath(entry))
+    return tuple(resolved)
 
 
 def _require_int(

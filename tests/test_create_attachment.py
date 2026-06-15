@@ -77,7 +77,9 @@ class _AttachFake:
         return self.create_id
 
 
-def _instance_config(*, production: bool = False) -> InstanceConfig:
+def _instance_config(
+    *, production: bool = False, attachment_source_paths: tuple[str, ...] = ()
+) -> InstanceConfig:
     return InstanceConfig(
         name="prod" if production else "dev",
         url="https://example.odoo.com",
@@ -90,11 +92,18 @@ def _instance_config(*, production: bool = False) -> InstanceConfig:
         rate_limit_per_minute=300,
         allow_self_signed=False,
         allowed_models=frozenset({ALLOWLIST_WILDCARD}),
+        attachment_source_paths=attachment_source_paths,
     )
 
 
-def _build(tmp_path: Path, fake: _AttachFake, *, production: bool = False) -> OdooMcpApp:
-    cfg = _instance_config(production=production)
+def _build(
+    tmp_path: Path,
+    fake: _AttachFake,
+    *,
+    production: bool = False,
+    attachment_source_paths: tuple[str, ...] = (),
+) -> OdooMcpApp:
+    cfg = _instance_config(production=production, attachment_source_paths=attachment_source_paths)
     creds = Credentials(instance_name=cfg.name, username="u", _api_key="k" * 10)
     real = OdooClient(cfg, credentials=creds)
     app_cfg = AppConfig(
@@ -431,3 +440,345 @@ def test_ir_attachment_is_not_user_visible_via_search_read(tmp_path: Path) -> No
     from odoo_mcp.security.allowlist import MODEL_DENYLIST
 
     assert "ir.attachment" in MODEL_DENYLIST
+
+
+# ---------------------------------------------------------------------------
+# source_path mode — server-side file read for payloads that don't fit
+# in agent tool-input. The base64-via-agent-context path silently dies
+# in several SDKs around 5 KB, so this is the realistic-size path.
+# ---------------------------------------------------------------------------
+
+
+def test_source_path_reads_file_and_commits(tmp_path: Path) -> None:
+    """End-to-end: write a PDF-sized file to an allowlisted dir, call
+    create_attachment with source_path, the dispatcher reads + encodes
+    server-side and the resulting ir.attachment carries the full bytes.
+    No base64 ever crosses the agent input boundary."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    content = b"%PDF-1.7\n" + b"A" * (2_500_000)  # ~2.5 MB — well past the 5 KB
+    # agent-SDK cliff but well under the 25 MB cap.
+    pdf_path = inbox / "invoice-2026-001.pdf"
+    pdf_path.write_bytes(content)
+
+    fake = _AttachFake(create_id=4242)
+    app = _build(
+        tmp_path,
+        fake,
+        production=True,
+        attachment_source_paths=(str(inbox.resolve()),),
+    )
+    app.prod_guard.unlock("prod", production=True)
+    dispatcher = Dispatcher(app)
+
+    preview = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "res_model": "account.move",
+            "res_id": 123,
+            "filename": "invoice-2026-001.pdf",
+            "source_path": str(pdf_path),
+            "mimetype": "application/pdf",
+            "dry_run": True,
+        },
+    )
+    assert preview["preview"] is True
+    assert preview["size_bytes"] == len(content)
+    assert "confirmation_token" in preview
+    assert fake.create_calls == []
+
+    result = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "res_model": "account.move",
+            "res_id": 123,
+            "filename": "invoice-2026-001.pdf",
+            "source_path": str(pdf_path),
+            "mimetype": "application/pdf",
+            "dry_run": False,
+            "confirmation_token": preview["confirmation_token"],
+        },
+    )
+    assert result["committed"] is True
+    assert result["attachment_id"] == 4242
+    # Exactly one create call, ir.attachment, with the FULL bytes.
+    assert len(fake.create_calls) == 1
+    model, values = fake.create_calls[0]
+    assert model == "ir.attachment"
+    assert base64.b64decode(values["datas"]) == content
+
+
+def test_source_path_refused_when_allowlist_empty(tmp_path: Path) -> None:
+    """Default-deny: an instance with empty attachment_source_paths
+    must refuse every source_path call, regardless of where the file
+    actually lives. Pins the opt-in posture."""
+    sneaky = tmp_path / "anywhere.txt"
+    sneaky.write_bytes(b"hi")
+
+    fake = _AttachFake()
+    app = _build(tmp_path, fake)  # no attachment_source_paths
+    dispatcher = Dispatcher(app)
+    out = _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "res_model": "res.partner",
+            "res_id": 1,
+            "filename": "x.txt",
+            "source_path": str(sneaky),
+        },
+    )
+    assert out["ok"] is False
+    assert "attachment_source_paths" in out["error"]
+    assert fake.create_calls == []
+
+
+def test_source_path_refuses_outside_allowlisted_dir(tmp_path: Path) -> None:
+    """A path that resolves outside the allowlist (../etc trickery, or
+    just a sibling directory) must be refused before any read happens."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    outside = tmp_path / "elsewhere.txt"
+    outside.write_bytes(b"secret")
+
+    fake = _AttachFake()
+    app = _build(
+        tmp_path,
+        fake,
+        attachment_source_paths=(str(inbox.resolve()),),
+    )
+    dispatcher = Dispatcher(app)
+    out = _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "res_model": "res.partner",
+            "res_id": 1,
+            "filename": "x.txt",
+            "source_path": str(outside),
+        },
+    )
+    assert out["ok"] is False
+    assert "not inside" in out["error"] or "allowlist" in out["error"].lower()
+    assert fake.create_calls == []
+
+
+def test_source_path_refuses_symlink_escaping_allowlisted_dir(tmp_path: Path) -> None:
+    """A symlink that lives inside the allowlisted dir but points at a
+    file OUTSIDE must be refused — that's the realpath check earning
+    its keep. Without it, an attacker who could plant a symlink in the
+    allowed dir would have arbitrary read."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    secret = tmp_path / "passwd-equivalent"
+    secret.write_bytes(b"root:x:0:0:::")
+    sneaky_link = inbox / "looks-innocent.txt"
+    sneaky_link.symlink_to(secret)
+
+    fake = _AttachFake()
+    app = _build(
+        tmp_path,
+        fake,
+        attachment_source_paths=(str(inbox.resolve()),),
+    )
+    dispatcher = Dispatcher(app)
+    out = _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "res_model": "res.partner",
+            "res_id": 1,
+            "filename": "x.txt",
+            "source_path": str(sneaky_link),
+        },
+    )
+    assert out["ok"] is False
+    assert "not inside" in out["error"] or "allowlist" in out["error"].lower()
+    assert fake.create_calls == []
+
+
+def test_source_path_refuses_relative(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    fake = _AttachFake()
+    app = _build(
+        tmp_path,
+        fake,
+        attachment_source_paths=(str(inbox.resolve()),),
+    )
+    dispatcher = Dispatcher(app)
+    out = _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "res_model": "res.partner",
+            "res_id": 1,
+            "filename": "x.txt",
+            "source_path": "relative/inbox/x.txt",
+        },
+    )
+    assert out["ok"] is False
+    assert "absolute" in out["error"].lower()
+    assert fake.create_calls == []
+
+
+def test_source_path_refuses_directory(tmp_path: Path) -> None:
+    """A directory inside the allowlist is still not a valid attachment
+    payload. Refuse early."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    subdir = inbox / "subdir"
+    subdir.mkdir()
+    fake = _AttachFake()
+    app = _build(
+        tmp_path,
+        fake,
+        attachment_source_paths=(str(inbox.resolve()),),
+    )
+    dispatcher = Dispatcher(app)
+    out = _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "res_model": "res.partner",
+            "res_id": 1,
+            "filename": "x.txt",
+            "source_path": str(subdir),
+        },
+    )
+    assert out["ok"] is False
+    assert "regular file" in out["error"].lower() or "directory" in out["error"].lower()
+    assert fake.create_calls == []
+
+
+def test_source_path_refuses_over_size_cap(tmp_path: Path) -> None:
+    """Size check via stat BEFORE read — no read at all when over cap."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    huge = inbox / "huge.bin"
+    huge.write_bytes(b"A" * (26 * 1024 * 1024))
+
+    fake = _AttachFake()
+    app = _build(
+        tmp_path,
+        fake,
+        attachment_source_paths=(str(inbox.resolve()),),
+    )
+    dispatcher = Dispatcher(app)
+    out = _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "res_model": "res.partner",
+            "res_id": 1,
+            "filename": "huge.bin",
+            "source_path": str(huge),
+        },
+    )
+    assert out["ok"] is False
+    assert "byte" in out["error"].lower() or "cap" in out["error"].lower()
+    assert fake.create_calls == []
+
+
+def test_source_path_and_inline_both_provided_is_refused(tmp_path: Path) -> None:
+    """Exactly one input mode must be used. Providing both is treated
+    as a config bug, not a silent precedence rule — surface it."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    f = inbox / "x.txt"
+    f.write_bytes(b"hello")
+
+    fake = _AttachFake()
+    app = _build(
+        tmp_path,
+        fake,
+        attachment_source_paths=(str(inbox.resolve()),),
+    )
+    dispatcher = Dispatcher(app)
+    out = _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "res_model": "res.partner",
+            "res_id": 1,
+            "filename": "x.txt",
+            "datas_base64": _b64(b"hello"),
+            "source_path": str(f),
+        },
+    )
+    assert out["ok"] is False
+    assert "exactly one" in out["error"].lower()
+    assert fake.create_calls == []
+
+
+def test_neither_input_mode_provided_is_refused(tmp_path: Path) -> None:
+    fake = _AttachFake()
+    app = _build(tmp_path, fake)
+    dispatcher = Dispatcher(app)
+    out = _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "res_model": "res.partner",
+            "res_id": 1,
+            "filename": "x.txt",
+        },
+    )
+    assert out["ok"] is False
+    assert "datas_base64" in out["error"] and "source_path" in out["error"]
+    assert fake.create_calls == []
+
+
+def test_source_path_content_swap_caught_by_payload_digest(tmp_path: Path) -> None:
+    """Same property the inline base64 path had in v0.23.0: previewing
+    one file and committing a different one (same path, content swapped
+    between calls) is refused by the payload-digest binding. This
+    pins the canonicalisation: the digest is computed over the bytes,
+    not the path, so the swap is detected even when both calls use
+    source_path."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    path = inbox / "payload.bin"
+    path.write_bytes(b"placeholder")
+
+    fake = _AttachFake()
+    app = _build(
+        tmp_path,
+        fake,
+        production=True,
+        attachment_source_paths=(str(inbox.resolve()),),
+    )
+    app.prod_guard.unlock("prod", production=True)
+    dispatcher = Dispatcher(app)
+
+    preview = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "res_model": "res.partner",
+            "res_id": 1,
+            "filename": "payload.bin",
+            "source_path": str(path),
+            "dry_run": True,
+        },
+    )
+    token = preview["confirmation_token"]
+    # Swap the file content between preview and commit.
+    path.write_bytes(b"completely different content x" * 100)
+    out = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "res_model": "res.partner",
+            "res_id": 1,
+            "filename": "payload.bin",
+            "source_path": str(path),
+            "dry_run": False,
+            "confirmation_token": token,
+        },
+    )
+    assert out["ok"] is False
+    assert "different payload" in out["error"]
+    assert fake.create_calls == []

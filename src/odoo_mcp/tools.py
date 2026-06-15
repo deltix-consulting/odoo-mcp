@@ -577,26 +577,36 @@ _TOOL_DIAGNOSE_ACCESS = Tool(
 _TOOL_CREATE_ATTACHMENT = Tool(
     name="odoo_create_attachment",
     description=(
-        "Attach a base64-encoded file to an Odoo record. Bounded surface for "
-        "creating ``ir.attachment`` rows — that model stays read-blocked via "
-        "the global denylist (no search_read of arbitrary attachments) and "
+        "Attach a file to an Odoo record. Bounded surface for creating "
+        "``ir.attachment`` rows — that model stays read-blocked via the "
+        "global denylist (no search_read of arbitrary attachments) and "
         "this tool can only CREATE, never read or unlink. ``res_model`` "
-        "still goes through the per-instance allowlist plus the "
-        "write-blocklist, so attaching to e.g. ``mail.message`` is refused. "
-        "Goes through the standard prod-guard pipeline: dry-run preview "
-        "(filename + decoded size + target record) → confirmation_token → "
-        "commit. The token binds to the exact file bytes, so an agent "
-        "cannot dry-run a placeholder and commit a different file with the "
-        "same token. Decoded size cap: 25 MB. Filename must contain no "
-        "path separators. The target record must exist for the "
-        "authenticated user. "
+        "still goes through the per-instance allowlist plus the write-"
+        "blocklist, so attaching to e.g. ``mail.message`` is refused. "
+        "Two input modes, exactly one required: "
+        "(1) ``datas_base64`` for SMALL inline payloads the agent typed "
+        "itself — note that several agent SDKs silently drop turns when "
+        "the inline base64 exceeds ~5 KB, so reach for source_path for "
+        "anything larger than a tiny snippet; "
+        "(2) ``source_path`` (absolute path) for files the api-server "
+        "wrote to a directory listed in the instance's "
+        "``attachment_source_paths`` TOML allowlist — the MCP reads + "
+        "encodes server-side, so the bytes never traverse the agent "
+        "context. Goes through the standard prod-guard pipeline: dry-run "
+        "preview (filename + decoded size + target record) → "
+        "confirmation_token → commit. The token binds to the exact file "
+        "bytes regardless of input mode, so an agent cannot dry-run a "
+        "placeholder and commit a different file with the same token. "
+        "Decoded size cap: 25 MB. Filename must contain no path "
+        "separators. The target record must exist for the authenticated "
+        "user. "
         'Example: res_model="account.move", res_id=123, '
-        'filename="invoice.pdf", datas_base64="JVBERi0xLj…" attaches '
-        "invoice.pdf to invoice 123."
+        'filename="invoice.pdf", source_path="/var/run/inbox/inv-2026-001.pdf"'
+        " attaches the file on disk to invoice 123."
     ),
     inputSchema={
         "type": "object",
-        "required": ["instance", "res_model", "res_id", "filename", "datas_base64"],
+        "required": ["instance", "res_model", "res_id", "filename"],
         "additionalProperties": False,
         "properties": {
             "instance": {"type": "string"},
@@ -625,7 +635,24 @@ _TOOL_CREATE_ATTACHMENT = Tool(
                 "minLength": 1,
                 "description": (
                     "Standard-base64 encoded file content. A ``data:...;base64,`` "
-                    "prefix is tolerated and stripped. Decoded size cap: 25 MB."
+                    "prefix is tolerated and stripped. Decoded size cap: 25 MB. "
+                    "Mutually exclusive with ``source_path``; for payloads larger "
+                    "than a few KB use ``source_path`` instead — several agent "
+                    "SDKs silently drop turns when the inline base64 grows past "
+                    "~5 KB."
+                ),
+            },
+            "source_path": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Absolute filesystem path on the MCP host. The MCP reads "
+                    "+ base64-encodes the file server-side so the bytes never "
+                    "traverse the agent context. The path must resolve (via "
+                    "``realpath``) into one of the directories listed in this "
+                    "instance's ``attachment_source_paths`` TOML allowlist; "
+                    "default is empty, so source_path is refused unless the "
+                    "operator opts in. Mutually exclusive with ``datas_base64``."
                 ),
             },
             "mimetype": {

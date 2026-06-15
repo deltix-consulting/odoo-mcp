@@ -1084,9 +1084,42 @@ class Dispatcher:
 
         res_id = _require_int(args, "res_id")
         filename = _require_str(args, "filename").strip()
-        datas_base64 = _require_str(args, "datas_base64")
         mimetype = _optional_str(args, "mimetype")
         description = _optional_str(args, "description")
+        # Two input modes: inline ``datas_base64`` (small, agent-typed)
+        # or ``source_path`` (server-side file read; the only viable
+        # path for >5 KB payloads, since base64 in tool-input kills
+        # several agent SDKs silently before our 25 MB cap kicks in).
+        # Exactly one is required; both at once is a config bug, not
+        # a fallback ladder, so refuse explicitly.
+        raw_b64 = args.get("datas_base64")
+        raw_path = args.get("source_path")
+        if raw_b64 and raw_path:
+            raise OdooMcpError(
+                "Provide exactly one of 'datas_base64' or 'source_path', not both. "
+                "Inline base64 is for tiny payloads the agent typed itself; "
+                "source_path is for files the api-server already wrote to a "
+                "directory on this instance's attachment_source_paths allowlist."
+            )
+        if not raw_b64 and not raw_path:
+            raise OdooMcpError(
+                "Missing input: provide either 'datas_base64' (small inline "
+                "payload) or 'source_path' (absolute path inside this "
+                "instance's attachment_source_paths allowlist)."
+            )
+        if raw_path is not None:
+            datas_base64 = _read_source_path_as_base64(raw_path, rt.config)
+            # Canonicalise: bind the payload digest to the actual file
+            # CONTENT (resolved bytes) and drop the path. Preview-with-
+            # source_path and commit-with-datas_base64 of the same file
+            # then share a digest; a preview-vs-commit content swap
+            # (different file at the same path, OR different path
+            # entirely) produces a different digest and the token is
+            # refused — same property the inline path had in v0.23.0.
+            args = {**args, "datas_base64": datas_base64}
+            args.pop("source_path", None)
+        else:
+            datas_base64 = _require_str(args, "datas_base64")
 
         # --- filename sanity ------------------------------------------
         if not filename:
@@ -1852,6 +1885,117 @@ _DRY_RUN_NOTE = (
 # would let a misconfigured tenant accept multi-GB uploads that would
 # stall the XML-RPC connection.
 _ATTACHMENT_MAX_BYTES: int = 25 * 1024 * 1024
+
+
+def _read_source_path_as_base64(raw_path: object, cfg: InstanceConfig) -> str:
+    """Read a server-local file and return its content as base64.
+
+    The only way to attach payloads larger than what fits in the agent's
+    tool-call window (some SDKs silently drop turns above ~5 KB of
+    inline base64). The MCP runs as a stdio subprocess in the same
+    filesystem namespace as the caller, so a path drop-off works
+    where inlining doesn't. The trade-off is arbitrary-file-read, so:
+
+    Security envelope:
+
+    - ``attachment_source_paths`` must be configured non-empty for this
+      instance. Default-deny: no config means no source_path. The opt-
+      in lives in TOML so a runaway agent prompt can't widen it.
+    - The given path must be a string AND absolute. Relative paths
+      resolve against the MCP's CWD, which is operator-confusing and
+      a footgun.
+    - ``os.path.realpath`` resolves symlinks once. The resolved file
+      must sit under one of the (also-realpath'd, at config-load time)
+      allowlisted directories. ``os.path.commonpath`` containment with
+      a trailing-separator guard catches the ``/allow/../etc`` and the
+      ``/allowed_dir_evil`` (prefix-of) attacks.
+    - The target must be a regular file (``S_ISREG``). Block devices,
+      named pipes, and directories are refused — they're not what
+      attachments are.
+    - File size is checked via ``stat`` BEFORE reading. Over cap → no
+      read at all. Eliminates the "open a 50 GB file just to die"
+      footgun.
+
+    Raises :class:`OdooMcpError` on any policy violation. The error
+    text never echoes the contents of any forbidden file, only the
+    requested path string (which the caller already had).
+    """
+    import stat as stat_mod
+
+    if not isinstance(raw_path, str) or not raw_path:
+        raise OdooMcpError("source_path must be a non-empty string.")
+    if not cfg.attachment_source_paths:
+        raise OdooMcpError(
+            "source_path is not enabled on this instance. Add "
+            "'attachment_source_paths = [\"/abs/path/to/dir\"]' to the "
+            f"[instances.{cfg.name}] TOML section, listing the "
+            "directories the MCP is allowed to read from."
+        )
+    if not os.path.isabs(raw_path):
+        raise OdooMcpError(
+            f"source_path must be an absolute path; got {raw_path!r}. "
+            "Relative paths would resolve against the MCP process's CWD, "
+            "which is operator-confusing and a security footgun."
+        )
+
+    resolved = os.path.realpath(raw_path)
+    # Trailing-separator guard prevents the ``/allowed_dir`` vs
+    # ``/allowed_dir_evil`` prefix confusion.
+    allowed_resolved: list[str] = []
+    for allowed in cfg.attachment_source_paths:
+        # Already realpath'd at config-load, but normalise the trailing
+        # separator here so the containment check is exact.
+        allowed_resolved.append(allowed.rstrip(os.sep))
+    contained = False
+    for allowed in allowed_resolved:
+        if resolved == allowed:
+            contained = True
+            break
+        if resolved.startswith(allowed + os.sep):
+            contained = True
+            break
+    if not contained:
+        raise OdooMcpError(
+            f"source_path {raw_path!r} resolves to {resolved!r}, which is not "
+            f"inside any of the attachment_source_paths configured for "
+            f"instance {cfg.name!r}. Add the directory to the TOML allowlist "
+            f"if you intended this, or move the file to an allowed location."
+        )
+
+    try:
+        st = os.stat(resolved)
+    except FileNotFoundError as exc:
+        raise OdooMcpError(f"source_path {raw_path!r} does not exist.") from exc
+    except OSError as exc:
+        raise OdooMcpError(f"source_path {raw_path!r}: cannot stat: {exc}") from exc
+
+    if not stat_mod.S_ISREG(st.st_mode):
+        raise OdooMcpError(
+            f"source_path {raw_path!r} is not a regular file. Devices, FIFOs, "
+            f"sockets, and directories are not supported as attachments."
+        )
+    if st.st_size > _ATTACHMENT_MAX_BYTES:
+        raise OdooMcpError(
+            f"source_path {raw_path!r} is {st.st_size} bytes, over the "
+            f"{_ATTACHMENT_MAX_BYTES}-byte cap. Split the file or compress "
+            f"it before attaching."
+        )
+
+    try:
+        with open(resolved, "rb") as fh:  # noqa: PTH123 — path already validated above
+            content = fh.read()
+    except OSError as exc:
+        raise OdooMcpError(f"source_path {raw_path!r}: cannot read: {exc}") from exc
+
+    # Re-check size after read in case the file grew between stat and
+    # read (TOCTOU). Cheap, prevents an attacker who controls the file
+    # from sneaking past the size gate.
+    if len(content) > _ATTACHMENT_MAX_BYTES:
+        raise OdooMcpError(
+            f"source_path {raw_path!r} grew between stat ({st.st_size} bytes) "
+            f"and read ({len(content)} bytes) — refusing to commit the read."
+        )
+    return base64.b64encode(content).decode("ascii")
 
 
 def _b64decode_or_raise(encoded: str) -> bytes:

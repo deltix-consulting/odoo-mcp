@@ -10,6 +10,67 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-06-15
+
+### Added
+
+- **`odoo_create_attachment` now accepts ``source_path`` for
+  server-side file reads.** Real-world failure: several agent SDKs
+  silently drop a turn when the inline base64 in a tool-call grows
+  past ~5 KB. A ~2.5 MB invoice PDF becomes ~3.3 MB of base64 in
+  the tool input and the turn dies without an error — the v0.23.0
+  25 MB cap was misleading because the SDK cliff hits long before
+  we get there. Worse, the agent often runs in an ephemeral
+  sandbox that can't even read the downloaded file to base64-
+  encode it; the bytes live on the api-server disk, not in the
+  agent context.
+
+  Fix: an optional ``source_path`` argument that the MCP reads
+  + base64-encodes server-side. The downloader writes a file to a
+  known path, hands the path to the agent, the agent passes
+  ``source_path`` to ``odoo_create_attachment``, and no bytes
+  traverse the agent context at all. ``datas_base64`` stays for
+  small inline payloads; exactly one of the two is required.
+
+  Security envelope:
+
+  - **Opt-in via TOML allowlist.** New per-instance config field
+    ``attachment_source_paths = ["/abs/dir", ...]``. Default is
+    empty — ``source_path`` is then refused outright. Operators
+    list the specific directories the MCP is allowed to read
+    from; everything else (``/etc``, ``~/.ssh``, etc.) stays
+    unreachable.
+  - **Path must be absolute.** Relative paths would resolve
+    against the MCP process's CWD, which is operator-confusing
+    and a footgun.
+  - **realpath-based containment check.** The submitted path is
+    resolved via ``os.path.realpath`` (so symlinks are followed
+    once) and matched against the (also-realpath'd, at config-
+    load time) allowlist. A symlink that lives inside the
+    allowed directory but points at a file outside is refused —
+    the test suite pins this attack case explicitly.
+  - **Regular files only.** Devices, FIFOs, sockets, directories
+    are refused at the ``stat`` step.
+  - **Size cap via stat BEFORE read.** No 50 GB file is opened
+    just to fail. A second size check after read closes a TOCTOU
+    edge case if the file grew between stat and read.
+  - **Payload-digest binding still works across modes.** After
+    reading, the dispatcher canonicalises the args (drops
+    ``source_path``, injects ``datas_base64``) before the prod-
+    guard computes the digest. A preview with ``source_path``
+    and a commit with the same bytes — via either input mode —
+    share a token. A content swap between preview and commit
+    (different file at the same path, different path with
+    different bytes) is refused by the digest check, just like
+    the v0.23.0 inline path.
+
+  10 new tests, 762 total (was 752). Cover: end-to-end multi-MB
+  PDF read + commit, default-deny when allowlist empty, refusal
+  outside allowlisted dirs, symlink-escape refusal, relative-path
+  refusal, directory refusal, over-cap refusal, both inputs
+  given, neither input given, and content-swap detection via
+  payload digest when both calls use ``source_path``.
+
 ## [0.23.0] - 2026-06-12
 
 ### Added
