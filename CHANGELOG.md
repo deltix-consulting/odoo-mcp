@@ -10,6 +10,42 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-06-12
+
+### Added
+
+- **New tool `odoo_create_attachment`** — bounded write path for
+  `ir.attachment`. Inputs: `instance`, `res_model`, `res_id`,
+  `filename`, `datas_base64`, optional `mimetype` + `description`.
+  Attaches a base64-encoded file to an Odoo record.
+
+  `ir.attachment` itself **stays on the global denylist** — the
+  agent cannot `search_read` arbitrary attachments (real exfil
+  risk, since attachments often carry sensitive PDFs that bypass
+  record-rules), cannot `write`, cannot `unlink`. The new tool is
+  the single permitted operation: create-only, with the user-
+  facing `res_model` validated through the standard `check_model`
+  pipeline (allowlist + denylist + write-blocklist) so attaching
+  to e.g. `ir.model` or `res.users` is refused. Decoded size
+  capped at 25 MB. Filename must contain no path separators.
+  Target record must exist (one `search_count` round-trip) —
+  orphan attachments are refused.
+
+  Full prod-guard pipeline: dry-run preview returns the file
+  metadata + a `confirmation_token`, commit consumes the token.
+  The token's payload digest binds to the exact file bytes (the
+  v0.18.0 token-binding fix applied here) so an agent that dry-
+  runs a small placeholder cannot commit a different file with
+  the same token.
+
+  13 new tests cover: write-op classification, tool registration,
+  dry-run preview + metadata, data-URL prefix tolerance, end-to-
+  end create → ir.attachment row, payload-digest content-swap
+  rejection, denylist refusal, write-blocklist refusal, filename
+  path-separator rejection, invalid-base64 rejection, over-size
+  cap rejection, nonexistent-target-record rejection, and a
+  defense-in-depth check that `ir.attachment` remains denylisted.
+
 ## [0.22.0] - 2026-06-12
 
 Efficiency release. Driven by an audit of 2,794 real-world tool calls

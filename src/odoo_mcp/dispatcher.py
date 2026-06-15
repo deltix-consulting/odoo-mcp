@@ -24,6 +24,8 @@ Pipeline::
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
@@ -1034,6 +1036,175 @@ class Dispatcher:
         self._add_commits_remaining(result, ctx)
         return result
 
+    def _create_attachment(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Attach a base64-encoded file to an Odoo record.
+
+        Bounded surface for adding ``ir.attachment`` rows from the
+        agent. ``ir.attachment`` itself stays on the global denylist —
+        the agent cannot ``search_read`` arbitrary attachments (a real
+        exfil risk, since attachments often carry sensitive PDFs that
+        bypass record-rules) and cannot ``unlink`` them. The only
+        permitted operation is *create*, gated by this method.
+
+        Validation pipeline:
+
+        1. ``res_model`` runs through the usual ``check_model``
+           (allowlist + denylist + write-blocklist). Attaching to e.g.
+           ``mail.message`` is refused — the write-blocklist applies
+           because adding a file to a message is semantically a write
+           against that message.
+        2. ``res_id`` must point at an existing record (one ``search_count``
+           round-trip). A typo'd id otherwise creates an orphan
+           attachment that's useless and quietly exfil-friendly.
+        3. ``filename`` is sanity-checked: non-empty, no path separators
+           (defence against Odoo accidentally interpreting them), max
+           255 chars (matches Odoo's own column length).
+        4. ``datas_base64`` is decoded once; the decoded content size
+           is capped at 25 MB. Over the cap → refuse before any write.
+
+        Full prod-guard pipeline: dry-run → confirmation token → commit.
+        The token's payload digest binds to ``(res_model, res_id,
+        filename, datas_base64, mimetype, description)`` so an agent
+        that dry-runs a placeholder cannot commit a different (larger,
+        renamed, retargeted) file with the same token.
+        """
+        _refuse_if_read_only_session()
+        # The tool's public schema uses ``res_model`` (matching Odoo's
+        # own ir.attachment field name) but the dispatcher pipeline
+        # expects ``model`` in ``args`` for the allowlist + audit +
+        # rate-limit machinery. Translate up front so a single value
+        # flows through both layers; the audit log records the target
+        # model under the canonical key, not a tool-local alias.
+        res_model = _require_str(args, "res_model")
+        args = {**args, "model": res_model}
+        ctx = self._begin("odoo_create_attachment", args, Operation.CREATE_ATTACHMENT)
+        assert ctx.model is not None
+        rt, model = ctx.rt, ctx.model
+        _refuse_write_blocklisted(model)
+
+        res_id = _require_int(args, "res_id")
+        filename = _require_str(args, "filename").strip()
+        datas_base64 = _require_str(args, "datas_base64")
+        mimetype = _optional_str(args, "mimetype")
+        description = _optional_str(args, "description")
+
+        # --- filename sanity ------------------------------------------
+        if not filename:
+            raise OdooMcpError("filename must be a non-empty string.")
+        if len(filename) > 255:
+            raise OdooMcpError("filename too long (max 255 characters).")
+        if "/" in filename or "\\" in filename:
+            # Odoo stores ``name`` as a plain string but downstream
+            # consumers (filestore filenames, S3 keys, Content-Disposition
+            # headers) sometimes interpret separators. Refuse outright —
+            # the caller can rename before attaching.
+            raise OdooMcpError(
+                "filename must not contain path separators ('/' or '\\\\'). "
+                "Strip the directory and pass only the leaf name."
+            )
+
+        # --- decoded size cap -----------------------------------------
+        try:
+            decoded = _b64decode_or_raise(datas_base64)
+        except OdooMcpError:
+            raise
+        if len(decoded) > _ATTACHMENT_MAX_BYTES:
+            raise OdooMcpError(
+                f"Attachment content is {len(decoded)} bytes, over the "
+                f"{_ATTACHMENT_MAX_BYTES}-byte cap. Split the file or "
+                f"compress it before attaching."
+            )
+        size_bytes = len(decoded)
+
+        # --- target record must exist ---------------------------------
+        # One round-trip — keeps the audit log honest about what was
+        # being attached to (and which res_model the operator approved
+        # in the dry-run preview), and refuses orphan attachments which
+        # would silently slip past Odoo's per-model record-rules.
+        if rt.client.search_count(model, [("id", "=", res_id)]) == 0:
+            raise OdooMcpError(
+                f"Target record {model}({res_id}) does not exist or is not "
+                "visible to the authenticated user — refusing to create an "
+                "orphan attachment."
+            )
+
+        self.app.prod_guard.check_write(ctx.instance, rt.config.production)
+
+        if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
+            summary = f"attach {filename!r} ({size_bytes} bytes) to {model}({res_id})"
+            token = self.app.prod_guard.create_pending(
+                ctx.instance,
+                ctx.op.value,
+                model,
+                summary=summary,
+                payload_digest=compute_payload_digest(_token_payload(ctx.op.value, args)),
+            )
+            self._audit_ok(
+                ctx,
+                {
+                    "res_id": res_id,
+                    "filename": filename,
+                    "size_bytes": size_bytes,
+                    "mimetype": mimetype,
+                },
+                args,
+                dry_run=True,
+            )
+            preview: dict[str, Any] = {
+                "preview": True,
+                "instance": ctx.instance,
+                "res_model": model,
+                "res_id": res_id,
+                "filename": filename,
+                "size_bytes": size_bytes,
+                "mimetype": mimetype,
+                "description": description,
+                "confirmation_token": token,
+                "note": _DRY_RUN_NOTE.format(tool="odoo_create_attachment"),
+            }
+            self._add_commits_remaining(preview, ctx, dry_run=True)
+            return preview
+
+        self._consume_token_on_prod(ctx, args)
+        attachment_values: dict[str, Any] = {
+            "name": filename,
+            "datas": datas_base64,
+            "res_model": model,
+            "res_id": res_id,
+        }
+        if mimetype:
+            attachment_values["mimetype"] = mimetype
+        if description:
+            attachment_values["description"] = description
+        # ``ir.attachment`` is on MODEL_DENYLIST. The client.create
+        # call here is the only path that creates an attachment — it
+        # bypasses the dispatcher-level allowlist (which we don't run
+        # for ``ir.attachment``) and writes directly through the
+        # XML-RPC client. The bounded inputs and the prod-guard
+        # pipeline above are the security envelope.
+        attachment_id = rt.client.create("ir.attachment", attachment_values)
+        self._audit_ok(
+            ctx,
+            {
+                "res_id": res_id,
+                "filename": filename,
+                "size_bytes": size_bytes,
+                "attachment_id": attachment_id,
+            },
+            args,
+        )
+        result: dict[str, Any] = {
+            "instance": ctx.instance,
+            "res_model": model,
+            "res_id": res_id,
+            "attachment_id": attachment_id,
+            "filename": filename,
+            "size_bytes": size_bytes,
+            "committed": True,
+        }
+        self._add_commits_remaining(result, ctx)
+        return result
+
     def _peek_states(
         self, rt: InstanceRuntime, model: str, record_ids: list[int]
     ) -> list[dict[str, Any]]:
@@ -1560,6 +1731,7 @@ _HANDLERS: dict[str, Callable[[Dispatcher, dict[str, Any]], dict[str, Any]]] = {
     "odoo_diagnose_routing": Dispatcher._diagnose_routing,
     "odoo_send_message": Dispatcher._send_message,
     "odoo_run_document_action": Dispatcher._run_document_action,
+    "odoo_create_attachment": Dispatcher._create_attachment,
 }
 
 
@@ -1671,6 +1843,41 @@ _DRY_RUN_NOTE = (
 )
 
 
+# Hard cap on the decoded size of an attachment created via
+# ``odoo_create_attachment``. The base64-encoded string is ~33% larger,
+# so a 25 MB cap on decoded bytes corresponds to ~33 MB of wire payload.
+# That's well under typical Odoo / nginx upload limits while staying
+# comfortably above the size of any invoice, contract, or screenshot
+# we've seen the agent want to attach. Hardcoded — config-overridable
+# would let a misconfigured tenant accept multi-GB uploads that would
+# stall the XML-RPC connection.
+_ATTACHMENT_MAX_BYTES: int = 25 * 1024 * 1024
+
+
+def _b64decode_or_raise(encoded: str) -> bytes:
+    """Decode a base64 string, surfacing a clean :class:`OdooMcpError` on bad input.
+
+    Tolerates the data-URL prefix that some agents emit
+    (``data:application/pdf;base64,JVBERi…``) by stripping everything
+    up to and including the comma. Stops at the first invalid character
+    rather than silently truncating — same fail-closed posture as the
+    rest of the security layer.
+    """
+    if not isinstance(encoded, str) or not encoded:
+        raise OdooMcpError("datas_base64 must be a non-empty base64 string.")
+    payload = encoded.strip()
+    if payload.startswith("data:") and "," in payload:
+        payload = payload.split(",", 1)[1]
+    try:
+        return base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise OdooMcpError(
+            f"datas_base64 is not valid base64: {exc}. The string must be "
+            "the standard base64 alphabet, no whitespace, no URL-safe "
+            "substitutions, and padded with '='."
+        ) from exc
+
+
 # Per-operation list of arg keys whose values determine what gets written.
 # The confirmation token's payload digest is computed over exactly these
 # keys (with values taken straight from ``args``). A commit re-call with
@@ -1692,6 +1899,20 @@ _TOKEN_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
         "message_type",
     ),
     Operation.DOCUMENT_ACTION.value: ("record_ids", "action"),
+    # ``datas_base64`` is included so the digest binds to the EXACT file
+    # bytes that were previewed. An agent that dry-runs a 200-byte
+    # placeholder and tries to commit a 20 MB invoice with the same
+    # token fails the digest check. ``mimetype`` and ``description``
+    # don't change the bytes but DO change what an operator sees in the
+    # preview, so they bind too.
+    Operation.CREATE_ATTACHMENT.value: (
+        "res_model",
+        "res_id",
+        "filename",
+        "datas_base64",
+        "mimetype",
+        "description",
+    ),
 }
 
 

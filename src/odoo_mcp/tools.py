@@ -574,6 +574,88 @@ _TOOL_DIAGNOSE_ACCESS = Tool(
 )
 
 
+_TOOL_CREATE_ATTACHMENT = Tool(
+    name="odoo_create_attachment",
+    description=(
+        "Attach a base64-encoded file to an Odoo record. Bounded surface for "
+        "creating ``ir.attachment`` rows — that model stays read-blocked via "
+        "the global denylist (no search_read of arbitrary attachments) and "
+        "this tool can only CREATE, never read or unlink. ``res_model`` "
+        "still goes through the per-instance allowlist plus the "
+        "write-blocklist, so attaching to e.g. ``mail.message`` is refused. "
+        "Goes through the standard prod-guard pipeline: dry-run preview "
+        "(filename + decoded size + target record) → confirmation_token → "
+        "commit. The token binds to the exact file bytes, so an agent "
+        "cannot dry-run a placeholder and commit a different file with the "
+        "same token. Decoded size cap: 25 MB. Filename must contain no "
+        "path separators. The target record must exist for the "
+        "authenticated user. "
+        'Example: res_model="account.move", res_id=123, '
+        'filename="invoice.pdf", datas_base64="JVBERi0xLj…" attaches '
+        "invoice.pdf to invoice 123."
+    ),
+    inputSchema={
+        "type": "object",
+        "required": ["instance", "res_model", "res_id", "filename", "datas_base64"],
+        "additionalProperties": False,
+        "properties": {
+            "instance": {"type": "string"},
+            "res_model": {
+                "type": "string",
+                "description": (
+                    "Target model the file is attached to (must pass the "
+                    "allowlist; write-blocklisted models are refused)."
+                ),
+            },
+            "res_id": {
+                "type": "integer",
+                "description": "Existing record id on the target model.",
+            },
+            "filename": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "description": (
+                    "Display name of the attachment. No path separators "
+                    "('/' or '\\\\') — pass the leaf name only."
+                ),
+            },
+            "datas_base64": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Standard-base64 encoded file content. A ``data:...;base64,`` "
+                    "prefix is tolerated and stripped. Decoded size cap: 25 MB."
+                ),
+            },
+            "mimetype": {
+                "type": "string",
+                "description": (
+                    "Optional MIME type (e.g. 'application/pdf'). When omitted, "
+                    "Odoo's own detection runs from the filename extension."
+                ),
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional human-readable description stored on the attachment row.",
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": (
+                    "Preview only. Defaults to true on production instances "
+                    "and false on non-production. Pass false + a "
+                    "confirmation_token from the preview to commit."
+                ),
+            },
+            "confirmation_token": {
+                "type": "string",
+                "description": "Token from a prior dry-run, required to commit on production.",
+            },
+        },
+    },
+)
+
+
 _TOOL_DIAGNOSE_ROUTING = Tool(
     name="odoo_diagnose_routing",
     description=(
@@ -651,4 +733,5 @@ def build_tools() -> list[Tool]:
         _TOOL_DIAGNOSE_ROUTING,
         _TOOL_SEND_MESSAGE,
         _TOOL_RUN_DOCUMENT_ACTION,
+        _TOOL_CREATE_ATTACHMENT,
     ]

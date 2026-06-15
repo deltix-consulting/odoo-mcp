@@ -201,6 +201,7 @@ class Operation(StrEnum):
     UNLINK = "unlink"
     SEND_MESSAGE = "send_message"  # used only by odoo_send_message
     DOCUMENT_ACTION = "document_action"  # used only by odoo_run_document_action
+    CREATE_ATTACHMENT = "create_attachment"  # used only by odoo_create_attachment
     FIELDS_GET = "fields_get"  # used only by odoo_describe_model
     DIAGNOSE_ACCESS = "diagnose_access"  # used only by odoo_diagnose_access
     DIAGNOSE_ROUTING = "diagnose_routing"  # used only by odoo_diagnose_routing
@@ -230,6 +231,7 @@ _WRITE_OPS: Final[frozenset[Operation]] = frozenset(
         Operation.UNLINK,
         Operation.SEND_MESSAGE,
         Operation.DOCUMENT_ACTION,
+        Operation.CREATE_ATTACHMENT,
     }
 )
 
