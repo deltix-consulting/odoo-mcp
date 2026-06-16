@@ -817,6 +817,11 @@ def test_source_path_read_is_memory_bounded_against_toctou(
     growing.write_bytes(b"A" * (_ATTACHMENT_MAX_BYTES + 50))
 
     # Lie about the size: pretend it's 100 bytes at stat time.
+    # The monkeypatch lands on the GLOBAL ``os.stat`` (via the
+    # dispatcher's module attribute), so the wrapper MUST forward
+    # every non-matching call — including pytest's cleanup paths
+    # that pass ``follow_symlinks=``. Forgetting that crashes the
+    # whole test session on CI (asked us in v0.24.1 release CI).
     real_stat = os.stat
     fake_size = 100
 
@@ -824,10 +829,12 @@ def test_source_path_read_is_memory_bounded_against_toctou(
         st_mode = real_stat(growing).st_mode
         st_size = fake_size
 
-    def fake_stat(path: str) -> Any:
-        if path == os.path.realpath(growing):
+    target = os.path.realpath(growing)
+
+    def fake_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if os.fspath(path) == target:
             return _FakeStat()
-        return real_stat(path)
+        return real_stat(path, *args, **kwargs)
 
     monkeypatch.setattr("odoo_mcp.dispatcher.os.stat", fake_stat)
 
