@@ -10,6 +10,46 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-06-15
+
+### Changed
+
+- **`odoo_create_attachment` source_path read is now memory-bounded.**
+  The v0.24.0 implementation stat'd the file for the size check,
+  then called `fh.read()` unbounded — fine in the normal case, but
+  if the file grew between stat and read (concurrent writer, or a
+  hostile process racing the call) we'd allocate the full grown
+  size in memory before the post-read check refused. Now reads at
+  most `_ATTACHMENT_MAX_BYTES + 1` bytes regardless of stat output,
+  so memory is bounded by the cap, period. Two new tests pin both
+  the behavioural defense (TOCTOU file-grow via mocked stat) and
+  the white-box invariant (`fh.read(MAX+1)` literal must remain in
+  the source).
+
+- **Eliminated a redundant base64 decode in the source_path path.**
+  v0.24.0 ran `_b64decode_or_raise(datas_base64)` after a
+  source_path read just to call `len()` on the decoded bytes —
+  about 25 MB of pointless alloc+free for a large invoice PDF.
+  The helper now returns `(base64_string, size_bytes)` directly;
+  the dispatcher uses that size and skips the decode. The inline
+  `datas_base64` path still decodes (it's the validation, not
+  just the size check). A test spies on the decoder and pins zero
+  calls on the source_path branch / exactly one on the inline
+  branch.
+
+- **Config-load warning when `attachment_source_paths` entry doesn't
+  exist.** Operators sometimes typo the path
+  ("/var/run/odoo-mco" instead of "odoo-mcp"); the v0.24.0 loader
+  tolerated non-existent entries silently, and the typo only
+  surfaced on the first failing source_path call with a confusing
+  containment error. A WARNING now fires at config-load time
+  naming the missing path and the instance — surfaces in the same
+  logs the operator already reads post-startup. Entries are still
+  kept (the directory may legitimately be created after MCP
+  start); the warning is diagnostic, not blocking.
+
+  4 new tests, 766 total (was 762).
+
 ## [0.24.0] - 2026-06-15
 
 ### Added

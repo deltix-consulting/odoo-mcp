@@ -18,6 +18,7 @@ Security rules enforced here:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import stat
@@ -27,6 +28,8 @@ from pathlib import Path
 from typing import Any, Final
 
 from .errors import ConfigError
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH: Final[Path] = Path("~/.odoo-mcp/config.toml").expanduser()
 DEFAULT_AUDIT_LOG: Final[str] = "~/.odoo-mcp/audit.jsonl"
@@ -500,7 +503,24 @@ def _parse_attachment_source_paths(raw: Any, instance_name: str) -> tuple[str, .
         # candidate file against this resolved form at call time. Both
         # sides realpath, so a symlink that crosses the boundary at
         # runtime is refused.
-        resolved.append(os.path.realpath(entry))
+        resolved_entry = os.path.realpath(entry)
+        resolved.append(resolved_entry)
+        # Operator-friendly diagnostic. We tolerate non-existent dirs
+        # (deploy order may create them after the MCP starts) but
+        # silently swallowing that hides the most common config typo
+        # ("/var/run/odoo-mco" instead of "/var/run/odoo-mcp") until
+        # the first source_path call fails confusingly. A WARN at load
+        # surfaces it in the same logs the operator is already
+        # reading post-startup.
+        if not os.path.isdir(resolved_entry):
+            logger.warning(
+                "attachment_source_paths entry %r for instance %r does not "
+                "exist (or is not a directory) at config-load time. The "
+                "entry is kept — source_path calls will succeed once the "
+                "directory is created. If this is a typo, fix the TOML.",
+                entry,
+                instance_name,
+            )
     return tuple(resolved)
 
 

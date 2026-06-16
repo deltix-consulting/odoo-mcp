@@ -1107,21 +1107,7 @@ class Dispatcher:
                 "payload) or 'source_path' (absolute path inside this "
                 "instance's attachment_source_paths allowlist)."
             )
-        if raw_path is not None:
-            datas_base64 = _read_source_path_as_base64(raw_path, rt.config)
-            # Canonicalise: bind the payload digest to the actual file
-            # CONTENT (resolved bytes) and drop the path. Preview-with-
-            # source_path and commit-with-datas_base64 of the same file
-            # then share a digest; a preview-vs-commit content swap
-            # (different file at the same path, OR different path
-            # entirely) produces a different digest and the token is
-            # refused — same property the inline path had in v0.23.0.
-            args = {**args, "datas_base64": datas_base64}
-            args.pop("source_path", None)
-        else:
-            datas_base64 = _require_str(args, "datas_base64")
-
-        # --- filename sanity ------------------------------------------
+        # --- filename sanity (cheap; do this BEFORE any file I/O) -----
         if not filename:
             raise OdooMcpError("filename must be a non-empty string.")
         if len(filename) > 255:
@@ -1136,18 +1122,33 @@ class Dispatcher:
                 "Strip the directory and pass only the leaf name."
             )
 
-        # --- decoded size cap -----------------------------------------
-        try:
+        # --- resolve payload to (base64_string, size_bytes) -----------
+        # Both input modes converge here. The source_path branch already
+        # knows the byte length from its bounded read, so we use that
+        # directly instead of re-decoding our own base64 just to call
+        # ``len()`` on it — that was ~25 MB of pointless alloc/free per
+        # call for a large invoice PDF.
+        if raw_path is not None:
+            datas_base64, size_bytes = _read_source_path_as_base64(raw_path, rt.config)
+            # Canonicalise args: bind the payload digest to the actual
+            # file CONTENT (resolved bytes) and drop the path. Preview-
+            # with-source_path and commit-with-datas_base64 of the same
+            # file then share a digest; a preview-vs-commit content swap
+            # (different file at the same path, OR different path
+            # entirely) produces a different digest and the token is
+            # refused — same property the inline path had in v0.23.0.
+            args = {**args, "datas_base64": datas_base64}
+            args.pop("source_path", None)
+        else:
+            datas_base64 = _require_str(args, "datas_base64")
             decoded = _b64decode_or_raise(datas_base64)
-        except OdooMcpError:
-            raise
-        if len(decoded) > _ATTACHMENT_MAX_BYTES:
-            raise OdooMcpError(
-                f"Attachment content is {len(decoded)} bytes, over the "
-                f"{_ATTACHMENT_MAX_BYTES}-byte cap. Split the file or "
-                f"compress it before attaching."
-            )
-        size_bytes = len(decoded)
+            if len(decoded) > _ATTACHMENT_MAX_BYTES:
+                raise OdooMcpError(
+                    f"Attachment content is {len(decoded)} bytes, over the "
+                    f"{_ATTACHMENT_MAX_BYTES}-byte cap. Split the file or "
+                    f"compress it before attaching."
+                )
+            size_bytes = len(decoded)
 
         # --- target record must exist ---------------------------------
         # One round-trip — keeps the audit log honest about what was
@@ -1887,7 +1888,7 @@ _DRY_RUN_NOTE = (
 _ATTACHMENT_MAX_BYTES: int = 25 * 1024 * 1024
 
 
-def _read_source_path_as_base64(raw_path: object, cfg: InstanceConfig) -> str:
+def _read_source_path_as_base64(raw_path: object, cfg: InstanceConfig) -> tuple[str, int]:
     """Read a server-local file and return its content as base64.
 
     The only way to attach payloads larger than what fits in the agent's
@@ -1983,19 +1984,22 @@ def _read_source_path_as_base64(raw_path: object, cfg: InstanceConfig) -> str:
 
     try:
         with open(resolved, "rb") as fh:  # noqa: PTH123 — path already validated above
-            content = fh.read()
+            # Memory-bounded: read at most MAX+1 bytes regardless of
+            # what stat reported. If the file grew between stat and
+            # open (TOCTOU), we never allocate more than 25 MB + 1.
+            # The +1 trick is how we detect "still more to read" without
+            # allocating a second buffer.
+            content = fh.read(_ATTACHMENT_MAX_BYTES + 1)
     except OSError as exc:
         raise OdooMcpError(f"source_path {raw_path!r}: cannot read: {exc}") from exc
 
-    # Re-check size after read in case the file grew between stat and
-    # read (TOCTOU). Cheap, prevents an attacker who controls the file
-    # from sneaking past the size gate.
     if len(content) > _ATTACHMENT_MAX_BYTES:
         raise OdooMcpError(
             f"source_path {raw_path!r} grew between stat ({st.st_size} bytes) "
-            f"and read ({len(content)} bytes) — refusing to commit the read."
+            f"and read ({len(content)} bytes, capped) — refusing to commit the "
+            f"read. The file was likely being written concurrently."
         )
-    return base64.b64encode(content).decode("ascii")
+    return base64.b64encode(content).decode("ascii"), len(content)
 
 
 def _b64decode_or_raise(encoded: str) -> bytes:

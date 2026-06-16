@@ -21,8 +21,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from odoo_mcp.audit import AuditLog
 from odoo_mcp.client import OdooClient
@@ -782,3 +786,169 @@ def test_source_path_content_swap_caught_by_payload_digest(tmp_path: Path) -> No
     assert out["ok"] is False
     assert "different payload" in out["error"]
     assert fake.create_calls == []
+
+
+# ---------------------------------------------------------------------------
+# v0.24.1 improvements: memory-bounded read, no redundant decode, config warn
+# ---------------------------------------------------------------------------
+
+
+def test_source_path_read_is_memory_bounded_against_toctou(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """TOCTOU defense: stat reports a small size but the file is
+    actually larger (or grows after stat). The read uses
+    ``fh.read(MAX+1)`` — bounded — and the post-read length check
+    refuses cleanly without ever allocating beyond MAX+1.
+
+    We unit-test the helper directly so we can lie about the stat
+    size without filesystem tricks. The integration coverage is
+    already in ``test_source_path_refuses_over_size_cap``; this
+    test exists to pin the TOCTOU-safe read-bound, not just the
+    stat-bound.
+    """
+    from odoo_mcp.dispatcher import _ATTACHMENT_MAX_BYTES, _read_source_path_as_base64
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    # Real file is over the cap — would OOM (or near-cap-allocate)
+    # if we read unbounded.
+    growing = inbox / "growing.bin"
+    growing.write_bytes(b"A" * (_ATTACHMENT_MAX_BYTES + 50))
+
+    # Lie about the size: pretend it's 100 bytes at stat time.
+    real_stat = os.stat
+    fake_size = 100
+
+    class _FakeStat:
+        st_mode = real_stat(growing).st_mode
+        st_size = fake_size
+
+    def fake_stat(path: str) -> Any:
+        if path == os.path.realpath(growing):
+            return _FakeStat()
+        return real_stat(path)
+
+    monkeypatch.setattr("odoo_mcp.dispatcher.os.stat", fake_stat)
+
+    cfg = _instance_config(attachment_source_paths=(str(inbox.resolve()),))
+
+    # The read returns MAX+1 bytes (capped); the post-read check
+    # refuses with the "grew between stat and read" diagnostic.
+    with pytest.raises(Exception) as excinfo:
+        _read_source_path_as_base64(str(growing), cfg)
+    msg = str(excinfo.value).lower()
+    assert "grew" in msg or "cap" in msg
+    # And the read was bounded — we never allocated past MAX+1.
+    # We can't observe the allocation directly, but the error path
+    # IS the bounded-read path; any other path would have raised a
+    # different error (or none).
+
+
+def test_source_path_read_is_memory_bounded_via_fh_read_argument() -> None:
+    """White-box check on the actual ``read(...)`` call argument.
+
+    The improvement IS the ``fh.read(_ATTACHMENT_MAX_BYTES + 1)`` line
+    — without that argument the read is unbounded. Inspect the source
+    to pin that the helper still uses the bounded form, so a refactor
+    that "simplifies" it back to ``fh.read()`` is loud."""
+    import inspect
+
+    from odoo_mcp.dispatcher import _read_source_path_as_base64
+
+    source = inspect.getsource(_read_source_path_as_base64)
+    assert "fh.read(_ATTACHMENT_MAX_BYTES + 1)" in source, (
+        "The source_path read must be bounded by _ATTACHMENT_MAX_BYTES + 1 — "
+        "an unbounded ``fh.read()`` reopens the OOM-via-TOCTOU footgun."
+    )
+
+
+def test_source_path_skips_redundant_b64_decode(monkeypatch, tmp_path: Path) -> None:
+    """Performance regression guard. For the source_path branch we know
+    the size from the bounded read; we must NOT call
+    ``_b64decode_or_raise`` to recompute it (~25 MB of pointless
+    alloc/free per call). Spy on the helper and assert zero calls when
+    source_path is used; assert one call when datas_base64 is used."""
+    from odoo_mcp import dispatcher as disp_mod
+
+    decode_calls: list[str] = []
+    real_decode = disp_mod._b64decode_or_raise
+
+    def spy(encoded: str) -> bytes:
+        decode_calls.append(encoded[:8])
+        return real_decode(encoded)
+
+    monkeypatch.setattr(disp_mod, "_b64decode_or_raise", spy)
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    f = inbox / "x.txt"
+    f.write_bytes(b"hello world")
+
+    fake = _AttachFake()
+    app = _build(
+        tmp_path,
+        fake,
+        attachment_source_paths=(str(inbox.resolve()),),
+    )
+    dispatcher = Dispatcher(app)
+
+    # source_path branch — no decode call.
+    _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "res_model": "res.partner",
+            "res_id": 1,
+            "filename": "x.txt",
+            "source_path": str(f),
+        },
+    )
+    assert decode_calls == [], (
+        f"source_path branch called _b64decode_or_raise {len(decode_calls)} time(s); "
+        f"expected 0 (we already have the size from the bounded read)."
+    )
+
+    # Inline branch — decode IS still expected, for validation +
+    # over-cap detection on data the caller supplied verbatim.
+    _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "res_model": "res.partner",
+            "res_id": 2,
+            "filename": "x.txt",
+            "datas_base64": _b64(b"inline"),
+        },
+    )
+    assert len(decode_calls) == 1, (
+        f"inline branch should call _b64decode_or_raise exactly once; saw {len(decode_calls)}."
+    )
+
+
+def test_config_warns_on_missing_attachment_source_path(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """Config-load diagnostic: a non-existent ``attachment_source_paths``
+    entry surfaces as a WARNING (not a silent pass). Catches the most
+    common typo class — "/var/run/odoo-mco" instead of "odoo-mcp" —
+    at startup, not on first failing source_path call.
+
+    Tolerated, not refused: deploy ordering sometimes creates the
+    directory after the MCP starts. The entry stays in the resolved
+    list; the runtime check then matches once the dir appears.
+    """
+    from odoo_mcp.config import _parse_attachment_source_paths
+
+    missing = str(tmp_path / "does-not-exist-yet")
+    with caplog.at_level(logging.WARNING, logger="odoo_mcp.config"):
+        result = _parse_attachment_source_paths([missing], "dev")
+    # Entry preserved, not dropped.
+    assert len(result) == 1
+    assert result[0] == os.path.realpath(missing)
+    # And a WARNING surfaced naming both the path and the instance.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("does-not-exist-yet" in r.getMessage() for r in warnings), (
+        f"expected a WARN mentioning the missing path; saw {[r.getMessage() for r in warnings]}"
+    )
+    assert any("'dev'" in r.getMessage() for r in warnings)
