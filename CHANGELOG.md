@@ -10,6 +10,66 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-06-16
+
+### Added
+
+- **`odoo_run_document_action` now auto-completes a hardcoded set of
+  follow-up wizards.** Real incident (2026-06-16): an agent ran
+  cancel on a `sale.order` with linked pickings; Odoo's
+  `action_cancel` returned the `sale.order.cancel` wizard descriptor
+  (an `ir.actions.act_window` dict) instead of cancelling; the agent
+  saw `needs_manual_completion: true` and fell back to "create a new
+  SO instead" — costly when the operator just wanted a cancel.
+
+  Fix: a new wizard-completion map in
+  `security/document_actions.py` (`_WIZARD_COMPLETIONS`) describes
+  per `(model, action)` how to drive a returned wizard:
+
+  ```python
+  WizardCompletion(
+      wizard_model="sale.order.cancel",
+      wizard_method="action_cancel",
+      origin_field="order_id",
+  )
+  ```
+
+  When the document action returns a wizard dict AND the
+  `(model, action)` is in the map, the dispatcher creates the
+  wizard record with `{origin_field: origin_record_id}` and calls
+  `wizard_method` on it — the same two steps the Odoo UI runs when
+  the user clicks the confirm button. The response gains a
+  `wizard: {wizard_model, wizard_method, steps: [...]}` block so the
+  audit log records what happened.
+
+  Bounded by design:
+
+  - **Per-(model, action) opt-in.** Only `(sale.order, cancel)` is
+    in the map at v0.25.0. Every addition is a deliberate code
+    change with a security review, exactly like adding a
+    `_DOCUMENT_ACTIONS` row.
+  - **No second prod-guard.** The operator's original dry-run
+    review already approved the *logical* action; the wizard step
+    is the same operation split across two RPC calls because of
+    how Odoo's UI is wired. A second token would force every
+    cancel-with-linked-pickings to be approved twice and break
+    the audit chain.
+  - **Chained wizards stay pending.** If the auto-driven wizard
+    itself returns another wizard dict (rare), the per-step record
+    reports `wizard_returned_wizard: true` and the response flips
+    back to `committed=false` + `needs_manual_completion=true`.
+    Pinned by test.
+  - **No-wizard path unchanged.** When `action_cancel` returns
+    `True` directly (no linked pickings), the dispatcher does NOT
+    create a wizard record on speculation — pinned by test so a
+    refactor can't introduce stray rows.
+
+  5 new tests: end-to-end SO-cancel-with-wizard, unknown wizard
+  still falls back to `needs_manual_completion`, no-wizard path
+  doesn't create speculative records, catalogue-level pin on the
+  map entry, chained-wizard flip back to pending. 771 tests total
+  (was 766).
+
 ## [0.24.1] - 2026-06-15
 
 ### Changed

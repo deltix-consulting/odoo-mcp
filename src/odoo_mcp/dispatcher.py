@@ -58,7 +58,11 @@ from .security.allowlist import (
     check_operation,
     classify_model_block,
 )
-from .security.document_actions import resolve_document_action
+from .security.document_actions import (
+    WizardCompletion,
+    resolve_document_action,
+    resolve_wizard_completion,
+)
 from .security.domain import sandbox_domain
 from .security.fields import (
     redact_fields_get,
@@ -1312,12 +1316,32 @@ class Dispatcher:
 
         self._consume_token_on_prod(ctx, args)
         result = rt.client.call_document_action(model, method, record_ids)
-        # Some Odoo methods (notably stock.picking.button_validate) return
-        # a dict describing a follow-up wizard (backorder / immediate
-        # transfer confirmation) instead of completing. Report that
-        # honestly rather than claiming the action finished.
-        needs_manual = isinstance(result, dict)
-        self._audit_ok(ctx, {"action": action, "id_count": len(record_ids)}, args)
+        # Some Odoo methods (notably stock.picking.button_validate and
+        # sale.order.action_cancel when there are linked pickings)
+        # return a dict describing a follow-up wizard instead of
+        # completing. For a SPECIFIC, audited set of these we drive
+        # the wizard ourselves (see :data:`_WIZARD_COMPLETIONS`); for
+        # everything else we surface the same "needs manual completion"
+        # signal the agent's been seeing.
+        wizard_spec = resolve_wizard_completion(model, action)
+        wizard_completion: dict[str, Any] | None = None
+        if isinstance(result, dict) and wizard_spec is not None:
+            wizard_completion = self._complete_returned_wizard(rt, wizard_spec, record_ids)
+            # If every record's wizard completed without itself
+            # returning another wizard, the logical action succeeded.
+            still_pending = any(
+                step.get("wizard_returned_wizard") for step in wizard_completion["steps"]
+            )
+            needs_manual = still_pending
+        else:
+            needs_manual = isinstance(result, dict)
+
+        audit_details: dict[str, Any] = {"action": action, "id_count": len(record_ids)}
+        if wizard_completion is not None:
+            audit_details["wizard_model"] = wizard_spec.wizard_model  # type: ignore[union-attr]
+            audit_details["wizard_completed"] = not needs_manual
+        self._audit_ok(ctx, audit_details, args)
+
         out: dict[str, Any] = {
             "instance": ctx.instance,
             "model": model,
@@ -1326,15 +1350,73 @@ class Dispatcher:
             "record_ids": record_ids,
             "committed": not needs_manual,
         }
+        if wizard_completion is not None:
+            out["wizard"] = wizard_completion
         if needs_manual:
             out["needs_manual_completion"] = True
             out["note"] = (
                 "Odoo returned a follow-up wizard (e.g. backorder or "
-                "immediate-transfer confirmation). The action did NOT fully "
-                "complete — finish it in the Odoo UI."
+                "immediate-transfer confirmation) we don't auto-complete. "
+                "The action did NOT fully complete — finish it in the Odoo UI."
             )
         self._add_commits_remaining(out, ctx)
         return out
+
+    def _complete_returned_wizard(
+        self,
+        rt: InstanceRuntime,
+        spec: WizardCompletion,
+        record_ids: list[int],
+    ) -> dict[str, Any]:
+        """Drive a follow-up wizard returned by a document action.
+
+        Per-record: create a ``spec.wizard_model`` row with
+        ``{spec.origin_field: record_id}``, then call
+        ``spec.wizard_method`` on the created wizard. Returns a
+        structured summary so the audit log records what the wizard
+        layer did, and so a chained wizard (the wizard returning
+        another wizard — rare) doesn't get silently swallowed.
+
+        Does NOT take a second prod-guard token. The operator's
+        original dry-run review approved the *logical* action; the
+        wizard step is the same logical operation, just split across
+        two Odoo RPC calls because of how Odoo's UI is wired. Adding
+        a second token here would force every cancel-with-linked-
+        pickings to be approved twice and break the audit chain.
+        """
+        steps: list[dict[str, Any]] = []
+        for rid in record_ids:
+            wizard_id = rt.client.create(spec.wizard_model, {spec.origin_field: rid})
+            try:
+                wresult = rt.client.call_document_action(
+                    spec.wizard_model, spec.wizard_method, [wizard_id]
+                )
+            except OdooMcpError as exc:
+                steps.append(
+                    {
+                        "origin_id": rid,
+                        "wizard_id": wizard_id,
+                        "ok": False,
+                        "error": str(exc),
+                    }
+                )
+                continue
+            steps.append(
+                {
+                    "origin_id": rid,
+                    "wizard_id": wizard_id,
+                    "ok": True,
+                    # A chained wizard (returns another wizard dict)
+                    # is unusual for the cancel pattern; expose it so
+                    # the operator can see what happened.
+                    "wizard_returned_wizard": isinstance(wresult, dict),
+                }
+            )
+        return {
+            "wizard_model": spec.wizard_model,
+            "wizard_method": spec.wizard_method,
+            "steps": steps,
+        }
 
     def _add_commits_remaining(
         self, result: dict[str, Any], ctx: _Ctx, *, dry_run: bool = False

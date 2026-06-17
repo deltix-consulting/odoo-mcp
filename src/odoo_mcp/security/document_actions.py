@@ -21,9 +21,38 @@ gets its own tool with its own review, not a quiet row in this map.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Final
 
 from ..errors import OperationNotAllowedError
+
+
+@dataclass(frozen=True, slots=True)
+class WizardCompletion:
+    """How to drive a follow-up wizard that a document action returned.
+
+    Several Odoo actions don't perform their action directly — they
+    return an ``ir.actions.act_window`` pointing at a transient
+    ``wizard_model`` (e.g. ``sale.order.cancel`` when the SO has
+    linked pickings/invoices). The UI opens that wizard so the user
+    can confirm. Over RPC the agent sees the dict and gives up.
+
+    This dataclass describes how to drive a *specific* wizard
+    automatically. The dispatcher creates a record on
+    ``wizard_model`` with ``{origin_field: origin_record_id}`` and
+    then calls ``wizard_method`` on it — the same two steps the UI
+    performs when the user clicks the confirm button.
+
+    Like :data:`_DOCUMENT_ACTIONS`, each entry is hardcoded and not
+    config-overridable. Adding a row is a deliberate security
+    review: the wizard's action method gets invoked on prod records
+    on behalf of the agent, so it must be safe and bounded.
+    """
+
+    wizard_model: str
+    wizard_method: str
+    origin_field: str
+
 
 # (model, action) -> Odoo method name. The map IS the allowlist.
 #
@@ -73,6 +102,48 @@ DOCUMENT_ACTION_VERBS: Final[tuple[str, ...]] = tuple(
 def supported_pairs() -> list[str]:
     """Return ``model:action`` strings for every mapped pair, sorted."""
     return sorted(f"{model}:{action}" for (model, action) in _DOCUMENT_ACTIONS)
+
+
+# (origin_model, action) -> wizard completion spec. Populated only for
+# actions that have been observed to return a follow-up wizard on
+# supported Odoo versions, and where the wizard's confirm step is
+# semantically the same as the action itself (no extra fields the user
+# might want to change in the UI).
+#
+# Adding a row here is a deliberate security review: the named wizard's
+# method gets invoked on a prod record on the agent's behalf. The
+# operator-facing dry-run / confirmation-token pipeline at the
+# document-action layer still gates the whole thing — the wizard
+# completion runs only on commit, after the operator approved the
+# logical action.
+_WIZARD_COMPLETIONS: Final[dict[tuple[str, str], WizardCompletion]] = {
+    # sale.order.action_cancel returns the sale.order.cancel wizard
+    # when the SO has linked pickings or invoices (Odoo 17+). The
+    # wizard's own ``action_cancel`` calls back into
+    # ``order_id._action_cancel()`` to actually cancel — identical
+    # outcome to clicking the UI confirm button.
+    ("sale.order", "cancel"): WizardCompletion(
+        wizard_model="sale.order.cancel",
+        wizard_method="action_cancel",
+        origin_field="order_id",
+    ),
+}
+
+
+def resolve_wizard_completion(model: str, action: str) -> WizardCompletion | None:
+    """Return the wizard-completion spec for ``(model, action)``, or None.
+
+    ``None`` means the document action either doesn't return a wizard
+    on supported Odoo versions, or returns one we haven't reviewed for
+    safe auto-completion. The dispatcher then falls back to the
+    existing ``needs_manual_completion`` behaviour.
+    """
+    return _WIZARD_COMPLETIONS.get((model, action))
+
+
+def supported_wizard_completion_pairs() -> list[str]:
+    """``model:action`` strings for every wizard-completion pair, sorted."""
+    return sorted(f"{model}:{action}" for (model, action) in _WIZARD_COMPLETIONS)
 
 
 def resolve_document_action(model: str, action: str) -> str:
