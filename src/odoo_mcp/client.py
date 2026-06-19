@@ -843,6 +843,34 @@ class OdooClient:
                 merged_kwargs,
             )
         except xmlrpc.client.Fault as exc:
+            # Odoo's XML-RPC endpoint serialises responses with
+            # ``allow_none=False`` (it never enabled the nil extension for
+            # backward compatibility — see odoo/odoo#12289, #19889, #34037).
+            # A method that legitimately returns ``None`` — common for
+            # workflow/action methods such as ``account.move.button_draft``,
+            # ``account.payment.action_cancel``, ``sale.order.action_cancel``
+            # or ``stock.picking.button_validate`` on a full transfer — therefore
+            # raises "cannot marshal None" *during response marshalling*, i.e.
+            # AFTER the method has already run and the cursor has committed.
+            # Setting ``allow_none=True`` on our own ServerProxy does NOT help:
+            # the failure is on Odoo's outbound serialisation, not our request.
+            #
+            # This specific fault uniquely means "the call executed and returned
+            # void" — a genuine failure raises a different exception type
+            # (ValidationError / AccessError / UserError) with a different
+            # faultString, so swallowing it here can never mask a real error.
+            # Surfacing it as a failure is actively dangerous: the dispatcher
+            # would report the document action as failed and an agent may retry,
+            # double-posting an invoice or double-cancelling. Translate it to the
+            # void return it represents. Verified against Odoo 18 + 19.
+            if "cannot marshal None" in (exc.faultString or ""):
+                logger.debug(
+                    "%s.%s returned None; Odoo cannot marshal None over XML-RPC, "
+                    "treating as a successful void return",
+                    model,
+                    method,
+                )
+                return None
             raise OdooRemoteError(f"Odoo fault on {model}.{method}: {exc.faultString}") from exc
         except TimeoutError as exc:
             raise OdooTransportError(
