@@ -10,6 +10,35 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_run_document_action`: a workflow method that returns `None` no
+  longer reports a false failure.** Odoo's XML-RPC endpoint serialises
+  responses with `allow_none=False` (it never enabled the nil extension,
+  for backward compatibility — see odoo/odoo#12289, #19889, #34037). A
+  workflow/action method that legitimately returns `None` —
+  `account.move.button_draft`, `account.payment.action_cancel`,
+  `sale.order.action_cancel`, `stock.picking.button_validate` on a full
+  transfer, and similar — therefore raises `cannot marshal None` *during
+  response marshalling*, i.e. **after** the method already ran and the
+  cursor committed. Setting `allow_none=True` on our own `ServerProxy`
+  does not help: the failure is on Odoo's outbound serialisation, not on
+  our request.
+
+  Previously `_execute` re-raised this as an `OdooRemoteError`, so
+  `odoo_run_document_action` (and the v0.25.0 wizard auto-completion path,
+  which records the step as `ok: false`) reported the action as failed —
+  and an agent could retry a financial action that had in fact succeeded
+  (double-post / double-cancel / double-validate). The XML-RPC chokepoint
+  now recognises this specific fault and translates it to the void return
+  it represents. The fault uniquely means "the call executed and returned
+  `None`" — a genuine failure raises a different exception type
+  (`ValidationError` / `AccessError` / `UserError`) with a different fault
+  string, so this can never mask a real error. Verified against Odoo
+  18 + 19. New regression test `tests/test_client_marshal_none.py`
+  (the dispatcher-level tests use a fake `call_document_action` that never
+  raises the fault, so they could not have caught it).
+
 ## [0.25.0] - 2026-06-16
 
 ### Added
