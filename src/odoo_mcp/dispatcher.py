@@ -1040,6 +1040,96 @@ class Dispatcher:
         self._add_commits_remaining(result, ctx)
         return result
 
+    def _log_note(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Post an internal log note on an Odoo record.
+
+        Bounded sibling of ``odoo_send_message``. Log notes stay
+        INSIDE Odoo:
+
+        * ``message_type`` is hardcoded to ``"notification"``.
+        * ``subtype_xmlid`` is forced to ``"mail.mt_note"`` at the
+          client layer — never the email-eligible ``mt_comment``.
+        * ``partner_ids`` is always empty: log notes have no
+          per-message recipient list, only followers (who get an
+          in-app inbox entry, never email, for ``mt_note``).
+        * The ``external_comms_enabled`` opt-in is **not** required.
+          That two-gate guard exists because ``send_message`` can
+          email arbitrary partners; log notes can't, so the same
+          gate would just block a useful local audit trail without
+          any safety win.
+
+        Same standard envelope as other writes: ``model`` goes
+        through ``check_model`` (allowlist + denylist +
+        write-blocklist — attaching to ``mail.message`` itself is
+        refused), the full prod-guard pipeline applies (dry-run →
+        confirmation_token → commit), and the token's payload
+        digest binds to ``(record_id, body)`` so a preview-vs-commit
+        body swap is refused.
+        """
+        _refuse_if_read_only_session()
+        ctx = self._begin("odoo_log_note", args, Operation.LOG_NOTE)
+        assert ctx.model is not None
+        rt, model = ctx.rt, ctx.model
+        _refuse_write_blocklisted(model)
+
+        record_id = _require_int(args, "record_id")
+        body = _require_str(args, "body")
+
+        self.app.prod_guard.check_write(ctx.instance, rt.config.production)
+
+        if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
+            preview_body = body if len(body) <= 2000 else body[:2000] + "...[truncated]"
+            summary = f"log note on {model}({record_id}), {len(body)} chars"
+            token = self.app.prod_guard.create_pending(
+                ctx.instance,
+                ctx.op.value,
+                model,
+                summary=summary,
+                payload_digest=compute_payload_digest(_token_payload(ctx.op.value, args)),
+            )
+            self._audit_ok(
+                ctx,
+                {"record_id": record_id, "body_length": len(body)},
+                args,
+                dry_run=True,
+            )
+            preview: dict[str, Any] = {
+                "preview": True,
+                "instance": ctx.instance,
+                "model": model,
+                "record_id": record_id,
+                "body_preview": preview_body,
+                "would_send_email": False,
+                "confirmation_token": token,
+                "note": _DRY_RUN_NOTE.format(tool="odoo_log_note"),
+            }
+            self._add_commits_remaining(preview, ctx, dry_run=True)
+            return preview
+
+        self._consume_token_on_prod(ctx, args)
+        message_id = rt.client.message_post(
+            model,
+            record_id,
+            body,
+            subject=None,
+            partner_ids=[],
+            message_type="notification",
+        )
+        self._audit_ok(
+            ctx,
+            {"record_id": record_id, "body_length": len(body), "message_id": message_id},
+            args,
+        )
+        result: dict[str, Any] = {
+            "instance": ctx.instance,
+            "model": model,
+            "record_id": record_id,
+            "message_id": message_id,
+            "committed": True,
+        }
+        self._add_commits_remaining(result, ctx)
+        return result
+
     def _create_attachment(self, args: dict[str, Any]) -> dict[str, Any]:
         """Attach a base64-encoded file to an Odoo record.
 
@@ -1848,6 +1938,7 @@ _HANDLERS: dict[str, Callable[[Dispatcher, dict[str, Any]], dict[str, Any]]] = {
     "odoo_send_message": Dispatcher._send_message,
     "odoo_run_document_action": Dispatcher._run_document_action,
     "odoo_create_attachment": Dispatcher._create_attachment,
+    "odoo_log_note": Dispatcher._log_note,
 }
 
 
@@ -2143,6 +2234,12 @@ _TOKEN_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
         "mimetype",
         "description",
     ),
+    # Log-note digest binds to (record_id, body) — a preview-vs-commit
+    # body swap is then refused, just like the message-send path. No
+    # partner_ids / message_type / subject keys here: the dispatcher
+    # hardcodes those for log notes, so they can never differ between
+    # preview and commit.
+    Operation.LOG_NOTE.value: ("record_id", "body"),
 }
 
 

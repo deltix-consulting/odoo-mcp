@@ -10,6 +10,41 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-06-16
+
+### Added
+
+- **New tool `odoo_log_note`** — post an internal log note on a
+  record (visible in the chatter, NEVER emailed). Bounded sibling
+  of `odoo_send_message` for the audit-trail / internal-note use
+  case. Hardcoded `message_type='notification'` +
+  `subtype_xmlid='mail.mt_note'` + empty `partner_ids` — so it
+  physically cannot trigger an email regardless of caller input.
+
+  Because of that guarantee it does **not** require the
+  `ODOO_MCP_ENABLE_EXTERNAL_COMMS` env var or the
+  `external_comms_enabled = true` per-instance flag — those exist
+  to guard the email path, which this tool does not have. Asking
+  for both gates on a log note would just block a useful local
+  audit trail without any safety win.
+
+  Standard envelope: `model` flows through allowlist + denylist +
+  write-blocklist (logging on `mail.message` itself is refused),
+  full prod-guard pipeline (dry-run → confirmation_token → commit),
+  token's payload digest binds to `(record_id, body)` so a
+  preview-vs-commit body swap is refused.
+
+  9 new tests cover: write-op classification, tool registered
+  adjacent to `odoo_send_message` for discoverability, works
+  without `external_comms_enabled` (the defining contract),
+  dispatcher hardcodes `notification` + empty `partner_ids` +
+  None `subject` even if a caller passes hostile alternatives,
+  dry-run preview shows the body verbatim and asserts
+  `would_send_email: false`, long-body truncation in preview,
+  write-blocklist refusal on `mail.message`, prod-flow with token
+  consumption, and body-swap rejection via the digest binding.
+  780 tests total (was 771).
+
 ## [0.25.0] - 2026-06-16
 
 ### Added

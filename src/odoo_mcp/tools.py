@@ -574,6 +574,65 @@ _TOOL_DIAGNOSE_ACCESS = Tool(
 )
 
 
+_TOOL_LOG_NOTE = Tool(
+    name="odoo_log_note",
+    description=(
+        "Post an internal log note on an Odoo record (visible in the "
+        "record's chatter; NEVER emailed). Bounded sibling of "
+        "``odoo_send_message`` for the audit-trail / internal-note use "
+        "case: hardcoded ``message_type='notification'`` + "
+        "``subtype_xmlid='mail.mt_note'``, empty partner_ids — so it "
+        "physically cannot trigger an email. Because of that guarantee "
+        "it does NOT require the ``ODOO_MCP_ENABLE_EXTERNAL_COMMS`` env "
+        "var or ``external_comms_enabled = true`` per instance — those "
+        "exist to guard the email path, which this tool does not have. "
+        "``model`` still goes through the per-instance allowlist plus "
+        "the write-blocklist (you cannot log on ``mail.message`` "
+        "itself). Same prod-guard pipeline as every other write: "
+        "dry-run preview + confirmation_token + commit. The token "
+        "binds to ``(record_id, body)``. "
+        'Example: model="sale.order", record_id=42, '
+        'body="Spoke to customer; PO replaced by 4711".'
+    ),
+    inputSchema={
+        "type": "object",
+        "required": ["instance", "model", "record_id", "body"],
+        "additionalProperties": False,
+        "properties": {
+            "instance": {"type": "string"},
+            "model": {
+                "type": "string",
+                "description": "Target model (must pass the allowlist).",
+            },
+            "record_id": {
+                "type": "integer",
+                "description": "Record id on which to log the note.",
+            },
+            "body": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Note body. HTML is accepted; plain text gets wrapped in <p>. "
+                    "Shown verbatim in the dry-run preview."
+                ),
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": (
+                    "Preview only. Defaults to true on production instances and "
+                    "false on non-production. Pass false + a confirmation_token "
+                    "to commit on production."
+                ),
+            },
+            "confirmation_token": {
+                "type": "string",
+                "description": "Token from a prior dry-run, required to commit on production.",
+            },
+        },
+    },
+)
+
+
 _TOOL_CREATE_ATTACHMENT = Tool(
     name="odoo_create_attachment",
     description=(
@@ -759,6 +818,7 @@ def build_tools() -> list[Tool]:
         _TOOL_DIAGNOSE_ACCESS,
         _TOOL_DIAGNOSE_ROUTING,
         _TOOL_SEND_MESSAGE,
+        _TOOL_LOG_NOTE,
         _TOOL_RUN_DOCUMENT_ACTION,
         _TOOL_CREATE_ATTACHMENT,
     ]
