@@ -64,6 +64,38 @@ _PENDING_TOKEN_TTL_SECONDS = 5 * 60
 DEFAULT_MAX_COMMITS_PER_UNLOCK = 50
 
 
+def _canonicalise_numbers(value: Any) -> Any:
+    """Collapse integral floats to ints, recursively, for digest stability.
+
+    A JSON transport that treats ``1`` and ``1.0`` as the same number
+    (JS/TS MCP clients and gateways serialise both as ``1``) can deliver a
+    numeric field value as ``1.0`` on the dry-run call and ``1`` on the
+    commit call — or the other way round. Python then parses one side as
+    ``float`` and the other as ``int``, ``json.dumps`` renders them as
+    ``1.0`` vs ``1``, and the two digests differ, so a valid confirmation
+    token is rejected with "different payload" on an otherwise-identical
+    write (most visible on round values like ``unit_amount: 1.0`` on
+    ``account.analytic.line``).
+
+    ``1`` and ``1.0`` are the same value to Odoo, so collapsing them is a
+    fingerprint-stability fix, not a weakening of the payload binding: the
+    digest still distinguishes every semantic difference (``1`` vs ``2``,
+    ``1`` vs ``1.5``). Booleans are deliberately left untouched — ``bool``
+    is an ``int`` subclass but not a ``float``, so ``True``/``False`` never
+    enter the numeric branch and still digest distinctly from ``1``/``0``.
+    Non-integral floats (``1.5``) and all other types pass through
+    unchanged. ``float.is_integer()`` is already ``False`` for ``inf`` and
+    ``nan``, so those fall through untouched too.
+    """
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else value
+    if isinstance(value, Mapping):
+        return {k: _canonicalise_numbers(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonicalise_numbers(item) for item in value]
+    return value
+
+
 def compute_payload_digest(payload: Mapping[str, Any]) -> str:
     """Return the canonical SHA-256 digest of a write payload.
 
@@ -75,6 +107,10 @@ def compute_payload_digest(payload: Mapping[str, Any]) -> str:
 
     Canonicalisation rules:
 
+    * Integral floats are collapsed to ints (recursively) so that a
+      client which round-trips ``1.0`` as ``1`` — the common JS/TS and
+      gateway behaviour — does not flip the digest between dry-run and
+      commit. See :func:`_canonicalise_numbers`.
     * JSON dump with ``sort_keys=True`` so dict-key order on either
       side of the wire does not matter.
     * No whitespace separators, so a pretty-printed re-call cannot
@@ -88,7 +124,9 @@ def compute_payload_digest(payload: Mapping[str, Any]) -> str:
     5-minute TTL. SHA-256 is overkill for collision resistance at this
     use, but it's the cheapest "obviously enough" hash in the stdlib.
     """
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    canonical = json.dumps(
+        _canonicalise_numbers(payload), sort_keys=True, separators=(",", ":"), default=str
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

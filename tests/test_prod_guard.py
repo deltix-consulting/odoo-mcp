@@ -350,6 +350,69 @@ def test_payload_digest_distinguishes_mode_swap() -> None:
     assert arch != delete
 
 
+def test_payload_digest_ignores_int_float_drift() -> None:
+    """``1.0`` and ``1`` are the same value; a client that round-trips one
+    as the other (JS/TS transports collapse ``1.0`` -> ``1``) must not flip
+    the digest between dry-run and commit."""
+    as_float = compute_payload_digest({"ids": [1], "values": {"unit_amount": 1.0}})
+    as_int = compute_payload_digest({"ids": [1], "values": {"unit_amount": 1}})
+    assert as_float == as_int
+
+
+def test_payload_digest_ignores_int_float_drift_nested() -> None:
+    """The collapse reaches numbers nested inside lists and m2m command
+    tuples, not just top-level ``values`` scalars."""
+    as_float = compute_payload_digest(
+        {"values": {"order_line": [[0, 0, {"product_uom_qty": 2.0, "price_unit": 10.0}]]}}
+    )
+    as_int = compute_payload_digest(
+        {"values": {"order_line": [[0, 0, {"product_uom_qty": 2, "price_unit": 10}]]}}
+    )
+    assert as_float == as_int
+
+
+def test_payload_digest_ignores_int_float_drift_in_ids() -> None:
+    """Ids that arrive as ``1.0`` from a float-y transport still match the
+    integer ids issued at dry-run."""
+    as_float = compute_payload_digest({"ids": [1.0, 2.0], "values": {"active": False}})
+    as_int = compute_payload_digest({"ids": [1, 2], "values": {"active": False}})
+    assert as_float == as_int
+
+
+def test_payload_digest_keeps_non_integral_float() -> None:
+    """Only *integral* floats collapse — ``1.5`` must stay distinct from
+    ``1`` (and from ``2``), or a genuine value change would slip the gate."""
+    frac = compute_payload_digest({"ids": [1], "values": {"discount": 1.5}})
+    down = compute_payload_digest({"ids": [1], "values": {"discount": 1}})
+    up = compute_payload_digest({"ids": [1], "values": {"discount": 2}})
+    assert frac != down
+    assert frac != up
+
+
+def test_payload_digest_keeps_bool_distinct_from_int() -> None:
+    """``True`` must never digest like ``1`` — the number canonicaliser only
+    touches floats, so booleans stay distinct (``active=True`` != a stray
+    ``active=1``)."""
+    as_bool = compute_payload_digest({"ids": [1], "values": {"active": True}})
+    as_one = compute_payload_digest({"ids": [1], "values": {"active": 1}})
+    assert as_bool != as_one
+
+
+def test_token_accepts_int_float_drift_on_commit() -> None:
+    """Full round-trip: preview with ``1.0``, commit with ``1`` — the token
+    is accepted, because the two payloads are the same value."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    preview = compute_payload_digest({"ids": [1], "values": {"unit_amount": 1.0}})
+    token = guard.create_pending(
+        "prod", "write", "account.analytic.line", "s", now=0.0, payload_digest=preview
+    )
+    commit = compute_payload_digest({"ids": [1], "values": {"unit_amount": 1}})
+    guard.consume_pending(
+        token, "prod", "write", "account.analytic.line", now=1.0, payload_digest=commit
+    )
+
+
 def test_token_rejects_extra_ids_on_write() -> None:
     """An agent that previewed ``ids=[1]`` cannot commit ``ids=[1..1000]``
     using the same token. This is the AlanOgic C1 attack on write."""
