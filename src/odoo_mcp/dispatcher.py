@@ -1564,13 +1564,17 @@ class Dispatcher:
     def _peek_states(
         self, rt: InstanceRuntime, model: str, record_ids: list[int]
     ) -> list[dict[str, Any]]:
-        """Best-effort read of each record's ``state`` for a dry-run preview.
+        """Best-effort read of each record's ``state``.
+
+        Used twice: for the dry-run preview (``current_states``) and
+        again right after a committed document action
+        (``states_after``).
 
         Returns ``[{"id": .., "state": ..}, ...]``. Deliberately reads
         ONLY ``id`` + ``state`` — ``state`` is a selection field that is
         never sensitive, so this needs no redaction pass. If the model
         has no ``state`` field, or the read fails, returns an empty list
-        rather than failing the whole preview.
+        rather than failing the whole preview or losing a commit result.
         """
         try:
             fields_meta = self._fields_meta(rt, model)
@@ -1668,6 +1672,23 @@ class Dispatcher:
             "record_ids": record_ids,
             "committed": not needs_manual,
         }
+        # ``committed`` is inferred from the SHAPE of Odoo's return value
+        # (a dict means "here's a wizard", anything else means "done"),
+        # which is not evidence that the state transition happened.
+        # Odoo workflow methods routinely return ``True`` — or ``None``,
+        # which marshals to a void response — while leaving the record
+        # where it was, and the wizard-completion path adds a second RPC
+        # whose effect is likewise unverified. So re-read the records'
+        # real ``state`` and report it: one cheap id+state read (the same
+        # one the dry-run already pays for), and the agent no longer has
+        # to take the method's word for it. An unchanged state next to
+        # ``committed: true`` is the signal that the action silently did
+        # nothing. Omitted, not empty, when the model has no ``state``
+        # field or the read fails — an empty list here would read as
+        # "the records are gone".
+        states_after = self._peek_states(rt, model, record_ids)
+        if states_after:
+            out["states_after"] = states_after
         if wizard_completion is not None:
             out["wizard"] = wizard_completion
         if needs_manual:
