@@ -59,6 +59,76 @@ jobs:
           PY
           )"
 
+  fresh-resolve:
+    runs-on: ubuntu-latest
+    # Every other job installs with `uv sync`, which resolves from
+    # `uv.lock`. That can only ever prove the *pinned* dependency set
+    # works. The user-facing install path is `uv tool install --editable .`
+    # (scripts/install.sh step 8, scripts/install.ps1), which resolves
+    # from the `pyproject.toml` constraints and ignores the lockfile
+    # entirely — so a constraint that admits a broken upstream release is
+    # invisible to CI while shipping a non-starting CLI to every new user.
+    #
+    # That is not hypothetical: mcp 2.0.0 removed the low-level `Server`
+    # decorators `build_server` is written against, and the constraint was
+    # an unbounded `mcp>=1.2.0`. Neither CI nor `uv sync` could see it.
+    #
+    # This job resolves from the constraints with no lockfile, so it tests
+    # whatever a user installing today would actually get.
+    #
+    # Soft-fail for now, matching `dependency-audit` below: a brand-new
+    # upstream release shouldn't red-light unrelated PRs before anyone has
+    # triaged it. Promote to hard-fail (drop `continue-on-error`) once
+    # there is a triage SLA.
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+
+      - name: Install Python 3.11
+        run: uv python install 3.11
+
+      - name: Resolve dependencies from constraints, ignoring uv.lock
+        # `uv pip install` (unlike `uv sync`) does not consult uv.lock.
+        run: |
+          uv venv -p 3.11
+          uv pip install -e ".[dev]"
+
+      - name: Report the resolved set
+        run: uv pip list
+
+      - name: Verify the low-level Server API build_server depends on
+        # Fails loudly *before* the suite, so the log names the cause
+        # rather than a wall of import errors.
+        run: |
+          uv run --no-sync python -c "$(cat <<'PY'
+          import importlib.metadata as md
+          from mcp.server import Server
+
+          REQUIRED = ("list_tools", "call_tool", "list_prompts", "get_prompt")
+          version = md.version("mcp")
+          missing = [n for n in REQUIRED if not hasattr(Server("probe"), n)]
+          print(f"resolved mcp == {version}")
+          if missing:
+              raise SystemExit(
+                  f"mcp {version} no longer exposes the low-level Server "
+                  "decorators that src/odoo_mcp/server.py::build_server is "
+                  f"written against: {missing}.\n"
+                  "A fresh `uv tool install` would put a non-starting "
+                  "odoo-mcp on the user's PATH.\n"
+                  "Fix: cap the `mcp` constraint in pyproject.toml, or "
+                  "migrate build_server to the new handler-registration API."
+              )
+          print("low-level Server decorator surface OK")
+          PY
+          )"
+
+      - name: Pytest against the freshly resolved set
+        run: uv run --no-sync pytest -q
+
   dependency-audit:
     runs-on: ubuntu-latest
     # First introduction: do not fail CI on a vulnerability until we

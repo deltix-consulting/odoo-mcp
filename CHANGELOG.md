@@ -10,6 +10,30 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **CI: `fresh-resolve` job** — installs from the `pyproject.toml`
+  constraints with no lockfile, then runs the suite against whatever
+  upstream currently ships.
+
+  Every other CI job installs with `uv sync`, which resolves from
+  `uv.lock`, so CI could only ever prove the *pinned* dependency set
+  works. But the user-facing install path is `uv tool install
+  --editable .` (`scripts/install.sh` step 8, `scripts/install.ps1`),
+  which resolves from the constraints and ignores the lockfile — so a
+  constraint admitting a broken upstream release stayed invisible to
+  CI while shipping a non-starting CLI to every new user.
+
+  That gap is not hypothetical: `mcp` 2.0.0 removed the low-level
+  `Server` decorators `build_server` is written against while the
+  constraint was an unbounded `mcp>=1.2.0`. The job includes an
+  explicit probe for those decorators, so the failure is reported as
+  a named cause rather than six `AttributeError`s deep in the suite.
+
+  Soft-fail (`continue-on-error`) for now, matching `dependency-audit`:
+  a brand-new upstream release should not red-light unrelated PRs
+  before anyone has triaged it.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
