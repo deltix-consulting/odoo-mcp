@@ -64,6 +64,11 @@ _RETRY_SAFE_METHODS: Final[frozenset[str]] = frozenset(
     {
         "check_access_rights",
         "fields_get",
+        # ``formatted_read_group`` / ``has_access`` are the saas-19.x
+        # fallbacks for ``read_group`` / ``check_access_rights`` below —
+        # same reads, same idempotence.
+        "formatted_read_group",
+        "has_access",
         "has_group",
         "read",
         "read_group",
@@ -71,6 +76,93 @@ _RETRY_SAFE_METHODS: Final[frozenset[str]] = frozenset(
         "search_read",
     }
 )
+
+# Grouped aggregation moved twice on the Odoo side. ``read_group`` is the
+# method every version from 16 through 19.0 exposes; 19.0 marks it
+# deprecated, and the saas-19.x branches (what Odoo Online / Odoo.sh
+# databases run) dropped it entirely in favour of ``formatted_read_group``
+# from the ``web`` addon. :meth:`OdooClient.read_group` prefers the legacy
+# method and falls back once per client — see its docstring.
+_LEGACY_READ_GROUP: Final[str] = "read_group"
+_FORMATTED_READ_GROUP: Final[str] = "formatted_read_group"
+
+# Same story for the ACL probe behind ``odoo_diagnose_access``:
+# ``check_access_rights`` is deprecated in 18.0, still present in 19.0, and
+# gone on saas-19.x. ``has_access`` is the public, RPC-callable replacement
+# (Odoo 18+) and returns the same boolean. Note the other replacement Odoo
+# names, ``check_access``, is ``@api.private`` — not reachable over RPC.
+_CHECK_ACCESS_RIGHTS: Final[str] = "check_access_rights"
+_HAS_ACCESS: Final[str] = "has_access"
+
+# Fault fragments that mean "this method is not there", as opposed to an
+# access or validation error. Deliberately narrow: every marker has to
+# appear alongside the method name before we retry with a different call.
+_MISSING_METHOD_MARKERS: Final[tuple[str, ...]] = (
+    "has no attribute",
+    "does not exist",
+    "is not a valid method",
+    "cannot be called remotely",
+    "unknown method",
+)
+
+# Odoo's default aggregators by field type: Integer, Float and Monetary
+# declare ``aggregator = 'sum'``, every other field type leaves it unset,
+# and a field named ``sequence`` is explicitly opted out. Mirrored here for
+# the ``formatted_read_group`` fallback, which — unlike the legacy method —
+# requires the aggregate function to be named.
+_SUMMABLE_FIELD_TYPES: Final[frozenset[str]] = frozenset({"integer", "float", "monetary"})
+
+
+def _is_missing_method_fault(message: str, method: str) -> bool:
+    """True if ``message`` reports ``method`` as absent on the Odoo server.
+
+    Used to distinguish "this Odoo version dropped the method" from every
+    other remote fault (access errors, validation errors, bad arguments),
+    which must keep propagating untouched.
+    """
+    if method not in message:
+        return False
+    lowered = message.lower()
+    return any(marker in lowered for marker in _MISSING_METHOD_MARKERS)
+
+
+def _default_aggregator(name: str, field_meta: dict[str, Any]) -> str | None:
+    """Odoo's implicit aggregation for a bare ``"field"`` aggregate spec."""
+    if name == "sequence":
+        return None
+    if str(field_meta.get("type", "")) in _SUMMABLE_FIELD_TYPES:
+        return "sum"
+    return None
+
+
+def _rewrite_order_terms(
+    orderby: str | None,
+    annotated_groupby: dict[str, str],
+    annotated_aggregates: dict[str, str],
+) -> str:
+    """Translate a legacy ``orderby`` string into ``formatted_read_group`` terms.
+
+    Caller-facing order terms name the result keys (``"amount_total
+    desc"``); the replacement method orders on the explicit specs
+    (``"amount_total:sum desc"``). Groupby keys are matched last-first,
+    the same precedence Odoo's own compatibility layer applies. With no
+    ``orderby``, Odoo defaults to ordering by the groupby specs.
+    """
+    if not orderby:
+        return ",".join(annotated_groupby.values())
+    candidates = list(reversed(list(annotated_groupby.items()))) + list(
+        annotated_aggregates.items()
+    )
+    terms: list[str] = []
+    for raw_term in orderby.split(","):
+        term = raw_term.strip()
+        for key, annotated in candidates:
+            key = key.split(":")[0]
+            if key == term or term.startswith(f"{key} "):
+                term = term.replace(key, annotated)
+                break
+        terms.append(term)
+    return ",".join(terms)
 
 
 class _TimeoutHTTPConnection(http.client.HTTPConnection):
@@ -392,6 +484,12 @@ class OdooClient:
         # it to suppress the stdlib re-send on non-idempotent calls.
         self._object, self._object_transport = self._make_proxy(f"{instance.url}/xmlrpc/2/object")
         self._uid: int | None = None
+        # Which grouped-aggregation and ACL-probe methods this server actually
+        # has. Resolved on the first call that needs them and reused
+        # afterwards; a benign race between threads costs at most one extra
+        # probe.
+        self._read_group_method: str | None = None
+        self._access_check_method: str | None = None
         self._is_admin: bool | None = None  # set after authenticate()
         self._admin_reason: str | None = None  # human-readable why it's admin
         self._auth_lock = threading.Lock()
@@ -754,17 +852,185 @@ class OdooClient:
         orderby: str | None,
         lazy: bool,
     ) -> list[dict[str, Any]]:
+        """Grouped aggregation, with a fallback for Odoo servers that dropped ``read_group``.
+
+        Odoo deprecated the public ``read_group`` ORM method in 19.0 and
+        removed it outright on the saas-19.x line (``saas-19.1`` onward —
+        the branches Odoo Online and Odoo.sh databases actually run). On
+        those servers the call fails with a missing-method fault, which
+        used to surface as a hard error from ``odoo_read_group``.
+
+        We keep calling ``read_group`` first so nothing changes for Odoo
+        16 through 19.0, and fall back to ``formatted_read_group`` — its
+        documented replacement, shipped by the ``web`` addon — the first
+        time a server tells us the legacy method is gone. The resolved
+        method is remembered for the life of the client, so the extra
+        probe happens once per process, not once per call.
+
+        The fallback's result is translated back into the legacy shape
+        (see :meth:`_read_group_formatted`), so the tool's response
+        contract is identical on every supported Odoo version.
+        """
+        if self._read_group_method == _FORMATTED_READ_GROUP:
+            return self._read_group_formatted(
+                model,
+                domain,
+                fields,
+                groupby,
+                limit=limit,
+                offset=offset,
+                orderby=orderby,
+                lazy=lazy,
+            )
         kwargs: dict[str, Any] = {"offset": offset, "lazy": lazy}
         if limit is not None:
             kwargs["limit"] = limit
         if orderby:
             kwargs["orderby"] = orderby
-        result = self._execute(model, "read_group", [domain, fields, groupby], kwargs)
+        try:
+            result = self._execute(model, _LEGACY_READ_GROUP, [domain, fields, groupby], kwargs)
+        except OdooRemoteError as exc:
+            if not _is_missing_method_fault(str(exc), _LEGACY_READ_GROUP):
+                raise
+            logger.info(
+                "Odoo instance %r has no %s method; falling back to %s for this process.",
+                self._instance.name,
+                _LEGACY_READ_GROUP,
+                _FORMATTED_READ_GROUP,
+            )
+            self._read_group_method = _FORMATTED_READ_GROUP
+            return self._read_group_formatted(
+                model,
+                domain,
+                fields,
+                groupby,
+                limit=limit,
+                offset=offset,
+                orderby=orderby,
+                lazy=lazy,
+            )
         if not isinstance(result, list):
             raise OdooRemoteError(
                 f"read_group({model!r}) returned unexpected type {type(result).__name__}"
             )
+        self._read_group_method = _LEGACY_READ_GROUP
         return result
+
+    def _read_group_formatted(
+        self,
+        model: str,
+        domain: list[Any],
+        fields: list[str],
+        groupby: list[str],
+        *,
+        limit: int | None,
+        offset: int,
+        orderby: str | None,
+        lazy: bool,
+    ) -> list[dict[str, Any]]:
+        """Serve a legacy ``read_group`` call through ``formatted_read_group``.
+
+        The argument and result translation mirrors the compatibility
+        layer Odoo 19.0 ships inside ``read_group`` itself, so callers
+        see the same keys they always saw:
+
+        * ``fields`` become explicit ``"field:agg"`` aggregate specs, and
+          the result is keyed back by the bare field name.
+        * ``lazy=True`` groups by the first dimension only, and the count
+          comes back as ``"<first_groupby>_count"`` (``"__count"`` when
+          eager), matching Odoo's own naming.
+        * ``__extra_domain`` (the group's own criteria) is recombined
+          with the caller's domain into the legacy ``__domain``.
+        * The remaining dimensions are echoed in ``__context`` under
+          ``group_by``, as the lazy path always did.
+
+        Two deliberate differences, both benign for an MCP caller: empty
+        groups are not back-filled (Odoo's ``_read_group_fill_results``
+        has no equivalent here, and fewer rows is the better default for
+        token discipline), and a bare ``"field"`` aggregate spec is
+        expanded using Odoo's default aggregator *by field type* —
+        ``sum`` for integer/float/monetary, dropped otherwise — because
+        our cached ``fields_get`` does not carry each field's declared
+        ``aggregator``. Specs that name the function explicitly, which is
+        what the tool documents and its examples use, are unaffected.
+        """
+        groupby = list(groupby)
+        lazy_groupby = groupby[:1] if lazy else groupby
+        meta = self.fields_get(model)
+
+        # Key = the name the caller expects in the result, value = the
+        # explicit spec formatted_read_group needs.
+        annotated_groupby: dict[str, str] = {}
+        for spec in lazy_groupby:
+            name, _, granularity = spec.partition(":")
+            field_type = str((meta.get(name) or {}).get("type", ""))
+            if field_type in ("date", "datetime"):
+                annotated_groupby[spec] = f"{name}:{granularity or 'month'}"
+            else:
+                annotated_groupby[spec] = spec
+
+        count_key = (
+            f"{lazy_groupby[0].split(':')[0]}_count"
+            if lazy and len(lazy_groupby) == 1
+            else "__count"
+        )
+        annotated_aggregates: dict[str, str] = {count_key: "__count"}
+        for spec in fields:
+            if spec == "__count":
+                continue
+            name, separator, func = spec.partition(":")
+            if separator:
+                annotated_aggregates[name] = f"{name}:{func}"
+                continue
+            if spec in annotated_groupby:
+                continue
+            aggregator = _default_aggregator(name, meta.get(name) or {})
+            if aggregator is not None:
+                annotated_aggregates[name] = f"{name}:{aggregator}"
+
+        order = _rewrite_order_terms(orderby, annotated_groupby, annotated_aggregates)
+
+        kwargs: dict[str, Any] = {"offset": offset}
+        if limit is not None:
+            kwargs["limit"] = limit
+        if order:
+            kwargs["order"] = order
+        result = self._execute(
+            model,
+            _FORMATTED_READ_GROUP,
+            [domain, list(annotated_groupby.values()), list(annotated_aggregates.values())],
+            kwargs,
+        )
+        if not isinstance(result, list):
+            raise OdooRemoteError(
+                f"{_FORMATTED_READ_GROUP}({model!r}) returned unexpected type "
+                f"{type(result).__name__}"
+            )
+
+        trailing_groupby = groupby[len(lazy_groupby) :]
+        rows: list[dict[str, Any]] = []
+        for raw in result:
+            if not isinstance(raw, dict):
+                raise OdooRemoteError(
+                    f"{_FORMATTED_READ_GROUP}({model!r}) returned a "
+                    f"{type(raw).__name__} group, expected a mapping."
+                )
+            row: dict[str, Any] = {}
+            for legacy_key, spec in annotated_groupby.items():
+                row[legacy_key] = raw.get(spec)
+            for legacy_key, spec in annotated_aggregates.items():
+                row[legacy_key] = raw.get(spec)
+            extra_domain = raw.get("__extra_domain") or []
+            # Two normalized domains concatenated are an implicit AND —
+            # the same composition Odoo's own legacy layer performs when
+            # it narrows __domain down to the group.
+            row["__domain"] = list(domain) + list(extra_domain)
+            if trailing_groupby:
+                row["__context"] = {"group_by": trailing_groupby}
+            if "__fold" in raw:
+                row["__fold"] = raw["__fold"]
+            rows.append(row)
+        return rows
 
     def read(self, model: str, ids: list[int], fields: list[str]) -> list[dict[str, Any]]:
         result = self._execute(model, "read", [ids], {"fields": fields})
@@ -789,17 +1055,52 @@ class OdooClient:
     def check_access_rights(self, model: str, operation: str) -> bool:
         """Return whether the authenticated user has ``operation`` on ``model``.
 
-        Calls Odoo's ``check_access_rights(operation, raise_exception=False)``.
-        ``operation`` must be one of ``read``, ``write``, ``create``, ``unlink``.
-        Used only by ``odoo_diagnose_access`` — never controls a write path.
+        ``operation`` must be one of ``read``, ``write``, ``create``,
+        ``unlink``. Used only by ``odoo_diagnose_access`` — never controls
+        a write path.
+
+        Calls Odoo's ``check_access_rights(operation, raise_exception=False)``
+        where it exists (16 through 19.0), and ``has_access`` on the saas-19.x
+        line, which dropped the deprecated name. Same fallback mechanics as
+        :meth:`read_group`: probe once, then remember.
+
+        Without the fallback this silently reported the *wrong answer* rather
+        than failing — ``odoo_diagnose_access`` catches the remote error per
+        operation and records ``False``, so a saas-19 Odoo made the tool claim
+        the user had no rights at all on every model it was asked about.
         """
-        result = self._execute(
-            model,
-            "check_access_rights",
-            [operation],
-            {"raise_exception": False},
-        )
+        if self._access_check_method == _HAS_ACCESS:
+            return self._has_access(model, operation)
+        try:
+            result = self._execute(
+                model,
+                _CHECK_ACCESS_RIGHTS,
+                [operation],
+                {"raise_exception": False},
+            )
+        except OdooRemoteError as exc:
+            if not _is_missing_method_fault(str(exc), _CHECK_ACCESS_RIGHTS):
+                raise
+            logger.info(
+                "Odoo instance %r has no %s method; falling back to %s for this process.",
+                self._instance.name,
+                _CHECK_ACCESS_RIGHTS,
+                _HAS_ACCESS,
+            )
+            self._access_check_method = _HAS_ACCESS
+            return self._has_access(model, operation)
+        self._access_check_method = _CHECK_ACCESS_RIGHTS
         return bool(result)
+
+    def _has_access(self, model: str, operation: str) -> bool:
+        """Model-level ACL check via Odoo 18+'s ``has_access``.
+
+        ``has_access`` is a recordset method rather than an ``@api.model``
+        one, so ``execute_kw`` takes the id list first. Calling it on the
+        empty recordset is Odoo's own idiom for "does this user have any
+        permission on the model at all" — see ``BaseModel.check_access``.
+        """
+        return bool(self._execute(model, _HAS_ACCESS, [[], operation], {}))
 
     def message_post(
         self,
