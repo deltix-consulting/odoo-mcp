@@ -10,6 +10,41 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_write` dry run now shows what the commit would destroy.**
+  The preview reported `would_update_fields` — field *names* only — so
+  the human approving the confirmation token could not see either the
+  content going in or the content it replaces. `odoo_write` REPLACES a
+  field, it never appends, and Odoo keeps no version history for a plain
+  text field, so approving that token was approving an invisible
+  deletion. This was the weakest preview in the write family:
+  `odoo_run_document_action` already returned `current_states` (the
+  before-state) and `odoo_send_message` / `odoo_log_note` already
+  returned `body_preview` (the content).
+
+  The preview now returns `would_set_values` (the validated values, the
+  caller's own input echoed back) and `current_values` (the same fields
+  read back off the target records). `current_values` reads at most the
+  first 5 records — `current_values_truncated: true` flags the rest —
+  and goes through the normal `redact_response` pass with **no**
+  `allow_sensitive` opt-in: `validate_write_values` deliberately lets a
+  caller write a default-hidden field such as `res.partner.comment`
+  without being able to read it, and the preview must not become the
+  hole that reads it back. Best-effort — the key is omitted, never
+  returned as `[]`, if the read-back fails, since `[]` would read as
+  "those records are gone".
+
+  `odoo_create` gains `would_set_values` for the same reason; it has no
+  `current_values` because there is nothing yet to overwrite.
+
+### Added
+
+- **`odoo_help` gotcha: `odoo_write` replaces, it never appends.** Points
+  callers at `odoo_log_note` / `odoo_send_message` for adding a
+  chronological, auditable note to a record instead of overwriting a
+  free-text field. Opt-in cookbook entry, so no per-call token cost.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

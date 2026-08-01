@@ -975,6 +975,7 @@ class Dispatcher:
                 "instance": ctx.instance,
                 "model": model,
                 "would_write_fields": sorted(validated.keys()),
+                "would_set_values": _truncate_preview(dict(sorted(validated.items()))),
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_create"),
             }
@@ -1023,15 +1024,21 @@ class Dispatcher:
                 payload_digest=compute_payload_digest(_token_payload(ctx.op.value, args)),
             )
             self._audit_ok(ctx, {"field_count": n, "id_count": len(ids)}, args, dry_run=True)
+            current = self._peek_values(rt, model, ids, sorted(validated.keys()))
             preview: dict[str, Any] = {
                 "preview": True,
                 "instance": ctx.instance,
                 "model": model,
                 "id_count": len(ids),
                 "would_update_fields": sorted(validated.keys()),
-                "confirmation_token": token,
-                "note": _DRY_RUN_NOTE.format(tool="odoo_write"),
+                "would_set_values": _truncate_preview(dict(sorted(validated.items()))),
             }
+            if current is not None:
+                preview["current_values"] = current
+                if len(ids) > _PREVIEW_RECORD_CAP:
+                    preview["current_values_truncated"] = True
+            preview["confirmation_token"] = token
+            preview["note"] = _DRY_RUN_NOTE.format(tool="odoo_write")
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
@@ -1560,6 +1567,47 @@ class Dispatcher:
         }
         self._add_commits_remaining(result, ctx)
         return result
+
+    def _peek_values(
+        self, rt: InstanceRuntime, model: str, ids: list[int], fields: list[str]
+    ) -> list[dict[str, Any]] | None:
+        """Best-effort read of the values a write is about to overwrite.
+
+        The ``odoo_write`` dry run exists so a human can approve the commit.
+        Approving it means approving the *destruction* of whatever those
+        fields hold today — ``write`` replaces a field, it never appends —
+        so the preview has to show the current content, not just the field
+        names. This is the write-side mirror of ``_peek_states``.
+
+        Reads ONLY the fields being written, on at most
+        ``_PREVIEW_RECORD_CAP`` of the target records, and runs the result
+        through the normal ``redact_response`` pass with **no**
+        ``allow_sensitive`` opt-in: ``validate_write_values`` deliberately
+        lets a caller write a default-hidden field (say ``vat``) without
+        being able to read it back, and a preview must not become the hole
+        that reads it. Returns ``None`` — so the caller omits the key
+        rather than emitting ``[]``, which would read as "no records" — if
+        the read fails or none of the fields are readable.
+        """
+        try:
+            fields_meta = self._fields_meta(rt, model)
+            readable = [f for f in fields if f in fields_meta]
+            if not readable:
+                return None
+            rows = rt.client.read(model, ids[:_PREVIEW_RECORD_CAP], ["id", *readable])
+            redacted = redact_response(
+                model,
+                rows,
+                {n: m.get("type", "") for n, m in fields_meta.items()},
+                allow_sensitive=frozenset(),
+                include_binary=False,
+                instance_overrides=rt.config.sensitive_fields,
+                extra_redacted=rt.extra_redacted,
+            )
+            redacted = _strip_extra_fields(redacted, ["id", *readable])
+            return [_truncate_preview(rec) for rec in redacted]
+        except OdooMcpError:
+            return None
 
     def _peek_states(
         self, rt: InstanceRuntime, model: str, record_ids: list[int]
@@ -2291,6 +2339,40 @@ _DRY_RUN_NOTE = (
 )
 
 
+# How many target records a write dry run reads back for ``current_values``.
+# Matches the 5-id truncation already used in the preview summary line: the
+# point is to let a reviewer see the shape of what is being overwritten, not
+# to dump ``max_records_hard_cap`` records into the response.
+_PREVIEW_RECORD_CAP = 5
+
+# Per-value caps for previewed content. A single Odoo text field (an invoice's
+# narration, a task description) can be tens of KB; a preview that inlines it
+# whole would cost more tokens than the rest of the response together.
+_PREVIEW_STR_CAP = 500
+_PREVIEW_LIST_CAP = 20
+
+
+def _truncate_preview(value: Any) -> Any:
+    """Bound the size of a value echoed into a dry-run preview.
+
+    Recurses into lists/dicts so many2many command tuples and nested
+    values are bounded too. Truncation is marked inline so a reviewer can
+    never mistake a clipped value for the whole stored content.
+    """
+    if isinstance(value, str):
+        if len(value) > _PREVIEW_STR_CAP:
+            return value[:_PREVIEW_STR_CAP] + "...[truncated]"
+        return value
+    if isinstance(value, list):
+        if len(value) > _PREVIEW_LIST_CAP:
+            head = [_truncate_preview(v) for v in value[:_PREVIEW_LIST_CAP]]
+            return [*head, f"...[truncated, {len(value)} items total]"]
+        return [_truncate_preview(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _truncate_preview(v) for k, v in value.items()}
+    return value
+
+
 # Hard cap on the decoded size of an attachment created via
 # ``odoo_create_attachment``. The base64-encoded string is ~33% larger,
 # so a 25 MB cap on decoded bytes corresponds to ~33 MB of wire payload.
@@ -2661,6 +2743,13 @@ _HELP_GOTCHAS: list[str] = [
     "confirmation_token from a prior dry run to commit.",
     "To remove records, use odoo_archive_or_delete. Always offer archive "
     "(reversible: active=False) before permanent delete (unlink).",
+    "odoo_write REPLACES a field's value — it never appends. Writing to a "
+    "free-text field (description, comment, narration, internal notes) "
+    "destroys whatever it held, with no version history. To add a "
+    "chronological, auditable note to a record, use odoo_log_note (or "
+    "odoo_send_message) — that is what the chatter is for. The odoo_write "
+    "dry run returns current_values so you can see what a write would "
+    "overwrite before committing it.",
 ]
 
 
