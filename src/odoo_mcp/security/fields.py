@@ -22,6 +22,7 @@ in a hurry.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from typing import Any, Final
 
 from ..errors import FieldPolicyError
@@ -335,12 +336,63 @@ def validate_requested_fields(
     return list(requested)
 
 
+def _is_never_persisted(meta: dict[str, Any] | None) -> bool:
+    """True when Odoo will accept a write to this field and silently drop it.
+
+    ``fields_get`` reports ``readonly=True`` for a computed field that
+    declares no ``inverse`` — Odoo sets it itself::
+
+        attrs['readonly'] = attrs.get('readonly', not attrs.get('inverse'))
+
+    (``odoo/fields.py`` on ≤18.0, ``odoo/orm/fields.py`` on 19.0+.)
+
+    Combined with ``store=False`` that is decisive. ``write()`` calls
+    ``field.write(self, value)``, which for a non-stored field only touches
+    the cache; ``determine_inverses`` stays empty because there is no
+    inverse, and the SQL path asserts ``field.store and field.column_type``,
+    so the value never reaches a column. ``write()`` still returns ``True``.
+
+    A missing ``store`` key is read as stored — we only refuse when Odoo
+    positively told us the field has no column, so an unusual or trimmed
+    ``fields_get`` can never manufacture a false refusal.
+    """
+    if not meta:
+        return False
+    return bool(meta.get("readonly")) and meta.get("store", True) is False
+
+
+def recomputed_write_fields(
+    fields_meta: dict[str, dict[str, Any]] | None,
+    names: Iterable[str],
+) -> list[str]:
+    """Names among *names* that are stored but ``readonly`` in ``fields_get``.
+
+    These *do* reach a column, so unlike :func:`_is_never_persisted` the
+    write is not a no-op — but a stored *computed* field is recomputed from
+    its dependencies the moment one of them changes, quietly discarding the
+    value. Reported next to the write rather than refused: the same
+    ``readonly`` flag also covers ``id`` / ``create_date`` / ``write_uid``
+    and explicitly-readonly stored columns, where a write is unusual but is
+    the caller's business. Odoo's own ACLs remain the authority.
+    """
+    if not fields_meta:
+        return []
+    return sorted(
+        name
+        for name in names
+        if (meta := fields_meta.get(name))
+        and bool(meta.get("readonly"))
+        and meta.get("store", True) is not False
+    )
+
+
 def validate_write_values(
     model: str,
     values: dict[str, Any],
     known_fields: frozenset[str],
     *,
     extra_redacted: tuple[re.Pattern[str], ...] = (),
+    fields_meta: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate the ``values`` dict being passed to create/write.
 
@@ -349,6 +401,12 @@ def validate_write_values(
     * Unknown fields are rejected (typo protection).
     * Default-hidden fields CAN be written (you might legitimately want to
       update a partner's VAT) — but not read back without opting in.
+    * Fields Odoo would accept and silently discard — non-stored, no inverse
+      — are rejected. See :func:`_is_never_persisted`.
+
+    ``fields_meta`` is the same ``fields_get`` dict ``known_fields`` was
+    derived from; pass it to enable the last check. Omitted, the writability
+    check is skipped and behaviour is unchanged.
     """
     if not isinstance(values, dict) or not values:
         raise FieldPolicyError("Write values must be a non-empty dict.")
@@ -363,6 +421,12 @@ def validate_write_values(
         if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(
                 f"Field {name!r} is protected and cannot be written via the MCP."
+            )
+        if fields_meta is not None and _is_never_persisted(fields_meta.get(name)):
+            raise FieldPolicyError(
+                f"Field {name!r} on {model!r} is computed and not stored, so Odoo "
+                f"accepts the write, returns success, and persists nothing. Set the "
+                f"fields it is computed from instead, or run the matching Odoo action."
             )
         out[name] = value
     return out

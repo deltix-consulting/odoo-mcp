@@ -67,6 +67,7 @@ from .security.document_actions import (
 )
 from .security.domain import sandbox_domain
 from .security.fields import (
+    recomputed_write_fields,
     redact_fields_get,
     redact_response,
     restrict_fields_meta,
@@ -915,7 +916,11 @@ class Dispatcher:
                     related_meta = self._fields_meta(rt, relation)
                 related_known = frozenset(related_meta.keys())
                 validated_nested = validate_write_values(
-                    relation, nested, related_known, extra_redacted=rt.extra_redacted
+                    relation,
+                    nested,
+                    related_known,
+                    extra_redacted=rt.extra_redacted,
+                    fields_meta=related_meta,
                 )
                 self._validate_relational_writes(
                     rt, relation, validated_nested, related_meta, depth=depth + 1
@@ -957,8 +962,11 @@ class Dispatcher:
 
         fields_meta = self._fields_meta(rt, model)
         known = frozenset(fields_meta.keys())
-        validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
+        validated = validate_write_values(
+            model, values, known, extra_redacted=rt.extra_redacted, fields_meta=fields_meta
+        )
         self._validate_relational_writes(rt, model, validated, fields_meta)
+        recomputed = recomputed_write_fields(fields_meta, validated)
         n = len(validated)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
@@ -978,6 +986,7 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_create"),
             }
+            _add_recomputed_warning(preview, model, recomputed)
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
@@ -990,6 +999,7 @@ class Dispatcher:
             "id": new_id,
             "committed": True,
         }
+        _add_recomputed_warning(result, model, recomputed)
         self._add_commits_remaining(result, ctx)
         return result
 
@@ -1009,8 +1019,11 @@ class Dispatcher:
 
         fields_meta = self._fields_meta(rt, model)
         known = frozenset(fields_meta.keys())
-        validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
+        validated = validate_write_values(
+            model, values, known, extra_redacted=rt.extra_redacted, fields_meta=fields_meta
+        )
         self._validate_relational_writes(rt, model, validated, fields_meta)
+        recomputed = recomputed_write_fields(fields_meta, validated)
         n = len(validated)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
@@ -1032,6 +1045,7 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_write"),
             }
+            _add_recomputed_warning(preview, model, recomputed)
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
@@ -1044,6 +1058,7 @@ class Dispatcher:
             "ids": ids,
             "committed": ok,
         }
+        _add_recomputed_warning(result, model, recomputed)
         self._add_commits_remaining(result, ctx)
         return result
 
@@ -2269,6 +2284,28 @@ def _refuse_write_blocklisted(model: str) -> None:
         )
 
 
+def _add_recomputed_warning(payload: dict[str, Any], model: str, recomputed: list[str]) -> None:
+    """Attach the stored-but-``readonly`` field warning, when there is one.
+
+    Added to the dry-run preview *and* the commit result: on a non-production
+    instance ``dry_run`` defaults off, so the preview alone would leave the
+    warning unreachable on exactly the instances people experiment on.
+
+    Not a refusal — these fields do reach a column. But a stored *computed*
+    field is recomputed from its dependencies as soon as one of them changes,
+    which silently discards whatever was written here.
+    """
+    if not recomputed:
+        return
+    payload["readonly_fields_written"] = recomputed
+    payload["readonly_fields_note"] = (
+        f"{len(recomputed)} field(s) on {model!r} are readonly in fields_get. The write "
+        f"reaches the column, but if any of them is a stored computed field Odoo "
+        f"recomputes it from its dependencies and the value is lost. Verify with a "
+        f"follow-up odoo_read."
+    )
+
+
 def _strip_extra_fields(
     records: list[dict[str, Any]], requested: list[str]
 ) -> list[dict[str, Any]]:
@@ -2661,6 +2698,12 @@ _HELP_GOTCHAS: list[str] = [
     "confirmation_token from a prior dry run to commit.",
     "To remove records, use odoo_archive_or_delete. Always offer archive "
     "(reversible: active=False) before permanent delete (unlink).",
+    "Computed fields are not writable. A field that is readonly and not "
+    "stored (display_name, most _compute totals without an inverse) is "
+    "refused: Odoo would accept the write, return success, and persist "
+    "nothing. Set the fields it is computed FROM instead. A readonly field "
+    "that IS stored goes through but is reported back under "
+    "readonly_fields_written — Odoo may recompute it and drop the value.",
 ]
 
 
