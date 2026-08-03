@@ -99,7 +99,7 @@ See [SECURITY.md](SECURITY.md) for the full threat model.
 | `odoo_enable_prod_writes` | Unlock prod writes for 15 minutes |
 | `odoo_diagnose_access` | Report the user's read/write/create/unlink rights on a model |
 
-No `execute_kw`. No workflow buttons. No `copy`, `name_search`, `fields_view_get`. `unlink` is reachable only through `odoo_archive_or_delete`.
+No `execute_kw`. No workflow buttons. No `copy`, `name_search`, `fields_view_get`. `unlink` is reachable only through `odoo_archive_or_delete`, whose dry run identifies every record it would remove (`ids` plus a best-effort `would_affect_records` list of `display_name`s) so you can check the selection before approving a permanent deletion.
 
 ## CLI
 
