@@ -1161,6 +1161,15 @@ class Dispatcher:
         filename, datas_base64, mimetype, description)`` so an agent
         that dry-runs a placeholder cannot commit a different (larger,
         renamed, retargeted) file with the same token.
+
+        On the ``source_path`` branch the preview, the commit result and
+        both audit records also carry ``source_path`` (plus
+        ``source_path_resolved`` when a symlink makes them differ), so
+        the operator approving the token — and anyone reading the audit
+        log afterwards — can see *which file on this machine* was read.
+        ``attachment_source_paths`` allowlists directories, not files, so
+        the approval gate is the only place that distinguishes one file
+        in an allowed tree from another.
         """
         _refuse_if_read_only_session()
         # The tool's public schema uses ``res_model`` (matching Odoo's
@@ -1222,8 +1231,31 @@ class Dispatcher:
         # directly instead of re-decoding our own base64 just to call
         # ``len()`` on it — that was ~25 MB of pointless alloc/free per
         # call for a large invoice PDF.
+        provenance: dict[str, Any] = {}
         if raw_path is not None:
-            datas_base64, size_bytes = _read_source_path_as_base64(raw_path, rt.config)
+            datas_base64, size_bytes, resolved_source = _read_source_path_as_base64(
+                raw_path, rt.config
+            )
+            # ``_read_source_path_as_base64`` refuses anything that isn't a
+            # non-empty ``str``, so by here the requested path is one.
+            assert isinstance(raw_path, str)
+            # Record where the bytes came from. This is the ONLY code path
+            # in the server that reads the operator's filesystem, and the
+            # canonicalisation below deliberately drops ``source_path`` from
+            # ``args`` (the digest must bind CONTENT, not the path — see the
+            # comment there). ``_args_shape`` would in any case reduce it to
+            # ``{present: True}``, so without an explicit entry neither the
+            # approval gate nor the audit log can tell a server-side file
+            # read from an inline agent-typed payload. ``filename`` is
+            # caller-chosen and need not resemble the source, so it does not
+            # stand in for this.
+            provenance["source_path"] = raw_path
+            if resolved_source != raw_path:
+                # Symlink (or ``..``) — the file actually opened is not the
+                # one the caller named. Exactly the case an operator needs
+                # to see before approving; the refusal path already echoes
+                # both, so this is consistent, not a new disclosure.
+                provenance["source_path_resolved"] = resolved_source
             # Canonicalise args: bind the payload digest to the actual
             # file CONTENT (resolved bytes) and drop the path. Preview-
             # with-source_path and commit-with-datas_base64 of the same
@@ -1274,6 +1306,7 @@ class Dispatcher:
                     "filename": filename,
                     "size_bytes": size_bytes,
                     "mimetype": mimetype,
+                    **provenance,
                 },
                 args,
                 dry_run=True,
@@ -1287,6 +1320,7 @@ class Dispatcher:
                 "size_bytes": size_bytes,
                 "mimetype": mimetype,
                 "description": description,
+                **provenance,
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_create_attachment"),
             }
@@ -1318,6 +1352,7 @@ class Dispatcher:
                 "filename": filename,
                 "size_bytes": size_bytes,
                 "attachment_id": attachment_id,
+                **provenance,
             },
             args,
         )
@@ -1328,6 +1363,7 @@ class Dispatcher:
             "attachment_id": attachment_id,
             "filename": filename,
             "size_bytes": size_bytes,
+            **provenance,
             "committed": True,
         }
         self._add_commits_remaining(result, ctx)
@@ -2061,8 +2097,13 @@ _DRY_RUN_NOTE = (
 _ATTACHMENT_MAX_BYTES: int = 25 * 1024 * 1024
 
 
-def _read_source_path_as_base64(raw_path: object, cfg: InstanceConfig) -> tuple[str, int]:
+def _read_source_path_as_base64(raw_path: object, cfg: InstanceConfig) -> tuple[str, int, str]:
     """Read a server-local file and return its content as base64.
+
+    Returns ``(base64_content, size_bytes, resolved_path)``. The resolved
+    path is the ``realpath`` that was actually opened — the caller needs
+    it to report provenance in the dry-run preview and the audit log,
+    since the requested path may be a symlink pointing elsewhere.
 
     The only way to attach payloads larger than what fits in the agent's
     tool-call window (some SDKs silently drop turns above ~5 KB of
@@ -2172,7 +2213,7 @@ def _read_source_path_as_base64(raw_path: object, cfg: InstanceConfig) -> tuple[
             f"and read ({len(content)} bytes, capped) — refusing to commit the "
             f"read. The file was likely being written concurrently."
         )
-    return base64.b64encode(content).decode("ascii"), len(content)
+    return base64.b64encode(content).decode("ascii"), len(content), resolved
 
 
 def _b64decode_or_raise(encoded: str) -> bytes:
