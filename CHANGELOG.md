@@ -10,6 +10,28 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_diagnose_routing` now applies the instance's field policy to
+  the rows it returns.** The tool builds its own hardcoded `search_read`
+  calls against six routing-configuration models instead of going
+  through the caller-driven read path, so nothing upstream had ever run
+  `redact_response` over its output — it was the only read handler that
+  returned raw Odoo rows. An operator's
+  `custom_sensitive_field_patterns` and per-model `sensitive_fields`
+  therefore held on `odoo_search_read` but not here: hiding, say,
+  `default_code` on `product.product` still left it in the routing
+  diagnosis. All five returned blocks (product, template, warehouse,
+  candidate routes, candidate rules) now go through the same redactor,
+  including binary-field placeholders.
+
+  Redaction is applied on output only — the route and rule joins still
+  run on the raw rows, so a privacy setting changes what the diagnosis
+  *shows* and never which rules it *finds*. Models with no rows are
+  skipped, so this adds no `fields_get` call where the tool did not
+  already read the model. The model-allowlist bypass that the tool is
+  built around is unchanged.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
