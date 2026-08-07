@@ -10,6 +10,42 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_run_document_action` dry run now discloses the follow-up
+  wizard the commit would drive.** For the `(model, action)` pairs in
+  `_WIZARD_COMPLETIONS` (today: `sale.order:cancel`), committing does
+  more than call the mapped method — if Odoo answers with a wizard
+  descriptor, the dispatcher additionally **creates one transient
+  `sale.order.cancel` record per record id and calls `action_cancel`
+  on it**. That second write lands on a model the instance allowlist
+  never saw, and takes no second confirmation token.
+
+  The commit response has always reported it (the `wizard` block).
+  The dry-run preview — the thing a human actually approves — said
+  nothing, so the operator approved a `sale.order` cancel and got a
+  `sale.order.cancel` create they were never shown.
+  `_complete_returned_wizard`'s own docstring justifies skipping the
+  second token on the grounds that "the operator's original dry-run
+  review approved the *logical* action"; that argument needed the
+  preview to actually name the step.
+
+  The preview now carries `wizard_completion` (`wizard_model`,
+  `wizard_method`, `origin_field`, `records`, plus a note spelling out
+  the allowlist bypass and the single-token scope), and the dry-run
+  audit row carries `wizard_model` so an approval can be reconstructed
+  from `audit.jsonl` alone. The key is **omitted** when the action has
+  no wizard-completion entry — same reasoning as `states_after`, where
+  an empty value would read as a claim rather than "not applicable".
+
+  Costs nothing: `resolve_wizard_completion` is a dict lookup, so the
+  preview takes no extra RPC and creates no rehearsal record. No token
+  change was needed — the digest already binds `(record_ids, action)`,
+  which fully determines which wizard runs. 13 new tests in
+  `tests/test_document_action_wizard_preview.py`, including one that
+  drives **every** pair in `_WIZARD_COMPLETIONS` through a dry run so a
+  future row cannot ship undisclosed.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
