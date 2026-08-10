@@ -10,6 +10,42 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The committed audit row no longer says less than its own dry
+  run.** Two write handlers recorded a descriptive detail on the
+  dry-run row — the call that changed nothing — and dropped it from
+  the commit row, which is the only forensic record that the side
+  effect actually happened.
+
+  `odoo_send_message` recorded `body_length` on the dry run and not
+  on the commit. That is the one tool that emails external partners,
+  and nothing else in the row carried the size: `_args_shape`
+  reduces `body` to a `{present, type}` dict, which
+  `_sanitize_details` then drops as a non-leaf, so the only
+  surviving trace was the bare key name in `args.keys`. An operator
+  auditing "what did the agent send this customer" found a
+  `body_length` on the send that did not happen and nothing on the
+  send that did. On a non-production instance the two calls are not
+  even tied together — the payload digest is only consumed on prod —
+  so the dry-run row's figure is not evidence about the commit.
+
+  `odoo_create_attachment` recorded `mimetype` on the dry run and
+  not on the commit, though mimetype is what decides how Odoo serves
+  the stored file back.
+
+  What made both bug- rather than policy-shaped: `odoo_log_note` —
+  the strictly *lower*-risk sibling, which physically cannot email —
+  has always recorded `body_length` on both rows. The safer tool
+  documented more.
+
+  No new tool, argument, config key, or pipeline change; both values
+  are already in scope at the commit call site. 7 new tests in
+  `tests/test_audit_commit_details.py` pin the two keys plus the
+  general "commit details ⊇ dry-run details" property, and pin
+  `odoo_log_note` as the reference shape so the asymmetry cannot
+  simply move.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
