@@ -2136,7 +2136,13 @@ class Dispatcher:
         path.
         """
         instance = arguments.get("instance") if isinstance(arguments, dict) else None
-        model = arguments.get("model") if isinstance(arguments, dict) else None
+        # Resolve through the alias table: reading ``arguments["model"]``
+        # directly logged ``model: null`` for every refused
+        # ``odoo_create_attachment`` call, whose schema says ``res_model``.
+        # A refused call is exactly the row an operator reviews, so it must
+        # name its target at least as precisely as the row it would have
+        # written on success.
+        model = _target_model(arguments)
         # audit_message, not user_message: Odoo-supplied fault text can quote
         # record values, and this log is retained for 30 days.
         raw: dict[str, Any] = {"error": error.audit_message[:500]}
@@ -2760,8 +2766,32 @@ def _offset(args: dict[str, Any]) -> int:
 # ---------------------------------------------------------------------------
 
 
-_IDENTIFIER_KEYS = frozenset({"instance", "model", "tool", "order", "orderby", "mode"})
+_IDENTIFIER_KEYS = frozenset({"instance", "model", "res_model", "tool", "order", "orderby", "mode"})
 _SCALAR_KEYS = frozenset({"limit", "offset", "dry_run", "include_binary", "lazy"})
+
+# Arg names under which a tool's public schema can name its target model,
+# most-canonical first. ``odoo_create_attachment`` is the only tool that
+# uses an alias (``res_model``, matching Odoo's own ir.attachment field);
+# its handler translates to ``model`` internally, but the failure path
+# audits the RAW caller arguments, which never went through that
+# translation. Keep this in sync with any future model-arg alias.
+_MODEL_ARG_KEYS = ("model", "res_model")
+
+
+def _target_model(arguments: Any) -> str | None:
+    """The model a call targeted, resolving tool-local arg aliases.
+
+    Used by the failure path, which only ever sees the caller's raw
+    arguments. Returns ``None`` for genuinely model-less tools
+    (``odoo_help``, ``odoo_list_instances``, ``odoo_diagnose_routing``).
+    """
+    if not isinstance(arguments, dict):
+        return None
+    for key in _MODEL_ARG_KEYS:
+        value = arguments.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _present(value: Any) -> dict[str, Any]:

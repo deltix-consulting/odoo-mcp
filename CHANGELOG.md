@@ -10,6 +10,45 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A refused `odoo_create_attachment` call now records which model
+  it was aimed at.** The failure path audited
+  `arguments.get("model")`, but that tool's public schema names its
+  target `res_model` (matching Odoo's own `ir.attachment` field).
+  The handler translates `res_model` to `model` internally — and for
+  a refusal raised inside `_begin` it never gets that far — so every
+  refused attachment call was logged with `model: null`.
+
+  Nothing else in the row carried the value either. `res_model` was
+  not in `_IDENTIFIER_KEYS`, so `_args_shape` reduced it to a
+  `{present, type}` dict, which `_sanitize_details` then drops as a
+  non-leaf; the only surviving trace was the bare key name in
+  `args.keys`. Of the five refusal paths, three left the target
+  unrecoverable from anywhere in the row — the other two only leaked
+  it incidentally, because those particular error messages happen to
+  quote the model.
+
+  That inverts the disclosure. `odoo_create_attachment` is the only
+  tool in the server that reads the operator's filesystem, and the
+  refusal an operator most wants to review is exactly the one this
+  dropped: a `source_path` outside `attachment_source_paths` is
+  refused with a message about the *path*, leaving no record of which
+  record the file was headed for. An `/etc/passwd` probe aimed at a
+  customer-visible record and a fat-fingered path on an internal one
+  logged identically. Meanwhile the same call, when it succeeded,
+  recorded `model` — so the tool disclosed its target only when
+  nothing had gone wrong.
+
+  Fix: `_audit_failure` resolves the target through a small alias
+  table (`_MODEL_ARG_KEYS`, canonical key first) instead of reading
+  `model` directly, and `res_model` joins `_IDENTIFIER_KEYS` — it is
+  a non-secret identifier from a public schema, the same as `model`.
+  Genuinely model-less tools (`odoo_help`, `odoo_list_instances`,
+  `odoo_diagnose_routing`) still log `model: null`; the resolver
+  never invents one from an unrelated argument. No change to the
+  success path, to any tool schema, or to what a caller sees.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
