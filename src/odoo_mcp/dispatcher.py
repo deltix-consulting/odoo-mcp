@@ -2052,6 +2052,18 @@ class Dispatcher:
         self.app.rate_limiter.take(instance_name)
         # An unlock is a write-shaped event; refuse it too if we can't audit.
         self.app.audit.preflight()
+        # Snapshot the budget BEFORE unlocking. ``unlock`` renews an active
+        # window in place — expiry and commit budget reset, identity kept —
+        # so without this read the caller and the audit log cannot tell a
+        # first unlock from a mid-window budget reset that discarded the
+        # commits still left on the previous grant. The burst budget is the
+        # only hard ceiling on how many production commits one unlock
+        # authorises, and the burst-limit error explicitly tells the agent to
+        # renew, so a renewal is the one event an operator most needs to see.
+        # ``commits_remaining`` returns None when there is no live window, so
+        # None here means "fresh unlock" — the same test ``unlock`` applies.
+        commits_before = self.app.prod_guard.commits_remaining(instance_name)
+        renewed = commits_before is not None
         expiry = self.app.prod_guard.unlock(
             instance_name,
             rt.config.production,
@@ -2065,21 +2077,38 @@ class Dispatcher:
             None,
             0,
             False,
-            {"event": "WRITE_UNLOCK"},
+            # Explicit null rather than an omitted key on a fresh unlock:
+            # otherwise "no window was renewed" and "row predates this fix"
+            # look identical to an operator reading the log.
+            {
+                "event": "WRITE_UNLOCK",
+                "renewed": renewed,
+                "commits_remaining_before": commits_before,
+            },
             args,
         )
+        note = (
+            f"Writes are unlocked for {rt.config.unlock_ttl_seconds // 60} minutes "
+            f"of activity (sliding window: every commit extends it). Every write "
+            f"still defaults to dry_run=true on prod; you must pass dry_run=false "
+            f"and a confirmation_token to commit. Up to "
+            f"{rt.config.max_commits_per_unlock} commits allowed in this window."
+        )
+        if renewed:
+            note += (
+                f" This RENEWED an unlock that was already active: its remaining "
+                f"budget of {commits_before} was discarded and reset to "
+                f"{rt.config.max_commits_per_unlock}. Confirmation tokens issued "
+                f"under it stay valid."
+            )
         return {
             "instance": instance_name,
             "writes_unlocked": True,
+            "renewed": renewed,
+            "commits_remaining_before": commits_before,
             "expires_in_seconds": int(expiry - time.monotonic()),
             "commits_remaining": rt.config.max_commits_per_unlock,
-            "note": (
-                f"Writes are unlocked for {rt.config.unlock_ttl_seconds // 60} minutes "
-                f"of activity (sliding window: every commit extends it). Every write "
-                f"still defaults to dry_run=true on prod; you must pass dry_run=false "
-                f"and a confirmation_token to commit. Up to "
-                f"{rt.config.max_commits_per_unlock} commits allowed in this window."
-            ),
+            "note": note,
         }
 
     # ---- Audit ------------------------------------------------------------
