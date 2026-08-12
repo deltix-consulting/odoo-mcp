@@ -32,6 +32,7 @@ _TOOL_DESCRIBE_MODEL = Tool(
         "Permanently-redacted fields (passwords, tokens) are omitted entirely; "
         "default-hidden sensitive fields (VAT, IBAN, employee PII) are marked "
         "with `_sensitive: true` so you know they require explicit unlock. "
+        "Answers from a cached schema snapshot unless `refresh=true`. "
         'Example: model="res.partner" returns fields like id, name, email, vat (marked sensitive).'
     ),
     inputSchema={
@@ -51,6 +52,18 @@ _TOOL_DESCRIBE_MODEL = Tool(
                     "If true, include help text, relation, readonly, and _note for "
                     "each field (much larger response — useful when designing "
                     "complex writes or studying a custom model)."
+                ),
+            },
+            "refresh": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Re-read the schema from Odoo instead of the cached snapshot "
+                    "(one extra round trip). Use this when a field you know exists "
+                    "in Odoo is reported as not existing on the model — a Studio "
+                    "field or a newly installed module added after the snapshot. "
+                    "The refreshed schema is reused by every later call in this "
+                    "session."
                 ),
             },
         },

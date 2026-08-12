@@ -398,7 +398,9 @@ class Dispatcher:
             True,
         )
 
-    def _fields_meta(self, rt: InstanceRuntime, model: str) -> dict[str, dict[str, Any]]:
+    def _fields_meta(
+        self, rt: InstanceRuntime, model: str, *, refresh: bool = False
+    ) -> dict[str, dict[str, Any]]:
         """``fields_get`` filtered through the hard per-model read whitelist.
 
         The single choke point: every tool's view of a model's fields goes
@@ -406,8 +408,14 @@ class Dispatcher:
         non-whitelisted fields via any code path — smart selection, explicit
         ``fields=``, domain leaves, groupby, and response redaction all key
         off this metadata.
+
+        ``refresh=True`` bypasses both cache layers and re-reads from Odoo.
+        The client writes the fresh result back to L1 *and* L2, so one
+        refreshed call re-points every later tool in the session (and every
+        future process) at the new schema — that is why only
+        ``odoo_describe_model`` needs to expose the flag.
         """
-        return restrict_fields_meta(model, rt.client.fields_get(model))
+        return restrict_fields_meta(model, rt.client.fields_get(model, use_cache=not refresh))
 
     # ---- Handlers ---------------------------------------------------------
 
@@ -465,9 +473,20 @@ class Dispatcher:
         return result
 
     def _describe_model(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Field metadata for one model, from the cache unless ``refresh``.
+
+        ``fields_get`` is cached at two levels (per-process L1, which never
+        expires, and the on-disk L2, TTL 24h), and *every* field-name check
+        in the server keys off that snapshot. So a field added to Odoo after
+        the snapshot — a Studio field, a freshly installed module — is not
+        merely missing here: reading it is refused with "does not exist on
+        model", which is a false statement about live Odoo. ``refresh=True``
+        is the escape hatch: re-read from Odoo and repoint both caches.
+        """
         ctx = self._begin("odoo_describe_model", args, Operation.FIELDS_GET)
         assert ctx.model is not None
         verbose = bool(args.get("verbose") or False)
+        refresh = bool(args.get("refresh") or False)
         # Default: only the bits Claude actually needs to choose fields.
         # Verbose: full schema (help text, relation, readonly, _note).
         if verbose:
@@ -485,7 +504,7 @@ class Dispatcher:
             keep = {"type", "string", "required", "_sensitive"}
         raw = redact_fields_get(
             ctx.model,
-            self._fields_meta(ctx.rt, ctx.model),
+            self._fields_meta(ctx.rt, ctx.model, refresh=refresh),
             instance_overrides=ctx.rt.config.sensitive_fields,
             extra_redacted=ctx.rt.extra_redacted,
         )
@@ -517,13 +536,15 @@ class Dispatcher:
             elif is_custom_field_name(fname):
                 meta["_custom"] = True
                 custom_count += 1
-        details: dict[str, Any] = {"field_count": len(filtered)}
+        details: dict[str, Any] = {"field_count": len(filtered), "refresh": refresh}
         if custom_count:
             details["custom_field_count"] = custom_count
         if studio_count:
             details["studio_field_count"] = studio_count
         self._audit_ok(ctx, details, args)
-        return {"model": ctx.model, "fields": filtered}
+        # Always present, both values: a response that never says where the
+        # schema came from reads as authoritative, and a stale one isn't.
+        return {"model": ctx.model, "fields": filtered, "schema_refreshed": refresh}
 
     def _lookup(self, args: dict[str, Any]) -> dict[str, Any]:
         """Fast `name ilike` lookup returning only id + display_name.
