@@ -17,6 +17,10 @@ Design rules:
   Claude doesn't have to guess.
 * Keep them short — the goal is to point Claude at the right tools, not
   to write a runbook in the prompt body.
+* A prompt must not instruct a call the server's own policy refuses. When
+  a prompt names a concrete field, derive any required opt-in from the
+  policy (see :func:`_groupby_clause`) instead of hardcoding it — a
+  hardcoded clause drifts the moment the policy map changes.
 """
 
 from __future__ import annotations
@@ -30,6 +34,8 @@ from mcp.types import (
     PromptMessage,
     TextContent,
 )
+
+from .security.fields import is_default_hidden
 
 # ---------------------------------------------------------------------------
 # Prompt definitions
@@ -247,6 +253,38 @@ _PROMPTS: Final[list[Prompt]] = [
 # ---------------------------------------------------------------------------
 
 
+def _groupby_clause(model: str, field: str) -> str:
+    """Render a ``groupby=`` instruction, naming the opt-in when policy needs one.
+
+    ``odoo_read_group`` refuses to group by a default-hidden field unless the
+    caller also passes ``allow_sensitive_fields`` — grouping echoes the
+    field's distinct values, so it counts as reading them. A prompt that
+    names such a field without the opt-in walks Claude straight into a
+    ``field_policy`` refusal, which is exactly what the default
+    ``odoo_find_duplicate_partners`` (match by ``vat``) used to do.
+
+    The clause is derived from :func:`~odoo_mcp.security.fields.is_default_hidden`
+    rather than hardcoded, so the prompt follows the policy map instead of
+    drifting from it.
+
+    Only the built-in policy is visible here: :func:`get_prompt` receives
+    argument strings, not an instance config, so a per-instance
+    ``sensitive_fields`` override that *adds* a field is not reflected. The
+    failure mode is benign in both directions — naming the opt-in for a
+    field that does not need it is harmless (the validators consult
+    ``allow_sensitive_fields`` only for fields that are hidden), and a
+    field hidden by instance override still produces the refusal message,
+    which names the opt-in itself.
+    """
+    if is_default_hidden(model, field):
+        return (
+            f"groupby=['{field}'] and allow_sensitive_fields=['{field}'] "
+            f"(the opt-in is required — '{field}' is sensitive on {model}, and "
+            f"odoo_read_group refuses to group by it without one)"
+        )
+    return f"groupby=['{field}']"
+
+
 def _month_end_check(instance: str) -> str:
     return (
         f"Run a month-end health check on Odoo instance '{instance}'. "
@@ -283,10 +321,11 @@ def _find_duplicate_partners(instance: str, match_field: str | None) -> str:
     field = (match_field or "vat").lower()
     if field not in ("vat", "email", "name"):
         field = "vat"
+    clause = _groupby_clause("res.partner", field)
     if field == "vat":
         body = (
             "Use odoo_read_group on res.partner with fields=['id:count'] and "
-            "groupby=['vat'] to count partners per VAT. "
+            f"{clause} to count partners per VAT. "
             "Filter to groups with id_count > 1 and vat != False.\n"
             "Then for each duplicate VAT, odoo_search_read partners with that vat "
             "to show id, name, parent_id, country_id, email, write_date."
@@ -294,7 +333,7 @@ def _find_duplicate_partners(instance: str, match_field: str | None) -> str:
     elif field == "email":
         body = (
             "Use odoo_read_group on res.partner with fields=['id:count'] and "
-            "groupby=['email'] to count partners per email. "
+            f"{clause} to count partners per email. "
             "Filter to groups with id_count > 1 and email != False. "
             "Beware that lowercasing happens server-side; the result is best-effort.\n"
             "For each duplicate email, odoo_search_read to show id, name, parent_id, write_date."
@@ -302,7 +341,7 @@ def _find_duplicate_partners(instance: str, match_field: str | None) -> str:
     else:
         body = (
             "Use odoo_read_group on res.partner with fields=['id:count'] and "
-            "groupby=['name'] to count partners per exact name. "
+            f"{clause} to count partners per exact name. "
             "Filter to groups with id_count > 1.\n"
             "Note: name matching is exact and case-sensitive at the DB level — fuzzy "
             "duplicate detection is out of scope for this prompt."

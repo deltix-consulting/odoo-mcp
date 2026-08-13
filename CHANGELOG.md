@@ -10,6 +10,44 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_find_duplicate_partners` no longer instructs a call the
+  server refuses.** The prompt's *default* path (`match_field=vat`,
+  its headline use case) told Claude to run `odoo_read_group` on
+  `res.partner` with `groupby=['vat']` — but `vat` is default-hidden
+  on `res.partner`, and `validate_groupby` refuses to group by a
+  hidden field without `allow_sensitive_fields`, because grouping
+  echoes the field's distinct values and so counts as reading them.
+  The prompt never mentioned the opt-in, so the flagship path
+  answered `{"ok": false, "error_code": "field_policy"}`.
+
+  The refusal message does name the remedy, so a persistent agent
+  could recover on the next turn — but a shipped prompt should not
+  spend a round trip walking into its own policy.
+
+  The `groupby=` clause is now derived from `is_default_hidden`
+  (new `prompts._groupby_clause`) rather than hardcoded, so the
+  prompt tracks the policy map instead of drifting from it — the
+  same fix shape as deriving the `odoo_run_document_action` schema
+  from the security map. The `email` and `name` match fields are
+  unaffected (neither is hidden) and render exactly as before.
+
+  Only the built-in policy is visible to a prompt: `get_prompt`
+  receives argument strings, not an instance config, so a
+  per-instance `sensitive_fields` override that *adds* a field is
+  not reflected. Benign both ways — naming the opt-in for a field
+  that does not need it is ignored by the validators, and a field
+  hidden by override still yields the refusal, which names the
+  opt-in itself.
+
+  7 new tests. The load-bearing one parses the call back out of the
+  rendered prompt body and executes it through the dispatcher, so
+  prompt and policy are checked against each other rather than
+  against a copy of the expected text; a library-wide sweep covers
+  the other 5 `groupby` call sites so a future prompt cannot
+  reintroduce the drift.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
