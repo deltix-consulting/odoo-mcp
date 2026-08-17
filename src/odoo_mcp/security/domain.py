@@ -97,7 +97,12 @@ def sandbox_domain(
     returned list is a fresh copy — the caller's input is never mutated.
     """
     if not isinstance(domain, list):
-        raise DomainSandboxError(f"Domain must be a list, got {type(domain).__name__}.")
+        raise DomainSandboxError(
+            f"Domain must be a list, got {type(domain).__name__}. "
+            f"To match every record, pass [] or omit the argument — a domain "
+            f"this server cannot parse is refused rather than dropped, because "
+            f"dropping it would silently search the whole model."
+        )
     if len(domain) == 0:
         return []
 
