@@ -126,6 +126,21 @@ def _atomic_write_text(target: Path, content: str, *, mode: int = 0o600) -> None
 # ---------------------------------------------------------------------------
 
 
+_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _toml_key(name: str) -> str:
+    """Serialise a TOML key, quoting it when it isn't a bare key.
+
+    Model names — the keys of ``sensitive_fields`` and
+    ``smart_fields_overrides`` — contain dots, and a bare ``res.partner``
+    would be read back as two nested tables.
+    """
+    if _BARE_KEY_RE.match(name):
+        return name
+    return _toml_value(name)
+
+
 def _toml_value(value: object) -> str:
     """Serialise a single Python value to its TOML representation."""
     if isinstance(value, bool):
@@ -144,22 +159,48 @@ def _toml_value(value: object) -> str:
     if isinstance(value, (list, tuple)):
         inner = ", ".join(_toml_value(v) for v in value)
         return f"[{inner}]"
+    if isinstance(value, dict):
+        # Inline table. ``_generate_toml`` prefers a real sub-table for
+        # readability, but a dict nested any deeper than a table's own key
+        # has no header to live under, and every caller of this function
+        # must be able to serialise whatever ``tomllib`` handed it back.
+        inner = ", ".join(f"{_toml_key(str(k))} = {_toml_value(v)}" for k, v in value.items())
+        return f"{{{inner}}}"
     raise ValueError(f"Unsupported TOML type: {type(value)}")
 
 
-def _generate_toml(defaults: dict[str, Any], instances: dict[str, dict[str, Any]]) -> str:
-    """Build a complete config.toml string from *defaults* and *instances*."""
-    lines: list[str] = ["[defaults]"]
-    for key, val in defaults.items():
-        lines.append(f"{key} = {_toml_value(val)}")
+def _render_config_table(header: str, values: dict[str, Any]) -> list[str]:
+    """Render one config.toml table: scalar keys, then nested sub-tables.
+
+    The ordering is load-bearing. Every ``key = value`` line in TOML belongs
+    to the most recent table header, so a sub-table has to be emitted *after*
+    all of its parent's scalar keys — otherwise the remaining scalars are
+    silently reparented into the sub-table on the next read.
+    """
+    nested: list[tuple[str, dict[str, Any]]] = []
+    lines = [f"[{header}]"]
+    for key, val in values.items():
+        if isinstance(val, dict):
+            nested.append((key, val))
+            continue
+        lines.append(f"{_toml_key(key)} = {_toml_value(val)}")
     lines.append("")
+    for key, sub in nested:
+        lines.extend(_render_config_table(f"{header}.{_toml_key(key)}", sub))
+    return lines
 
+
+def _generate_toml(defaults: dict[str, Any], instances: dict[str, dict[str, Any]]) -> str:
+    """Build a complete config.toml string from *defaults* and *instances*.
+
+    Must round-trip every config :func:`odoo_mcp.config.load_config` accepts.
+    Two instance keys are TOML sub-tables — ``sensitive_fields`` (the
+    per-instance redaction policy) and ``smart_fields_overrides`` — so the
+    generator cannot assume a flat table of scalars.
+    """
+    lines: list[str] = _render_config_table("defaults", defaults)
     for name, inst in instances.items():
-        lines.append(f"[instances.{name}]")
-        for key, val in inst.items():
-            lines.append(f"{key} = {_toml_value(val)}")
-        lines.append("")
-
+        lines.extend(_render_config_table(f"instances.{_toml_key(name)}", inst))
     return "\n".join(lines) + "\n"
 
 
@@ -1467,11 +1508,17 @@ def _cmd_remove() -> int:
         print("Cancelled.")
         return 0
 
-    print("\nRemoving credentials from Keychain...")
-    _delete_credentials(target, str(prefix))
+    # Order matters: the config rewrite is recoverable (it is atomic, and a
+    # failure leaves the original file untouched), deleting the API key from
+    # the OS credential store is not — the key cannot be read back out of
+    # Odoo. Do the step that can fail first, so a failed removal leaves a
+    # working instance rather than a configured one whose secrets are gone.
     del instances[target]
     _write_config(defaults, instances)
     print(f"  Updated {DEFAULT_CONFIG_PATH}")
+
+    print("\nRemoving credentials from Keychain...")
+    _delete_credentials(target, str(prefix))
     if not instances:
         print("\n  Warning: no instances remain. The MCP server won't start without at least one.")
 
