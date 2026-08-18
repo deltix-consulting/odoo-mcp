@@ -10,6 +10,52 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An audit log that cannot be READ is no longer reported as an audit
+  log with no entries.** `odoo-mcp audit` swallowed every OS error into
+  an empty list and printed `(no audit entries match the filters)` with
+  **exit code 0**. A log the user could not open — wrong ownership after
+  a `sudo` run, a restrictive `umask`, a permission-hardened `~/.odoo-mcp`
+  — was therefore indistinguishable from a log recording no activity, on
+  the one surface whose entire job is to answer "what did this server
+  do?". A monitoring script polling `odoo-mcp audit --errors --json` read
+  a broken log as a clean bill of health.
+
+  `AuditLog` (the writer) has failed closed on an unwritable log since
+  v0.8.0; the reader now takes the same posture:
+
+  - Every file that cannot be stat-ed or opened, and every line that is
+    present but unusable (truncated write, corruption, hand-editing), is
+    collected and printed to **stderr** as
+    `warning: audit log incomplete — …`. `audit_log_open` markers are
+    expected bookkeeping and are not counted, so a healthy log stays
+    silent.
+  - When *nothing* could be read, the human views (table and `--stats`)
+    say so explicitly instead of claiming the filters matched nothing,
+    and `main` returns **1**. An absent `audit.jsonl` — a fresh install
+    that has made no calls — is still the quiet, exit-0 case.
+  - `--json` keeps its stdout contract: still a bare list (`[]`), with
+    the diagnostics on stderr and the failure carried by the exit code,
+    so `| jq` pipelines are unaffected.
+  - An unreadable audit *directory* previously escaped as an uncaught
+    `PermissionError` traceback — `_audit_files` guarded `iterdir()` but
+    not the `Path.exists()` on `audit.jsonl`. It is now reported like any
+    other read failure.
+
+  `odoo-mcp status` shares the loader and made the same claim
+  (`(no audit entries yet)`); it now prints the same warning lines and
+  distinguishes "could not be read" from "nothing yet".
+
+  `_load_all_entries` is kept as an entries-only wrapper over the new
+  `_load_entries`, so existing callers and tests are unaffected.
+
+  12 new tests in `tests/test_audit_cli_unreadable.py`; 6 of them fail on
+  the current `main` for behavioural reasons (the other new-API and
+  constant-referencing ones cannot run there at all). Four are controls
+  pinning the quiet paths — healthy log, absent log, open-markers — so
+  the warning cannot start crying wolf.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
