@@ -70,6 +70,7 @@ _VALID_INSTANCE_KEYS: Final[frozenset[str]] = frozenset(
         "refuse_admin_on_production",
         "custom_sensitive_field_patterns",
         "max_commits_per_unlock",
+        "unlock_ttl_seconds",
         "smart_fields_overrides",
         "external_comms_enabled",
         "attachment_source_paths",
@@ -111,7 +112,14 @@ class InstanceConfig:
     sensitive_fields: dict[str, frozenset[str]] = field(default_factory=dict)
     refuse_admin_on_production: bool = True
     custom_sensitive_field_patterns: tuple[str, ...] = ()
-    max_commits_per_unlock: int = 10
+    max_commits_per_unlock: int = 50
+    # Prod-write unlock window length, in seconds. Bounded 60..3600
+    # (1 min .. 1 hour) by the config parser to keep the tenant honest —
+    # a two-day unlock defeats the operator-in-the-loop pattern this
+    # exists to enforce. The sliding-window ``touch`` on every commit
+    # keeps active batches alive; this is the initial + idle-timeout
+    # length. Default matches the built-in ``DEFAULT_UNLOCK_TTL_SECONDS``.
+    unlock_ttl_seconds: int = 15 * 60
     # Per-model override of the smart-default field list used by
     # ``odoo_search_read`` / ``odoo_read`` when the caller omits ``fields``.
     # Keys are model strings, values are tuples of field names. When a model
@@ -338,7 +346,11 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
             ) from exc
     custom_patterns = tuple(raw_patterns)
 
-    max_commits = _require_int(entry, "max_commits_per_unlock", 10, minimum=1, maximum=1000)
+    max_commits = _require_int(entry, "max_commits_per_unlock", 50, minimum=1, maximum=1000)
+    # Bounded 60..3600: shorter than 1 min is operationally unusable
+    # (the operator's dry-run review takes longer); longer than 1 hour
+    # defeats the operator-in-the-loop pattern the unlock exists for.
+    unlock_ttl = _require_int(entry, "unlock_ttl_seconds", 15 * 60, minimum=60, maximum=3600)
     smart_overrides = _parse_smart_fields_overrides(entry.get("smart_fields_overrides"), name)
     external_comms = bool(entry.get("external_comms_enabled", False))
     attachment_paths = _parse_attachment_source_paths(entry.get("attachment_source_paths"), name)
@@ -359,6 +371,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         refuse_admin_on_production=refuse_admin_on_production,
         custom_sensitive_field_patterns=custom_patterns,
         max_commits_per_unlock=max_commits,
+        unlock_ttl_seconds=unlock_ttl,
         smart_fields_overrides=smart_overrides,
         external_comms_enabled=external_comms,
         attachment_source_paths=attachment_paths,

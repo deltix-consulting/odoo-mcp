@@ -99,3 +99,53 @@ def test_unknown_disable_names_logged_not_fatal(
     # in the filter.
     advertised = _list_tools_via_server(srv)
     assert "odoo_create" not in advertised
+
+
+# --- call-time enforcement (not just tools/list filtering) -----------------
+
+
+def _call(app: Any, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    import json
+
+    from odoo_mcp.dispatcher import Dispatcher
+
+    contents = asyncio.run(Dispatcher(app).call(name, args))
+    return json.loads(contents[0].text)
+
+
+def test_disabled_tool_refused_when_called_directly(
+    monkeypatch: pytest.MonkeyPatch,
+    make_app: Callable[..., Any],
+) -> None:
+    """A tool hidden from tools/list must ALSO be refused if the client
+    sends its name directly — hiding is not the same as disabling, and a
+    hallucinating / prompt-injected model can call by name."""
+    monkeypatch.setenv("ODOO_MCP_DISABLE_TOOLS", "odoo_create,odoo_write")
+    app = make_app()
+    payload = _call(app, "odoo_create", {"instance": "dev", "model": "res.partner", "values": {}})
+    assert payload["ok"] is False
+    assert payload["error_code"] == "operation_not_allowed"
+    assert "disabled" in payload["error"].lower()
+
+
+def test_non_disabled_tool_still_dispatches(
+    monkeypatch: pytest.MonkeyPatch,
+    make_app: Callable[..., Any],
+) -> None:
+    """Disabling one tool must not block the others: the guard is scoped
+    to the named set, and a tool outside it dispatches normally."""
+    monkeypatch.setenv("ODOO_MCP_DISABLE_TOOLS", "odoo_create")
+    app = make_app()
+    # odoo_help needs no Odoo round-trip; it should run and succeed.
+    payload = _call(app, "odoo_help", {"instance": "dev"})
+    assert payload["ok"] is True
+
+
+def test_no_disable_env_allows_call(
+    monkeypatch: pytest.MonkeyPatch,
+    make_app: Callable[..., Any],
+) -> None:
+    monkeypatch.delenv("ODOO_MCP_DISABLE_TOOLS", raising=False)
+    app = make_app()
+    payload = _call(app, "odoo_help", {"instance": "dev"})
+    assert payload["ok"] is True

@@ -121,10 +121,17 @@ def verify_release_attestation(
     detail = stderr or stdout or f"exit code {result.returncode}"
     combined = f"{stderr}\n{stdout}".lower()
 
-    # Hard-fail signals: explicit tampering. These patterns indicate gh
-    # successfully retrieved an attestation but the signature/identity
-    # check rejected it. Anything matching here is a real verification
-    # failure and the update must be refused.
+    # Hard-fail signals: explicit tampering, OR an artifact that carries no
+    # provenance at all. Both mean "this artifact is not demonstrably ours".
+    #
+    # "no attestation found" used to be classified environmental, which was
+    # backwards: we reach this branch only AFTER the tarball downloaded
+    # successfully (download errors return "environment: download failed"
+    # above), so an artifact that exists but has no attestation is exactly
+    # the shape a substituted/tampered release takes. Absence of provenance
+    # is the primary attack signal, not an infrastructure hiccup — it must
+    # fail closed. An operator who knowingly installs an unsigned build can
+    # still pass ``--skip-verification``.
     _TAMPERING_PATTERNS = (
         "signature does not match",
         "signature mismatch",
@@ -133,27 +140,21 @@ def verify_release_attestation(
         "does not match the expected",
         "unexpected signer",
         "wrong owner",
-    )
-    if any(pat in combined for pat in _TAMPERING_PATTERNS):
-        return (False, f"verification failed: {detail}")
-
-    # Environmental signals: gh failed for reasons unrelated to artifact
-    # integrity. Sigstore issuer quirks, TUF refresh hiccups, network
-    # blips, missing-attestation responses. Treat as soft-fail (warn +
-    # prompt) rather than hard-fail (refuse update).
-    #
-    # The cost of being permissive: a tampered tarball whose Sigstore
-    # lookup happens to fail (very rare) would slip through the soft-fail
-    # path. The cost of being strict: every legitimate sigstore issuer
-    # quirk hard-fails the install. We choose permissive — the
-    # dispatcher's allowlist + denylist + write-blocklist are the real
-    # defense. This verifier is a defense-in-depth layer, not a
-    # singular gate.
-    _ENVIRONMENTAL_PATTERNS = (
         "no attestation",
         "no attestations",
         "404",
         "not found",
+    )
+    if any(pat in combined for pat in _TAMPERING_PATTERNS):
+        return (False, f"verification failed: {detail}")
+
+    # Environmental signals: gh could not complete the check for reasons
+    # unrelated to the artifact itself — Sigstore/TUF infrastructure
+    # trouble, network blips, auth problems. These are soft-fails (warn +
+    # prompt) because refusing on them would make every transient outage a
+    # hard install failure, and they carry no evidence about the artifact
+    # one way or the other.
+    _ENVIRONMENTAL_PATTERNS = (
         "failed to fetch",
         "sigstore",
         "issuer",

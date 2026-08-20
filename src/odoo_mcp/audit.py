@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -29,6 +30,11 @@ from .errors import AuditLogError
 logger = logging.getLogger(__name__)
 
 _RETENTION_DAYS = 30
+# Owner read/write only. The audit log records operational metadata
+# (instance names, models touched, tool names, timestamps, counts) that
+# should not be readable by other local users on a shared machine —
+# the same posture the config file and the fields cache already enforce.
+_OWNER_ONLY_MODE = 0o600
 _ROTATED_PATTERN = re.compile(r"audit-(\d{4}-\d{2}-\d{2})\.jsonl$")
 
 # Audit detail leaves: only primitives or lists of primitives. NO arbitrary
@@ -84,6 +90,11 @@ class AuditLog:
                 f.write(json.dumps(marker, separators=(",", ":")) + "\n")
         except OSError as exc:
             raise AuditLogError(f"Cannot write to audit log at {self._path}: {exc}") from exc
+        # Lock the file down to owner-only BEFORE anything else. Files
+        # created with the default umask land at 0o644 (world-readable);
+        # re-chmod here also remediates logs from installs that predate
+        # this hardening.
+        _chmod_owner_only(self._path)
         self._rotate_if_needed()
         self._trim_retention()
         self._last_rotation_check = datetime.now(tz=UTC).date()
@@ -117,6 +128,8 @@ class AuditLog:
             raise AuditLogError(
                 f"Failed to rotate audit log {self._path} -> {rotated}: {exc}"
             ) from exc
+        # The dated file inherits the rotated content; keep it owner-only.
+        _chmod_owner_only(rotated)
 
     def _trim_retention(self) -> None:
         """Delete rotated files older than ``_RETENTION_DAYS`` days."""
@@ -136,12 +149,41 @@ class AuditLog:
                     except OSError:
                         # Best-effort — don't fail startup on retention cleanup.
                         continue
+                else:
+                    # Kept within the retention window — remediate the
+                    # file mode in case it was created world-readable by
+                    # a version that predated the owner-only hardening.
+                    _chmod_owner_only(entry)
         except OSError:
             # The directory vanished under us. _open already verified
             # writability; this is best-effort so swallow and move on.
             return
 
     # --- Writing ------------------------------------------------------------
+
+    def preflight(self) -> None:
+        """Verify the log is writable, without emitting a record.
+
+        Called on the write path BEFORE the Odoo mutation. The audit log is
+        documented as fail-closed, but logging a successful write happens
+        *after* the write has already committed — so a broken log at that
+        point cannot prevent the unaudited side effect, it can only report
+        it (and, worse, report it as a failure, inviting the agent to retry
+        and mutate twice). Checking writability up front is what actually
+        delivers the property: if the log is unwritable, the tool call is
+        refused before anything changes in Odoo.
+
+        Raises :class:`AuditLogError` if the log cannot be appended to.
+        """
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8"):
+                pass
+        except OSError as exc:
+            raise AuditLogError(
+                f"Audit log at {self._path} is not writable ({exc}) — refusing the "
+                f"write before it reaches Odoo, so no unaudited change can occur."
+            ) from exc
 
     def log(self, event: AuditEvent) -> None:
         """Append one event. Raises :class:`AuditLogError` on write failure."""
@@ -152,9 +194,11 @@ class AuditLog:
         # the file and (rarely) rename. This keeps long-running MCPs from
         # writing Tuesday's events into Monday's ``audit.jsonl``.
         today = datetime.now(tz=UTC).date()
+        rotated_this_call = False
         if self._last_rotation_check != today:
             self._rotate_if_needed()
             self._last_rotation_check = today
+            rotated_this_call = True
         payload = {
             "ts": _now_iso(),
             "instance": event.instance,
@@ -175,6 +219,29 @@ class AuditLog:
         except OSError as exc:
             logger.error("audit log write failed: %s: %s", self._path, exc)
             raise AuditLogError(f"Failed to write audit entry to {self._path}: {exc}") from exc
+        # A mid-flight rotation just renamed the old file away; the append
+        # above created a fresh audit.jsonl under the default umask. Lock
+        # it back down. Only runs on the once-per-day rollover, not the
+        # hot path.
+        if rotated_this_call:
+            _chmod_owner_only(self._path)
+
+
+def _chmod_owner_only(path: Path) -> None:
+    """Restrict ``path`` to owner read/write (0o600), best-effort.
+
+    No-op on non-POSIX platforms (Windows), where ``st_mode`` bits do
+    not carry the same meaning. A chmod failure is logged at WARNING and
+    swallowed: it must not take down audit logging, which is fail-closed
+    on *write* failures but not on a hardening step. Mirrors the same
+    posture as :class:`odoo_mcp.fields_cache.PersistentFieldsCache`.
+    """
+    if os.name != "posix":
+        return
+    try:
+        os.chmod(path, _OWNER_ONLY_MODE)
+    except OSError as exc:
+        logger.warning("Could not chmod 600 audit log %s: %s", path, exc)
 
 
 def _now_iso() -> str:

@@ -109,19 +109,35 @@ def test_signature_mismatch_is_hard_failure():
     assert reason.startswith("verification failed")
 
 
-def test_existing_no_attestations_pattern_still_works():
-    """Regression: 'no attestations' must remain an environmental soft-fail."""
-    with (
-        patch("odoo_mcp.attestation.shutil.which", return_value="/usr/local/bin/gh"),
-        patch("odoo_mcp.attestation._download"),
-        patch(
-            "odoo_mcp.attestation.subprocess.run",
-            return_value=_completed(1, stderr="no attestations found for this artifact"),
-        ),
+def test_missing_attestation_is_hard_failure():
+    """An artifact with NO provenance must hard-fail, not soft-fail.
+
+    This reverses the pre-hardening classification. We only reach the
+    gh-result branch after the tarball downloaded successfully (download
+    errors return "environment: download failed" earlier), so "no
+    attestations found" means the artifact exists but carries no proof it
+    came from our CI — which is precisely the shape of a substituted or
+    tampered release. Treating absence of provenance as an environmental
+    hiccup downgraded the primary attack signal to a "Proceed? [y/N]"
+    prompt. An operator who knowingly wants an unsigned build still has
+    --skip-verification.
+    """
+    for stderr in (
+        "no attestations found for this artifact",
+        "HTTP 404: no attestation found",
+        "attestation not found for subject digest",
     ):
-        verified, reason = attestation.verify_release_attestation("v0.13.1")
-    assert verified is False
-    assert reason.startswith("environment:")
+        with (
+            patch("odoo_mcp.attestation.shutil.which", return_value="/usr/local/bin/gh"),
+            patch("odoo_mcp.attestation._download"),
+            patch(
+                "odoo_mcp.attestation.subprocess.run",
+                return_value=_completed(1, stderr=stderr),
+            ),
+        ):
+            verified, reason = attestation.verify_release_attestation("v0.13.1")
+        assert verified is False, stderr
+        assert reason.startswith("verification failed"), f"{stderr} -> {reason}"
 
 
 def test_tuf_failure_is_environmental():

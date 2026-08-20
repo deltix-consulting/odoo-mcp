@@ -454,3 +454,47 @@ def test_renew_key_missing_arg_returns_2(
     assert rc == 2
     err = capsys.readouterr().err
     assert "Usage" in err
+
+
+# --- password must never cross the network in cleartext --------------------
+
+
+def test_password_auth_refuses_plain_http() -> None:
+    """Key generation sends the real Odoo password, so it requires HTTPS.
+
+    The wizard otherwise accepts http:// for dev instances; without this
+    guard a dev-mode config silently downgrades the most sensitive
+    credential the tool handles.
+    """
+    from odoo_mcp.setup_wizard import _KeyGenError, _refuse_cleartext_password_transport
+
+    for bad in ("http://acme.odoo.com", "http://192.168.1.50:8069", "http://odoo.internal"):
+        with pytest.raises(_KeyGenError, match="Refusing to send your Odoo password"):
+            _refuse_cleartext_password_transport(bad)
+
+
+def test_password_auth_allows_https_and_loopback() -> None:
+    """HTTPS anywhere, and cleartext only on loopback (never leaves the host)."""
+    from odoo_mcp.setup_wizard import _refuse_cleartext_password_transport
+
+    for ok in (
+        "https://acme.odoo.com",
+        "https://odoo.internal:8069",
+        "http://localhost:8069",
+        "http://127.0.0.1:8069",
+        "http://[::1]:8069",
+    ):
+        _refuse_cleartext_password_transport(ok)  # must not raise
+
+
+def test_loopback_detection_is_literal_not_resolved() -> None:
+    """A hostname that merely resolves to loopback today must not count —
+    safety shouldn't depend on the current resolver cache."""
+    from odoo_mcp.setup_wizard import _is_loopback_host
+
+    assert _is_loopback_host("localhost")
+    assert _is_loopback_host("127.0.0.1")
+    assert _is_loopback_host("127.16.9.3")
+    assert not _is_loopback_host("localhost.evil.com")
+    assert not _is_loopback_host("evil.com")
+    assert not _is_loopback_host("10.0.0.1")

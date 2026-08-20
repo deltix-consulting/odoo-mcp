@@ -235,3 +235,60 @@ production = false
     cfg_file = _write_cfg(tmp_path / "config.toml", body)
     with pytest.raises(ConfigError, match="ODOO_MCP_SHARED"):
         load_config(cfg_file)
+
+
+# ---------------------------------------------------------------------------
+# unlock_ttl_seconds / max_commits_per_unlock: per-instance tunables
+# ---------------------------------------------------------------------------
+
+
+def test_unlock_ttl_seconds_defaults_to_fifteen_minutes(tmp_path: Path) -> None:
+    """Operators don't have to set anything to get the sensible default.
+    Pin the default so an unnoticed refactor to 5 minutes (the old value)
+    or something absurd is loud."""
+    cfg_file = _write_cfg(tmp_path / "config.toml", _VALID_CONFIG)
+    cfg = load_config(cfg_file)
+    assert cfg.instances["prod"].unlock_ttl_seconds == 15 * 60
+
+
+def test_unlock_ttl_seconds_per_instance_override(tmp_path: Path) -> None:
+    """Operators can tune the initial unlock window per instance. A
+    high-throughput batch tenant sets it up (60 min max); an SOX-strict
+    tenant drops it (60s min). This is the whole point of making it
+    configurable."""
+    body = _VALID_CONFIG + "\nunlock_ttl_seconds = 1800\n"  # 30 min on prod
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    cfg = load_config(cfg_file)
+    assert cfg.instances["prod"].unlock_ttl_seconds == 1800
+
+
+def test_unlock_ttl_seconds_below_bound_refused(tmp_path: Path) -> None:
+    """Sub-60s TTL is operationally unusable — the dry-run review takes
+    longer than that. Config parser refuses the value rather than
+    silently promoting it, so a misconfigured tenant sees the error at
+    startup, not on the first blocked write."""
+    body = _VALID_CONFIG + "\nunlock_ttl_seconds = 10\n"
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    with pytest.raises(ConfigError, match="unlock_ttl_seconds"):
+        load_config(cfg_file)
+
+
+def test_unlock_ttl_seconds_above_bound_refused(tmp_path: Path) -> None:
+    """Above 3600s (1 hour) defeats the operator-in-the-loop pattern
+    the unlock exists to enforce. Refuse loudly rather than accepting
+    a value that quietly weakens the security posture."""
+    body = _VALID_CONFIG + "\nunlock_ttl_seconds = 7200\n"  # 2 hours
+    cfg_file = _write_cfg(tmp_path / "config.toml", body)
+    with pytest.raises(ConfigError, match="unlock_ttl_seconds"):
+        load_config(cfg_file)
+
+
+def test_max_commits_per_unlock_defaults_to_fifty(tmp_path: Path) -> None:
+    """Default bumped from 10 → 50 in v0.27.0. The payload-digest
+    binding (v0.18.0) already binds each commit to its previewed
+    content, so a larger burst budget doesn't weaken the operator's
+    approval — it just unblocks batch flows that used to hit the cap
+    mid-run and force an unnecessary re-unlock."""
+    cfg_file = _write_cfg(tmp_path / "config.toml", _VALID_CONFIG)
+    cfg = load_config(cfg_file)
+    assert cfg.instances["prod"].max_commits_per_unlock == 50

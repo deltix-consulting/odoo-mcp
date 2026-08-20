@@ -204,6 +204,62 @@ def test_open_fails_closed_when_unwritable(tmp_path: Path) -> None:
         ro_dir.chmod(0o700)  # let tmp_path clean up
 
 
+@pytest.mark.skipif(os.name != "posix", reason="File-mode test relies on POSIX chmod semantics")
+def test_open_creates_owner_only_file(tmp_path: Path) -> None:
+    import stat
+
+    log_path = tmp_path / "audit.jsonl"
+    AuditLog(log_path)
+    mode = stat.S_IMODE(log_path.stat().st_mode)
+    assert mode & 0o077 == 0, f"audit log must not be group/world accessible, got {oct(mode)}"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="File-mode test relies on POSIX chmod semantics")
+def test_open_remediates_existing_world_readable_file(tmp_path: Path) -> None:
+    import stat
+
+    log_path = tmp_path / "audit.jsonl"
+    # Simulate a log created by a pre-hardening version: world-readable.
+    log_path.write_text("")
+    log_path.chmod(0o644)
+    AuditLog(log_path)
+    mode = stat.S_IMODE(log_path.stat().st_mode)
+    assert mode & 0o077 == 0, f"existing loose-mode log should be tightened, got {oct(mode)}"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="File-mode test relies on POSIX chmod semantics")
+def test_rotated_and_fresh_files_are_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import stat
+    from datetime import UTC, datetime, timedelta
+
+    log_path = tmp_path / "audit.jsonl"
+    audit = AuditLog(log_path)
+    yesterday = datetime.now(tz=UTC) - timedelta(days=1)
+    os.utime(log_path, (yesterday.timestamp(), yesterday.timestamp()))
+    audit._last_rotation_check = yesterday.date()
+
+    audit.log(
+        AuditEvent(
+            instance="dev",
+            tool="odoo_search_read",
+            op="search_read",
+            model="res.partner",
+            result="ok",
+            record_count=1,
+            duration_ms=1,
+            dry_run=False,
+            details={},
+        )
+    )
+
+    rotated = log_path.with_name(f"audit-{yesterday.date().isoformat()}.jsonl")
+    for path in (log_path, rotated):
+        mode = stat.S_IMODE(path.stat().st_mode)
+        assert mode & 0o077 == 0, f"{path.name} must be owner-only, got {oct(mode)}"
+
+
 def test_log_rotates_on_date_change_mid_flight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -248,3 +304,103 @@ def test_log_rotates_on_date_change_mid_flight(
     # yesterday data — that all rotated out).
     assert len(today_lines) == 1
     assert today_lines[0]["tool"] == "odoo_search_read"
+
+
+# --- fail-closed BEFORE the mutation ---------------------------------------
+
+
+class _RecordingClient:
+    """Fake Odoo client that records whether a mutation was attempted."""
+
+    def __init__(self) -> None:
+        self.is_admin: bool | None = None
+        self.admin_reason: str | None = None
+        self.username = "u"
+        self.uid = 1
+        self.creates: list[tuple] = []
+
+    def ensure_authenticated(self) -> None:
+        return None
+
+    def fields_get(self, model: str, *, use_cache: bool = True) -> dict:
+        return {"id": {"type": "integer"}, "name": {"type": "char"}}
+
+    def create(self, model, values):
+        self.creates.append((model, values))
+        return 7
+
+
+def test_unwritable_audit_refuses_write_before_touching_odoo(tmp_path: Path) -> None:
+    """A write we cannot audit must never reach Odoo.
+
+    Auditing happens after the commit, so a broken log at that point can only
+    report an unaudited change — not prevent it. The preflight in ``_begin``
+    is what makes the fail-closed claim real.
+    """
+    dispatcher, app = _build_dispatcher(tmp_path)
+    fake = _RecordingClient()
+    app.instances["dev"].client = fake  # type: ignore[assignment]
+    # _build_dispatcher leaves the limiter unconfigured; configure it so the
+    # call reaches the audit preflight rather than tripping the rate limit.
+    app.rate_limiter.configure("dev", 300)
+
+    def _broken_preflight() -> None:
+        raise AuditLogError("disk full (simulated)")
+
+    app.audit.preflight = _broken_preflight  # type: ignore[method-assign]
+
+    contents = asyncio.run(
+        dispatcher.call(
+            "odoo_create",
+            {
+                "instance": "dev",
+                "model": "res.partner",
+                "values": {"name": "Acme"},
+                "dry_run": False,
+            },
+        )
+    )
+    payload = json.loads(contents[0].text)
+    assert payload["ok"] is False
+    assert payload["error_code"] == "audit_log_error"
+    # The decisive assertion: Odoo was never mutated.
+    assert fake.creates == [], "write reached Odoo despite an unwritable audit log"
+
+
+def test_preflight_passes_on_writable_log(tmp_path: Path) -> None:
+    log_path = tmp_path / "audit.jsonl"
+    audit = AuditLog(log_path)
+    audit.preflight()  # does not raise
+    # And it emits no record — preflight is a check, not an event.
+    before = len(_read_lines(log_path))
+    audit.preflight()
+    assert len(_read_lines(log_path)) == before
+
+
+def test_odoo_fault_text_withheld_from_audit_log() -> None:
+    """Odoo validation errors quote record values; those must not land in a
+    30-day log documented as containing no field values. The caller still
+    gets the full text in the tool response."""
+    from odoo_mcp.errors import OdooRemoteError
+
+    exc = OdooRemoteError(
+        "Odoo fault on res.partner.create: The email 'jan@acme.com' is already taken",
+        server_text=True,
+    )
+    # Caller-facing message keeps the detail.
+    assert "jan@acme.com" in exc.user_message
+    # Audit-facing message does not.
+    assert "jan@acme.com" not in exc.audit_message
+    assert "withheld" in exc.audit_message
+
+
+def test_non_server_errors_keep_their_audit_message() -> None:
+    """Messages we construct ourselves carry no record data, so they are
+    logged verbatim — the withholding is targeted, not blanket."""
+    from odoo_mcp.errors import ModelNotAllowedError, OdooRemoteError
+
+    ours = ModelNotAllowedError("Model 'ir.cron' is blocked by the built-in denylist")
+    assert ours.audit_message == ours.user_message
+
+    shape = OdooRemoteError("fields_get for 'res.partner' returned unexpected type str")
+    assert shape.audit_message == shape.user_message

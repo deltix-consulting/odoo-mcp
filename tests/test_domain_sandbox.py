@@ -18,6 +18,57 @@ def test_empty_domain_is_ok() -> None:
     assert sandbox_domain([], FIELDS) == []
 
 
+# --- redaction policy on filter fields (search/count oracle) ---------------
+
+_PII_FIELDS = frozenset({"name", "id", "vat", "wage", "access_token", "ssnid"})
+
+
+def test_filter_on_always_redacted_field_is_rejected() -> None:
+    # access_token is always-redacted; filtering on it is a prefix oracle
+    # that recovers the token (→ unauthenticated portal URL) without any
+    # row ever being returned.
+    with pytest.raises(DomainSandboxError, match="permanently redacted"):
+        sandbox_domain([("access_token", "=like", "abc%")], _PII_FIELDS, model="account.move")
+
+
+def test_filter_on_default_hidden_field_requires_optin() -> None:
+    # wage is default-hidden on hr.contract; filtering with '>' is a binary
+    # search that recovers the exact salary. Blocked without opt-in.
+    with pytest.raises(DomainSandboxError, match="sensitive"):
+        sandbox_domain([("wage", ">", 5000)], _PII_FIELDS, model="hr.contract")
+
+
+def test_filter_on_default_hidden_field_allowed_with_optin() -> None:
+    out = sandbox_domain(
+        [("wage", ">", 5000)],
+        _PII_FIELDS,
+        model="hr.contract",
+        allow_sensitive=frozenset({"wage"}),
+    )
+    assert out == [("wage", ">", 5000)]
+
+
+def test_optin_does_not_unlock_always_redacted() -> None:
+    # allow_sensitive can never re-enable an always-redacted field.
+    with pytest.raises(DomainSandboxError, match="permanently redacted"):
+        sandbox_domain(
+            [("access_token", "=", "x")],
+            _PII_FIELDS,
+            model="calendar.event",
+            allow_sensitive=frozenset({"access_token"}),
+        )
+
+
+def test_non_sensitive_filter_still_allowed_with_model() -> None:
+    out = sandbox_domain([("name", "ilike", "acme")], _PII_FIELDS, model="res.partner")
+    assert out == [("name", "ilike", "acme")]
+
+
+def test_policy_skipped_without_model_context() -> None:
+    # Legacy / defense-in-depth call shape: no model → no redaction policy.
+    assert sandbox_domain([("wage", ">", 1)], _PII_FIELDS) == [("wage", ">", 1)]
+
+
 def test_simple_leaf_is_ok() -> None:
     out = sandbox_domain([("name", "ilike", "acme")], FIELDS)
     assert out == [("name", "ilike", "acme")]

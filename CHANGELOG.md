@@ -10,6 +10,131 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-08-20
+
+### Changed
+
+- **`unlock_ttl_seconds` is now per-instance configurable.** The
+  unlock window length was hardcoded (15 min). Tenants with tight
+  change-control regimes (SOX-ish) want a shorter window; batch-
+  automation tenants want longer. Configure per instance via
+  `unlock_ttl_seconds = 300` (or up to 3600) in the
+  `[instances.NAME]` TOML section. Bounded 60..3600 at config-load:
+  sub-60s is operationally unusable (the dry-run review takes
+  longer than that), above 3600s defeats the operator-in-the-loop
+  pattern the unlock exists to enforce. The sliding-window
+  `touch()` on every commit reads the window-specific TTL back, so
+  a tight tenant keeps that posture under continuous activity —
+  the sliding window doesn't silently promote them to the default.
+
+- **`DEFAULT_MAX_COMMITS_PER_UNLOCK` bumped from 10 to 50.** The
+  original 10 was rooted in "one mistake shouldn't cascade far",
+  but the v0.18.0 payload-digest binding already binds each
+  commit to its previewed content — a bigger budget cannot make
+  a single approval cascade further. 10 was blocking real batch
+  flows mid-run and forcing operators through unnecessary
+  re-unlocks. The `max_commits_per_unlock` per-instance override
+  is unchanged; tenants that want the tight-window regime still
+  drop it back explicitly.
+
+  Four new tests pin the default constants, the per-instance
+  override, the sliding-window TTL preservation, and the config-
+  parser bounds (below 60s / above 3600s both refused loudly).
+  834 tests total (was 780).
+
+### Security
+
+- **Domain / order fields now obey the read-redaction policy (closes a
+  search/count value oracle).** `sandbox_domain` and a new
+  `validate_order` reject filtering or sorting on an always-redacted
+  field (`password`, `*_token`, `*_secret`, the salary family) and
+  require the per-call `allow_sensitive_fields` opt-in for a
+  default-hidden field (VAT, IBAN, SSN, wage, `access_token`, ...).
+  Previously a field that could not be *read* could still be *filtered
+  on*: `odoo_search_count(domain=[('wage','>',N)])` was a binary-search
+  oracle that recovered an exact salary in ~15 calls, and
+  `[('access_token','=like','abc%')]` prefix-extracted an always-redacted
+  portal join token. Enforced at all three read call sites
+  (`search_read`, `search_count`, `read_group`). Grouping was already
+  blocked for the same reason; domains and order were the remaining gaps.
+
+- **Relational (x2many / many2one) write payloads are validated against
+  the model gates (closes a create/write bypass).** `validate_write_values`
+  only checked top-level key names, so Odoo command tuples that
+  create/update/link records on *other* models slipped through:
+  `message_ids=[(0,0,{...})]` forged a chatter message with a spoofed
+  author (bypassing the `mail.message` write-blocklist and the
+  `odoo_send_message` opt-in), `user_ids=[(1,uid,{'password':...})]`
+  reset a login password, and `groups_id=[(4,admin_group_id)]` self-granted
+  a group. Every command's target model now passes the same denylist +
+  allowlist + write-blocklist gates the top-level model does, and nested
+  create/update value dicts recurse through the full field policy (bounded
+  nesting depth). Legitimate nested writes (e.g. a sale order with
+  `order_line`) are unaffected in open mode; strict-allowlist instances
+  must list related models they write through.
+
+- **`ODOO_MCP_DISABLE_TOOLS` is now enforced at call time, not just in
+  `tools/list`.** Hiding a tool from the advertisement never stopped a
+  client — or a hallucinating / prompt-injected model — from sending the
+  tool name directly; the dispatcher now re-reads the env var per call and
+  refuses a disabled tool with `operation_not_allowed`. Matches the
+  behaviour the docstrings and SECURITY.md already claimed.
+
+- **Audit log files are created owner-only (`chmod 0600`) and existing
+  loose-mode logs are remediated on startup.** The audit log records
+  operational metadata (instance names, models, tool names, timestamps)
+  that should not be readable by other local users on a shared machine —
+  the same posture the config file and fields cache already enforced. The
+  current file, rotated dated files, and the fresh file after a mid-flight
+  rotation are all locked down.
+
+- **`odoo-mcp update` now installs the code it verified.** The flow
+  verified the release tarball's build provenance and then ran
+  `git pull --ff-only origin <branch>` — checking one artifact and
+  installing another, so a compromised branch tip passed verification
+  untouched. The update now resolves the verified tag to its commit and
+  fast-forwards to that commit; if the tag cannot be resolved it refuses
+  rather than falling back to the branch tip. `--skip-verification` keeps
+  the old branch-tip behaviour for operators who explicitly opt out.
+
+- **An artifact with no attestation is now a hard failure.**
+  `"no attestation"` / `"404"` / `"not found"` were classified
+  *environmental*, which downgraded the most likely tampering signal to a
+  `Proceed without verification? [y/N]` prompt. We only reach that branch
+  after the tarball downloaded successfully, so "exists but carries no
+  provenance" is exactly the shape of a substituted release. Genuine
+  infrastructure failures (Sigstore/TUF, network, missing `gh`) remain
+  soft-fails.
+
+- **Writes are refused before reaching Odoo when the audit log is
+  unwritable.** Auditing a successful write happens *after* the write
+  commits, so a broken log could only report an unaudited mutation, never
+  prevent it — and reporting it as a failure invited the agent to retry and
+  write twice. Write-path calls now preflight the audit log in `_begin`,
+  so an unwritable log fails the call before anything changes in Odoo.
+
+- **`odoo_enable_prod_writes` is rate-limited and audit-preflighted.** It
+  bypasses `_begin`, so unlocking was free and unbounded: an agent could
+  re-call it in a loop to keep the 15-minute prod-write window alive
+  indefinitely and reset the per-unlock commit budget each time, turning
+  two of the four prod-write gates into no-ops.
+
+- **Password-based API-key generation refuses cleartext transport.** The
+  setup wizard and `renew-key` POST the operator's real Odoo password to
+  `/web/session/authenticate`; the wizard otherwise accepts `http://` URLs,
+  so a dev-mode config silently sent the most sensitive credential the tool
+  handles over the network in the clear. HTTPS is now required (loopback
+  exempt, since that traffic never leaves the host), and an
+  https→http redirect is refused rather than followed.
+
+- **Odoo fault text is withheld from the audit log.** `OdooRemoteError`
+  embedded the server's `faultString` verbatim, and Odoo validation and
+  constraint errors routinely quote the offending record values — putting
+  field values, often PII, into a 30-day log documented as containing
+  none. The audit entry now records a value-free summary; the full text
+  still reaches the caller in the tool response. Errors this package
+  constructs itself are logged verbatim as before.
+
 ## [0.26.0] - 2026-06-16
 
 ### Added

@@ -20,6 +20,7 @@ The class exposes only the primitives the dispatcher actually needs:
 from __future__ import annotations
 
 import base64
+import contextlib
 import http.client
 import logging
 import os
@@ -28,7 +29,7 @@ import ssl
 import threading
 import xmlrpc.client
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, Final
 from urllib.parse import urlparse
 
@@ -50,6 +51,26 @@ _FROZEN_CONTEXT: Final[dict[str, Any]] = {"lang": "en_US"}
 # modules) would otherwise grow ``_fields_cache`` without bound. 64 covers
 # typical interactive sessions; bump via constructor kwarg if needed.
 _DEFAULT_FIELDS_CACHE_MAX_SIZE: Final[int] = 64
+
+# Odoo methods that are safe for the stdlib transport to re-send after a
+# dropped keep-alive connection. Everything reaching :meth:`OdooClient._execute`
+# that is NOT in this set — ``create`` / ``write`` / ``unlink`` /
+# ``message_post`` and every workflow method routed through
+# ``call_document_action`` — is treated as non-idempotent and gets the retry
+# suppressed. Fail-closed on purpose: the ``security.document_actions`` map
+# supplies arbitrary method names, and a new row there must never silently
+# become retryable.
+_RETRY_SAFE_METHODS: Final[frozenset[str]] = frozenset(
+    {
+        "check_access_rights",
+        "fields_get",
+        "has_group",
+        "read",
+        "read_group",
+        "search_count",
+        "search_read",
+    }
+)
 
 
 class _TimeoutHTTPConnection(http.client.HTTPConnection):
@@ -113,10 +134,41 @@ class _ConnectionRecyclingMixin:
     ``Request-sent`` state — every later call on it then fails with
     ``ResponseNotReady`` until the process restarts. Closing on failure
     means the *next* call dials a fresh connection instead of inheriting
-    the poisoned one. The stdlib's own once-only retry inside
-    ``Transport.request`` (RemoteDisconnected / ECONNRESET) still runs
-    first; we only see the exception once that retry is also exhausted.
+    the poisoned one.
+
+    The mixin also owns the *retry* decision. ``Transport.request`` wraps
+    ``single_request`` in a ``for i in (0, 1)`` loop that silently re-sends
+    the whole request body once on ``RemoteDisconnected`` / ``ECONNRESET``
+    / ``ECONNABORTED`` / ``EPIPE``. That loop exists for the benign case —
+    the server reaped an idle keep-alive connection *before* reading our
+    request — but it cannot distinguish that from a server that read the
+    request, committed it, and then died before answering (worker timeout,
+    gunicorn kill, proxy dropping the upstream). For a ``create`` the
+    re-send then makes a *second* record; for ``write`` / a workflow action
+    it re-applies a state transition that already happened and surfaces as
+    a spurious constraint error that hides the real success.
+
+    So non-idempotent calls bypass the loop and go straight to
+    ``single_request``: one attempt, and a transport error is reported
+    honestly instead of being papered over. Reads keep the retry — they are
+    the calls that actually benefit from it and re-sending them is free.
+    Suppression is per-thread because a transport is shared by every caller
+    of one :class:`OdooClient`.
     """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._retry_state = threading.local()
+
+    @contextlib.contextmanager
+    def suppress_retry(self) -> Iterator[None]:
+        """Disable the stdlib re-send for the duration of the block."""
+        previous = getattr(self._retry_state, "suppressed", False)
+        self._retry_state.suppressed = True
+        try:
+            yield
+        finally:
+            self._retry_state.suppressed = previous
 
     # Parameter types are Any on purpose: the stdlib transports type these
     # via typeshed-private aliases (_HostType / SizedBuffer) that we can't
@@ -130,6 +182,8 @@ class _ConnectionRecyclingMixin:
         verbose: Any = False,
     ) -> Any:
         try:
+            if getattr(self._retry_state, "suppressed", False):
+                return self.single_request(host, handler, request_body, verbose)  # type: ignore[attr-defined]
             return super().request(host, handler, request_body, verbose)  # type: ignore[misc]
         except Exception:
             self.close()  # type: ignore[attr-defined]
@@ -333,8 +387,10 @@ class OdooClient:
         if parsed.scheme not in ("http", "https"):
             raise OdooTransportError(f"Unsupported URL scheme: {parsed.scheme!r}")
 
-        self._common = self._make_proxy(f"{instance.url}/xmlrpc/2/common")
-        self._object = self._make_proxy(f"{instance.url}/xmlrpc/2/object")
+        self._common, _ = self._make_proxy(f"{instance.url}/xmlrpc/2/common")
+        # The object transport is kept alongside the proxy: ``_execute`` needs
+        # it to suppress the stdlib re-send on non-idempotent calls.
+        self._object, self._object_transport = self._make_proxy(f"{instance.url}/xmlrpc/2/object")
         self._uid: int | None = None
         self._is_admin: bool | None = None  # set after authenticate()
         self._admin_reason: str | None = None  # human-readable why it's admin
@@ -368,16 +424,25 @@ class OdooClient:
             self._credentials = loaded
             return loaded
 
-    def _make_proxy(self, url: str) -> xmlrpc.client.ServerProxy:
+    def _make_proxy(self, url: str) -> tuple[xmlrpc.client.ServerProxy, _ConnectionRecyclingMixin]:
+        """Build a ServerProxy and hand back its transport alongside it.
+
+        ``ServerProxy`` stores the transport under a name-mangled private
+        attribute, so the caller keeps its own reference rather than reaching
+        into ``_ServerProxy__transport``.
+        """
         parsed = urlparse(url)
+        transport: xmlrpc.client.Transport
         if parsed.scheme == "https":
-            transport: xmlrpc.client.Transport = _TimeoutSafeTransport(
+            transport = _TimeoutSafeTransport(
                 timeout=float(self._instance.timeout_seconds),
                 context=self._ssl_context,
             )
         else:
             transport = _TimeoutTransport(timeout=float(self._instance.timeout_seconds))
-        return xmlrpc.client.ServerProxy(url, transport=transport, allow_none=True)
+        proxy = xmlrpc.client.ServerProxy(url, transport=transport, allow_none=True)
+        assert isinstance(transport, _ConnectionRecyclingMixin)  # noqa: S101 — MRO invariant
+        return proxy, transport
 
     def authenticate(self) -> int:
         """Perform the Odoo authenticate call and cache the resulting uid.
@@ -828,22 +893,37 @@ class OdooClient:
         for ensuring ``method`` is one of the allowlisted operations (see
         :mod:`odoo_mcp.security.allowlist`) — this client itself does not
         expose ``execute_kw`` to callers.
+
+        It is also where the transport-level retry decision is made: only
+        the read methods in :data:`_RETRY_SAFE_METHODS` may be re-sent after
+        a dropped keep-alive connection. See
+        :class:`_ConnectionRecyclingMixin` for why re-sending a write is
+        worse than failing.
         """
         merged_kwargs = dict(kwargs)
         merged_kwargs["context"] = dict(_FROZEN_CONTEXT)
         creds = self._get_credentials()
+        retry_guard: contextlib.AbstractContextManager[None] = (
+            contextlib.nullcontext()
+            if method in _RETRY_SAFE_METHODS
+            else self._object_transport.suppress_retry()
+        )
         try:
-            return self._object.execute_kw(
-                self._instance.database,
-                self.uid,
-                creds.reveal_for_rpc(),
-                model,
-                method,
-                args,
-                merged_kwargs,
-            )
+            with retry_guard:
+                return self._object.execute_kw(
+                    self._instance.database,
+                    self.uid,
+                    creds.reveal_for_rpc(),
+                    model,
+                    method,
+                    args,
+                    merged_kwargs,
+                )
         except xmlrpc.client.Fault as exc:
-            raise OdooRemoteError(f"Odoo fault on {model}.{method}: {exc.faultString}") from exc
+            raise OdooRemoteError(
+                f"Odoo fault on {model}.{method}: {exc.faultString}",
+                server_text=True,
+            ) from exc
         except TimeoutError as exc:
             raise OdooTransportError(
                 f"Timeout calling {model}.{method} on {self._instance.name!r} "

@@ -142,6 +142,15 @@ enforced:
   distinct values.
 - Binary fields are replaced with a `<binary:N bytes>` placeholder
   unless `include_binary=true`.
+- **Filtering and ordering obey the same policy as reading.** A field
+  you cannot read cannot be used as a `domain` filter or an `order`
+  term either. Always-redacted fields are refused outright; default-
+  hidden fields require the same `allow_sensitive_fields` opt-in.
+  Without this, `odoo_search_count` (a bare match count, no rows to
+  redact) is a value oracle: `[('wage','>',N)]` binary-searches an
+  exact salary, `[('access_token','=like','abc%')]` prefix-extracts a
+  redacted token. Grouping was already blocked for this reason; domains
+  and order are now closed too.
 
 **4. Privilege escalation via domain traversal.** The domain sandbox
 (`src/odoo_mcp/security/domain.py`) walks every leaf tuple and rejects
@@ -176,6 +185,19 @@ Model-level allowlist runs independently: even within the allowed
 operations, the server rejects any call targeting a model outside the
 per-instance `allowed_models` frozen set.
 
+**Relational write payloads are policed against the same gates.** Odoo
+interprets an x2many field's write value as command tuples that
+create / update / delete / link records on the *related* model
+(`message_ids=[(0,0,{...})]`, `user_ids=[(1,uid,{...})]`,
+`groups_id=[(4,id)]`). Validating only the top-level field names would
+let a write reach a model the caller can't name — forging a
+`mail.message`, resetting a password on `res.users`, granting a
+`res.groups`. So every command's target model runs through the same
+denylist + allowlist + write-blocklist checks the top-level model
+does, and nested value dicts recurse through the always-redacted /
+default-hidden field policy (with bounded nesting depth). Legitimate
+nested writes such as a sale order with `order_line` are unaffected.
+
 **7. Read-only model enforcement.** A small hardcoded
 `MODEL_WRITE_BLOCKLIST` (`mail.message`, `mail.followers`,
 `mail.notification`) is exposed for *reading* — so Claude can answer
@@ -193,8 +215,12 @@ narrow the surface further without a code change:
   external consultants.
 - `ODOO_MCP_DISABLE_TOOLS=odoo_create,odoo_write,...` filters tool
   names out of the MCP `tools/list` advertisement so a well-behaved
-  client never sees them. Complements `ODOO_MCP_READ_ONLY`: that flag
-  *refuses*, this one *hides*.
+  client never sees them, **and** the dispatcher refuses a disabled
+  tool if a client sends the name directly — hiding a tool from the
+  list never stopped a hallucinating or prompt-injected model from
+  calling it by name, so both the advertisement and the call path are
+  gated. Complements `ODOO_MCP_READ_ONLY`, which refuses the whole
+  write surface regardless of tool name.
 - `ODOO_MCP_TOOL_LATENCY_BUDGET_MS=2000` is observability — emits a
   `slow_tool_call` warning whenever a successful call exceeds the
   budget. Doesn't block anything; helps spot a runaway loop or a
@@ -255,6 +281,21 @@ checkout, or a compromised maintainer machine. `odoo-mcp update`
 performs the same check automatically before applying an update; pass
 `--skip-verification` only if you have a specific reason to bypass it.
 
+Two properties make that check meaningful rather than decorative:
+
+- **The update installs the commit it verified.** `odoo-mcp update`
+  resolves the verified release tag to its commit and fast-forwards to
+  *that*, instead of pulling `origin/<branch>`. Verifying a release
+  tarball and then pulling the branch tip would check one artifact and
+  install another, so a compromised branch tip would pass unnoticed. If
+  the branch is ahead of the release, the extra commits carry no
+  attestation and are deliberately left alone.
+- **Absence of provenance is a hard failure.** An artifact that
+  downloads fine but has no attestation is refused, not downgraded to a
+  "proceed anyway?" prompt — that is precisely the shape a substituted
+  release takes. Only genuine infrastructure problems (no `gh`, offline,
+  Sigstore/TUF trouble) fall back to a warning.
+
 ## Scope and shared responsibility
 
 **This MCP is designed for a single Odoo deployment per install.** The
@@ -305,7 +346,11 @@ The MCP runs entirely on your machine. Specifically:
 - **Audit log stays local.** Every tool call is logged to
   `~/.odoo-mcp/audit.jsonl` on your machine. It records metadata
   (timestamp, tool name, instance, count, duration) but never
-  field values, never queries, never results.
+  field values, never queries, never results. The log files are
+  created owner-only (`chmod 0600`) — including rotated dated files —
+  so other local users on a shared machine cannot read your
+  operational metadata; existing loose-mode logs are tightened on
+  the next startup.
 
 ## User responsibilities
 

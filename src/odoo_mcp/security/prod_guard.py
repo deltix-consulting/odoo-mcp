@@ -40,9 +40,28 @@ from typing import Any
 
 from ..errors import ProdGuardError
 
-_UNLOCK_TTL_SECONDS = 15 * 60
+# Default unlock window: 15 minutes. Configurable per-instance via
+# ``unlock_ttl_seconds`` in TOML. The sliding window (see ``touch``)
+# extends this on every commit, so the default only matters for the
+# gap between unlock and the first commit — bumped from 5 to 15 minutes
+# in v0.20.x so an agent that spends time planning before the first
+# write doesn't need a re-unlock. Operators who want tighter windows
+# (SOX-style change-control) drop it back per-instance.
+DEFAULT_UNLOCK_TTL_SECONDS = 15 * 60
+# Confirmation-token TTL: how long a dry-run's token stays consumable.
+# Hardcoded — this is a review-then-commit hygiene value, not something
+# an operator wants to tune per instance. 5 min is long enough that a
+# human can read the preview and decide; short enough that a forgotten
+# token doesn't linger indefinitely.
 _PENDING_TOKEN_TTL_SECONDS = 5 * 60
-DEFAULT_MAX_COMMITS_PER_UNLOCK = 10
+# Default commit budget per unlock. Bumped from 10 → 50 in v0.27.0:
+# 10 was rooted in a caution about single mistakes cascading, but with
+# the payload-digest token binding (v0.18.0) each commit is bound to
+# exactly its previewed content, so batch flows can safely burn more
+# tokens without weakening the operator-in-the-loop property. Still
+# configurable per-instance via ``max_commits_per_unlock`` for tenants
+# who want tighter windows.
+DEFAULT_MAX_COMMITS_PER_UNLOCK = 50
 
 
 def compute_payload_digest(payload: Mapping[str, Any]) -> str:
@@ -86,6 +105,12 @@ class _UnlockState:
     # extends ``expires_at`` and leaves this field untouched — touching
     # is not a fresh unlock.
     unlocked_at: float
+    # TTL this window was created with, in seconds. ``touch()`` reads
+    # this back so the sliding window respects the operator's per-
+    # instance ``unlock_ttl_seconds`` — a tenant that set 60 seconds
+    # keeps that tight posture even under continuous activity, instead
+    # of getting silently promoted to the module default.
+    ttl_seconds: int
 
 
 @dataclass(slots=True)
@@ -136,12 +161,20 @@ class ProdGuard:
         *,
         now: float | None = None,
         max_commits: int = DEFAULT_MAX_COMMITS_PER_UNLOCK,
+        ttl_seconds: int = DEFAULT_UNLOCK_TTL_SECONDS,
     ) -> float:
         """Unlock prod writes for ``instance``.
 
         Returns the expiry timestamp (monotonic seconds) so the caller can
         communicate when writes will auto-relock. The unlock also gets a
         burst budget of ``max_commits`` real commits; dry-runs don't count.
+
+        ``ttl_seconds`` is the initial window length. Operators tune it
+        per-instance via ``unlock_ttl_seconds`` in TOML; the dispatcher
+        pulls the instance-configured value and passes it here. The
+        sliding-window behaviour in :meth:`touch` reads ``ttl_seconds``
+        off the stored state, so a tenant with a short TTL keeps that
+        posture even under continuous activity.
 
         Re-unlocking while a window is still active **renews it in place**:
         expiry and commit budget reset, but the window identity
@@ -157,18 +190,20 @@ class ProdGuard:
                 f"Instance {instance!r} is not flagged as production — no unlock needed."
             )
         current = now if now is not None else time.monotonic()
-        expiry = current + _UNLOCK_TTL_SECONDS
+        expiry = current + ttl_seconds
         with self._lock:
             state = self._unlocked.get(instance)
             if state is not None and state.expires_at >= current:
                 # Active window: renew in place, keep the identity.
                 state.expires_at = expiry
                 state.commits_remaining = max_commits
+                state.ttl_seconds = ttl_seconds
             else:
                 self._unlocked[instance] = _UnlockState(
                     expires_at=expiry,
                     commits_remaining=max_commits,
                     unlocked_at=current,
+                    ttl_seconds=ttl_seconds,
                 )
         return expiry
 
@@ -194,12 +229,18 @@ class ProdGuard:
             return state.commits_remaining
 
     def touch(self, instance: str, *, now: float | None = None) -> None:
-        """Extend the unlock window on activity."""
+        """Extend the unlock window on activity (sliding window).
+
+        Uses the TTL that was configured when ``unlock`` was called for
+        this instance, so a tenant with a tight 60-second TTL keeps
+        that tight posture under continuous activity — the sliding
+        window doesn't quietly promote them to the default 15 min.
+        """
         current = now if now is not None else time.monotonic()
         with self._lock:
             state = self._unlocked.get(instance)
             if state is not None:
-                state.expires_at = current + _UNLOCK_TTL_SECONDS
+                state.expires_at = current + state.ttl_seconds
 
     # --- Write gate ---------------------------------------------------------
 

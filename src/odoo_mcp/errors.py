@@ -110,6 +110,20 @@ class OdooMcpError(Exception):
         return self.__str__()
 
     @property
+    def audit_message(self) -> str:
+        """The message safe to persist in the audit log.
+
+        Defaults to :attr:`user_message` — every message this package
+        constructs is built from operator-supplied config and our own
+        literals, so it carries no record data. Subclasses that embed text
+        supplied by the *Odoo server* override this: the audit log is
+        retained for 30 days and documented as containing no field values,
+        while a tool response is transient and shown to the operator, so the
+        two have different disclosure budgets.
+        """
+        return self.user_message
+
+    @property
     def hint(self) -> str | None:
         """Optional actionable hint for the MCP client. Override in subclasses."""
         return None
@@ -256,3 +270,28 @@ class OdooRemoteError(OdooMcpError):
     """Odoo returned a fault (validation error, access rights, etc.)."""
 
     code = "odoo_remote"
+
+    def __init__(self, message: str, *, server_text: bool = False) -> None:
+        """``server_text=True`` marks the message as containing Odoo's own
+        fault string, which must be withheld from the audit log."""
+        super().__init__(message)
+        self._server_text = server_text
+
+    @property
+    def audit_message(self) -> str:
+        """Withhold Odoo-supplied fault text from the audit log.
+
+        Odoo's validation and constraint errors routinely quote the offending
+        record values ("The email 'jan@acme.com' is already taken", uniqueness
+        violations echoing the duplicate value). Persisting that verbatim would
+        put field values — often PII — into a 30-day log that SECURITY.md says
+        records none. The structured event already carries instance, tool, op,
+        model, and the error code, which is what an operator actually triages
+        on; the full text still reaches the caller in the tool response.
+        """
+        if not self._server_text:
+            return self.user_message
+        return (
+            "Odoo returned a fault; server text withheld from the audit log "
+            "because it can quote record values. See the tool response for detail."
+        )

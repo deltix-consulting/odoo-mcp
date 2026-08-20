@@ -253,3 +253,100 @@ def test_print_check_reports_update_available(
     assert rc == 0
     assert "Update available: 0.17.4" in out
     assert "0.15.10" in out
+
+
+# --- supply chain: the installed code must be the code we verified ---------
+
+
+def _fake_git(calls: list[list[str]], tag_commit: str | None):
+    """Return a _git stub that records argv and answers rev-parse queries."""
+
+    class _Result:
+        def __init__(self, out: str = "", rc: int = 0) -> None:
+            self.stdout = out
+            self.stderr = ""
+            self.returncode = rc
+
+    def _git(project_dir: Path, *args: str, check: bool = True) -> Any:
+        calls.append(list(args))
+        if args[:1] == ("rev-parse",):
+            ref = args[-1]
+            if "^{commit}" in ref:
+                if tag_commit is None:
+                    return _Result("", 1)
+                return _Result(tag_commit)
+        return _Result("")
+
+    return _git
+
+
+def test_resolve_update_target_pins_to_verified_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The attestation verifies release T; the update must land on T's commit,
+    NOT on the branch tip. Otherwise we verify one artifact and install another."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(update_cli, "_git", _fake_git(calls, "cafe1234deadbeef"))
+
+    target = update_cli._resolve_update_target(
+        Path("/proj"), "main", "v0.26.0", upstream="tipoftheBRANCH999"
+    )
+    assert target is not None
+    commit, desc = target
+    assert commit == "cafe1234deadbeef"
+    assert commit != "tipoftheBRANCH999"
+    assert "v0.26.0" in desc
+
+
+def test_resolve_update_target_refuses_when_tag_unresolvable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the verified tag can't be resolved locally we must refuse rather than
+    silently fall back to the unverified branch tip."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(update_cli, "_git", _fake_git(calls, None))
+
+    target = update_cli._resolve_update_target(
+        Path("/proj"), "main", "v9.9.9", upstream="tipoftheBRANCH999"
+    )
+    assert target is None
+
+
+def test_resolve_update_target_unverified_uses_branch_tip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--skip-verification (verified_tag=None) keeps the legacy branch-tip
+    behaviour — the operator explicitly opted out."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(update_cli, "_git", _fake_git(calls, "cafe1234deadbeef"))
+
+    target = update_cli._resolve_update_target(
+        Path("/proj"), "main", None, upstream="tipoftheBRANCH999"
+    )
+    assert target == ("tipoftheBRANCH999", "origin/main")
+
+
+def test_handle_verification_returns_tag_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(update_cli, "fetch_latest_tag", lambda: "v1.2.3")
+    monkeypatch.setattr(
+        update_cli, "verify_release_attestation", lambda tag: (True, "verified against wf")
+    )
+    proceed, tag = update_cli._handle_verification(skip=False)
+    assert proceed is True
+    assert tag == "v1.2.3"
+
+
+def test_handle_verification_hard_failure_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(update_cli, "fetch_latest_tag", lambda: "v1.2.3")
+    monkeypatch.setattr(
+        update_cli,
+        "verify_release_attestation",
+        lambda tag: (False, "verification failed: no attestations found"),
+    )
+    proceed, tag = update_cli._handle_verification(skip=False)
+    assert proceed is False
+    assert tag is None
+
+
+def test_handle_verification_skip_returns_no_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    proceed, tag = update_cli._handle_verification(skip=True)
+    assert proceed is True
+    assert tag is None

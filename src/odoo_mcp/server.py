@@ -44,11 +44,12 @@ def _disabled_tools() -> frozenset[str]:
     """Return tool names hidden by ``ODOO_MCP_DISABLE_TOOLS``.
 
     Comma-separated list (whitespace tolerated). Empty / unset → no tools
-    hidden. The env var only filters the ``tools/list`` advertisement —
-    direct calls to a hidden tool would still go through the dispatcher
-    and be answered as "Unknown tool", which is the desired effect: a
-    well-behaved client never sees the tool, and a misbehaving one cannot
-    invoke it.
+    hidden. This filters the ``tools/list`` advertisement so a well-behaved
+    client never sees the tool. Enforcement is independent: the dispatcher
+    re-reads the same env var per call (see
+    :func:`odoo_mcp.dispatcher._disabled_tool_names`) and refuses a disabled
+    tool sent by name directly, so a misbehaving or prompt-injected client
+    cannot invoke it either.
     """
     raw = os.environ.get("ODOO_MCP_DISABLE_TOOLS", "")
     names = {n.strip() for n in raw.split(",") if n.strip()}

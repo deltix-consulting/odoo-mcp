@@ -29,9 +29,11 @@ allowlist. This sandbox is defense in depth.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Final
 
 from ..errors import DomainSandboxError
+from .fields import is_always_redacted_with_extra, is_default_hidden
 
 _ALLOWED_OPS: Final[frozenset[str]] = frozenset(
     {
@@ -59,11 +61,37 @@ _MAX_LEAVES: Final[int] = 32
 _MAX_VALUE_LIST_LEN: Final[int] = 200
 
 
-def sandbox_domain(domain: Any, known_fields: frozenset[str]) -> list[Any]:
+def sandbox_domain(
+    domain: Any,
+    known_fields: frozenset[str],
+    *,
+    model: str | None = None,
+    allow_sensitive: frozenset[str] = frozenset(),
+    instance_overrides: dict[str, frozenset[str]] | None = None,
+    extra_redacted: tuple[re.Pattern[str], ...] = (),
+) -> list[Any]:
     """Validate and return a normalized copy of ``domain``.
 
     ``known_fields`` is the set of fields on the target model (as returned by
     ``fields_get``). Only those are permitted as leaf field names.
+
+    **Redaction policy on filter fields.** When ``model`` is supplied, each
+    leaf's field is run through the same redaction policy the read path uses:
+    an always-redacted field (``password`` / ``*_token`` / ``*_secret`` / the
+    salary-family patterns) can never be filtered on, and a default-hidden
+    field (VAT, IBAN, SSN, wage, ...) requires the caller to opt in via
+    ``allow_sensitive``. This closes the search/count *oracle*: filtering on a
+    field you cannot read (e.g. ``[('wage','>',5000)]`` with ``search_count``,
+    or ``[('access_token','=like','abc%')]``) would otherwise let a caller
+    recover a hidden value one comparison at a time without any row ever being
+    returned for redaction to act on. Grouping is already blocked for the same
+    reason (:func:`odoo_mcp.security.fields.validate_groupby`); domains are the
+    other value-revealing surface.
+
+    When ``model`` is ``None`` the policy check is skipped — this is the bare
+    defense-in-depth call shape used by unit tests, where the model + field
+    allowlisting has been asserted separately. All dispatcher call sites pass
+    ``model``.
 
     Returns a list that is safe to pass straight to ``search_read``. The
     returned list is a fresh copy — the caller's input is never mutated.
@@ -88,7 +116,16 @@ def sandbox_domain(domain: Any, known_fields: frozenset[str]) -> list[Any]:
             leaf_count += 1
             if leaf_count > _MAX_LEAVES:
                 raise DomainSandboxError(f"Domain has more than {_MAX_LEAVES} leaves — refusing.")
-            normalized.append(_validate_leaf(element, known_fields))
+            normalized.append(
+                _validate_leaf(
+                    element,
+                    known_fields,
+                    model=model,
+                    allow_sensitive=allow_sensitive,
+                    instance_overrides=instance_overrides,
+                    extra_redacted=extra_redacted,
+                )
+            )
             continue
 
         raise DomainSandboxError(
@@ -99,7 +136,15 @@ def sandbox_domain(domain: Any, known_fields: frozenset[str]) -> list[Any]:
     return normalized
 
 
-def _validate_leaf(leaf: Any, known_fields: frozenset[str]) -> tuple[str, str, Any]:
+def _validate_leaf(
+    leaf: Any,
+    known_fields: frozenset[str],
+    *,
+    model: str | None = None,
+    allow_sensitive: frozenset[str] = frozenset(),
+    instance_overrides: dict[str, frozenset[str]] | None = None,
+    extra_redacted: tuple[re.Pattern[str], ...] = (),
+) -> tuple[str, str, Any]:
     if len(leaf) != 3:
         raise DomainSandboxError(f"Domain leaf must be a 3-tuple, got {leaf!r}.")
     field, operator, value = leaf
@@ -121,6 +166,24 @@ def _validate_leaf(leaf: Any, known_fields: frozenset[str]) -> tuple[str, str, A
             f"Field {field!r} does not exist on the target model. "
             f"Use odoo_describe_model to see available fields."
         )
+
+    # Redaction policy on the filter field (see sandbox_domain docstring).
+    # Only enforced when the caller supplies the model context.
+    if model is not None:
+        if is_always_redacted_with_extra(field, extra_redacted):
+            raise DomainSandboxError(
+                f"Field {field!r} is permanently redacted and cannot be used as a "
+                f"filter — filtering on it would leak its value via the match/count "
+                f"result even though the value is never returned."
+            )
+        if is_default_hidden(model, field, instance_overrides=instance_overrides) and (
+            field not in allow_sensitive
+        ):
+            raise DomainSandboxError(
+                f"Field {field!r} on {model!r} is sensitive and cannot be used as a "
+                f"filter without opting in: filtering reveals its values through the "
+                f"result set. Pass allow_sensitive_fields=[{field!r}, ...] to unlock."
+            )
 
     if not isinstance(operator, str) or operator not in _ALLOWED_OPS:
         raise DomainSandboxError(

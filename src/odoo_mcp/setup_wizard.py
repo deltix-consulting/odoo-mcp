@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -431,6 +432,88 @@ def _mcp_key_name(instance_name: str) -> str:
     return f"odoo-mcp ({instance_name}) on {host}"
 
 
+def _is_loopback_host(host: str) -> bool:
+    """True if *host* resolves to the local machine by name/literal alone.
+
+    Loopback traffic never reaches a network interface, so cleartext there
+    is not observable by a third party. We match literally rather than via
+    DNS resolution: a name that merely *resolves* to 127.0.0.1 today could
+    resolve elsewhere tomorrow, and we don't want the password's safety to
+    depend on the current contents of a resolver cache.
+    """
+    bare = (host or "").strip().lower().strip("[]")
+    if bare in {"localhost", "::1", "127.0.0.1"}:
+        return True
+    return bare.startswith("127.") and bare.replace(".", "").isdigit()
+
+
+def _refuse_cleartext_password_transport(base_url: str) -> None:
+    """Refuse to POST an Odoo password over an unencrypted connection.
+
+    The key-generation flow sends the user's real Odoo password (not an API
+    key) to ``/web/session/authenticate``. Over ``http://`` that password —
+    and the session cookie it returns — crosses the network in the clear,
+    readable by anyone on the path. The wizard otherwise accepts ``http://``
+    URLs for dev instances, so without this check a dev-mode config
+    silently downgrades the most sensitive credential the tool handles.
+
+    Loopback is exempt (see :func:`_is_loopback_host`). Everything else must
+    be HTTPS; the operator can still create the API key by hand in Odoo's
+    Account Security UI.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme == "http" and _is_loopback_host(parsed.hostname or ""):
+        return
+    raise _KeyGenError(
+        f"Refusing to send your Odoo password over {parsed.scheme or 'an unknown'}:// "
+        f"to {parsed.hostname or base_url!r}.\n"
+        "  Password-based key generation transmits your real Odoo password, so it "
+        "requires HTTPS (loopback is exempt).\n"
+        "  Either point this instance at its https:// URL, or create the API key "
+        "manually in Odoo: Settings -> Users -> your user -> Account Security -> "
+        "New API Key, then paste it here."
+    )
+
+
+class _NoDowngradeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that refuses an https -> http downgrade.
+
+    Python follows redirects transparently, so an https request answered
+    with ``302 http://...`` would re-send the request body — including the
+    password — in cleartext. Loopback targets stay allowed, matching
+    :func:`_refuse_cleartext_password_transport`.
+    """
+
+    def redirect_request(
+        self,
+        req: Any,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> Any:
+        from urllib.parse import urlparse
+
+        target = urlparse(newurl)
+        if (
+            req.type == "https"
+            and target.scheme != "https"
+            and not _is_loopback_host(target.hostname or "")
+        ):
+            raise _KeyGenError(
+                f"Odoo redirected the login from https to {target.scheme}:// "
+                f"({newurl}). Refusing to follow — that would put your password "
+                f"on the wire in cleartext. Create the API key manually in Odoo's "
+                f"Account Security screen instead."
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _generate_api_key_via_password(
     url: str,
     database: str,
@@ -490,11 +573,17 @@ def _generate_api_key_via_password(
     import urllib.request
 
     base = url.rstrip("/")
+    _refuse_cleartext_password_transport(base)
     ssl_ctx = ssl.create_default_context()
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(
         urllib.request.HTTPCookieProcessor(cookie_jar),
         urllib.request.HTTPSHandler(context=ssl_ctx),
+        # Odoo redirects freely (trailing slashes, db selector). A redirect
+        # that downgrades https -> http would put the password, and then the
+        # session cookie, on the wire in cleartext — so refuse downgrades
+        # rather than following them.
+        _NoDowngradeRedirectHandler(),
     )
 
     def _jsonrpc(path: str, params: dict[str, Any]) -> Any:

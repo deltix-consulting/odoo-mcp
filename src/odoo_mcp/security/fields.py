@@ -490,6 +490,78 @@ def validate_groupby(
     return list(groupby)
 
 
+_ORDER_DIRECTIONS: Final[frozenset[str]] = frozenset({"asc", "desc"})
+
+
+def validate_order(
+    model: str,
+    order: str | None,
+    known_fields: frozenset[str],
+    *,
+    allow_sensitive: frozenset[str],
+    instance_overrides: dict[str, frozenset[str]] | None = None,
+    extra_redacted: tuple[re.Pattern[str], ...] = (),
+) -> str | None:
+    """Validate a ``search_read`` ``order`` / ``read_group`` ``orderby`` string.
+
+    ``None`` / empty passes through unchanged (Odoo uses the model default).
+    Otherwise the string is a comma-separated list of ``"field"`` or
+    ``"field asc"`` / ``"field desc"`` terms. Each field must exist on the
+    model, be undotted, and clear the same redaction policy the read path
+    uses — an always-redacted field can never be ordered on, and a
+    default-hidden field requires ``allow_sensitive``.
+
+    Ordering is a value-revealing surface: sorting by a field the caller
+    cannot read still leaks its relative ordering (and, with a limit + binary
+    probing, its values). It is the one caller-controlled string that reaches
+    Odoo's SQL builder, so it gets validated like every other field input
+    rather than passed through raw.
+
+    Returns the normalized order string (whitespace-collapsed) or ``None``.
+    """
+    if order is None:
+        return None
+    if not isinstance(order, str):
+        raise FieldPolicyError(f"order must be a string, got {type(order).__name__}.")
+    stripped = order.strip()
+    if not stripped:
+        return None
+    terms: list[str] = []
+    for raw_term in stripped.split(","):
+        term = raw_term.strip()
+        if not term:
+            raise FieldPolicyError(f"Empty order term in {order!r}.")
+        parts = term.split()
+        if len(parts) == 1:
+            name, direction = parts[0], None
+        elif len(parts) == 2:
+            name, direction = parts[0], parts[1].lower()
+            if direction not in _ORDER_DIRECTIONS:
+                raise FieldPolicyError(
+                    f"order direction {parts[1]!r} not allowed. Use 'asc' or 'desc'."
+                )
+        else:
+            raise FieldPolicyError(
+                f"order term {term!r} not supported — use 'field' or 'field asc|desc'."
+            )
+        if "." in name:
+            raise FieldPolicyError(f"Dotted order field {name!r} not allowed.")
+        if name not in known_fields:
+            raise FieldPolicyError(f"order field {name!r} does not exist on model {model!r}.")
+        if is_always_redacted_with_extra(name, extra_redacted):
+            raise FieldPolicyError(f"order field {name!r} is permanently redacted.")
+        if (
+            is_default_hidden(model, name, instance_overrides=instance_overrides)
+            and name not in allow_sensitive
+        ):
+            raise FieldPolicyError(
+                f"order field {name!r} on {model!r} is sensitive — ordering by it reveals "
+                f"its relative values. Opt in via allow_sensitive_fields=[{name!r}, ...]."
+            )
+        terms.append(f"{name} {direction}" if direction else name)
+    return ", ".join(terms)
+
+
 def redact_response(
     model: str,
     records: list[dict[str, Any]],

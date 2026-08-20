@@ -223,13 +223,51 @@ def test_token_accepted_when_unlock_was_only_touched() -> None:
     guard.consume_pending(token, "prod", "create", "res.partner", now=2 * 60 + 1)
 
 
-def test_default_is_ten() -> None:
+def test_default_commit_budget_is_fifty() -> None:
+    """v0.27.0 bumped the default from 10 → 50 to unblock batch flows.
+
+    The payload-digest binding (v0.18.0) already binds each commit to
+    its previewed content, so a bigger budget doesn't weaken the
+    operator-in-the-loop property — a per-instance override still
+    exists for tenants that want tighter windows."""
     from odoo_mcp.security.prod_guard import DEFAULT_MAX_COMMITS_PER_UNLOCK
 
-    assert DEFAULT_MAX_COMMITS_PER_UNLOCK == 10
+    assert DEFAULT_MAX_COMMITS_PER_UNLOCK == 50
     guard = ProdGuard()
     guard.unlock("prod", production=True, now=0.0)
-    assert guard.commits_remaining("prod", now=1.0) == 10
+    assert guard.commits_remaining("prod", now=1.0) == 50
+
+
+def test_default_unlock_ttl_is_fifteen_minutes() -> None:
+    """The default unlock TTL is 15 minutes. Pin the constant so a
+    refactor that quietly bumps it to hours (or drops it to seconds)
+    is loud."""
+    from odoo_mcp.security.prod_guard import DEFAULT_UNLOCK_TTL_SECONDS
+
+    assert DEFAULT_UNLOCK_TTL_SECONDS == 15 * 60
+
+
+def test_unlock_ttl_seconds_kwarg_controls_initial_window() -> None:
+    """Operators can pass a per-instance ``ttl_seconds`` to make the
+    initial unlock window shorter (tight SOX-style regime) or longer
+    (long batch flows). Pin that the value flows through end-to-end."""
+    guard = ProdGuard()
+    # Very short window (60s minimum enforced at config-load, not here).
+    guard.unlock("prod", production=True, now=0.0, ttl_seconds=60)
+    assert guard.is_unlocked("prod", now=59.0)
+    assert not guard.is_unlocked("prod", now=61.0)
+
+
+def test_touch_uses_the_ttl_the_window_was_created_with(tmp_path: object = None) -> None:
+    """Sliding-window regression: a tenant that unlocked with a tight
+    60-second TTL must NOT get silently promoted to the default 15 min
+    by ``touch``. Pin per-window TTL preservation."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0, ttl_seconds=60)
+    # A write at t=30s touches the window; new expiry should be t + 60s.
+    guard.touch("prod", now=30.0)
+    assert guard.is_unlocked("prod", now=89.0)
+    assert not guard.is_unlocked("prod", now=91.0)
 
 
 def test_unknown_token_error_does_not_echo_token_value() -> None:

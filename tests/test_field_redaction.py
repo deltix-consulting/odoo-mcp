@@ -16,6 +16,7 @@ from odoo_mcp.security.fields import (
     restrict_fields_meta,
     validate_aggregate_fields,
     validate_groupby,
+    validate_order,
     validate_requested_fields,
     validate_write_values,
 )
@@ -645,3 +646,44 @@ def test_res_users_whitelist_is_identity_only() -> None:
             "share",
         }
     )
+
+
+# --- validate_order (ordering oracle) --------------------------------------
+
+_ORDER_FIELDS = frozenset({"id", "name", "create_date", "vat", "wage", "access_token"})
+
+
+def test_validate_order_passthrough_none_and_empty() -> None:
+    assert validate_order("res.partner", None, _ORDER_FIELDS, allow_sensitive=frozenset()) is None
+    assert validate_order("res.partner", "  ", _ORDER_FIELDS, allow_sensitive=frozenset()) is None
+
+
+def test_validate_order_accepts_valid_terms() -> None:
+    out = validate_order(
+        "res.partner", "name desc, create_date", _ORDER_FIELDS, allow_sensitive=frozenset()
+    )
+    assert out == "name desc, create_date"
+
+
+def test_validate_order_rejects_always_redacted() -> None:
+    with pytest.raises(FieldPolicyError, match="permanently redacted"):
+        validate_order(
+            "account.move", "access_token asc", _ORDER_FIELDS, allow_sensitive=frozenset()
+        )
+
+
+def test_validate_order_default_hidden_requires_optin() -> None:
+    with pytest.raises(FieldPolicyError, match="sensitive"):
+        validate_order("hr.contract", "wage desc", _ORDER_FIELDS, allow_sensitive=frozenset())
+    assert (
+        validate_order(
+            "hr.contract", "wage desc", _ORDER_FIELDS, allow_sensitive=frozenset({"wage"})
+        )
+        == "wage desc"
+    )
+
+
+@pytest.mark.parametrize("bad", ["name sideways", "partner_id.name", "nope asc"])
+def test_validate_order_rejects_bad_terms(bad: str) -> None:
+    with pytest.raises(FieldPolicyError):
+        validate_order("res.partner", bad, _ORDER_FIELDS, allow_sensitive=frozenset())

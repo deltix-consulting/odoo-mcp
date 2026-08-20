@@ -10,12 +10,21 @@ The update flow assumes a git checkout that runs the package via ``uv``. If
 no ``pyproject.toml`` can be found by walking up from this file, the command
 aborts — self-update from a wheel install is not supported.
 
-Before any ``git pull`` happens, the latest release tarball's GitHub
+Before the checkout moves, the latest release tarball's GitHub
 build-provenance attestation is verified via ``gh attestation verify``. A
-hard verification failure (``gh`` ran and rejected the artifact) refuses
-the update. Environmental issues (no ``gh``, offline, GitHub down) print
-a yellow warning and prompt the user to confirm; ``--skip-verification``
+hard verification failure — ``gh`` ran and rejected the artifact, or the
+artifact carries no attestation at all — refuses the update. Genuinely
+environmental issues (no ``gh``, offline, Sigstore/TUF trouble) print a
+yellow warning and prompt the user to confirm; ``--skip-verification``
 bypasses the check entirely.
+
+**The update lands on the verified release tag's commit, not the branch
+tip.** Verifying a release tarball and then pulling ``origin/<branch>``
+would check one artifact and install a different one — a compromised
+branch tip would sail through, because nothing tied the verification to
+the code being installed. Pinning to the tag is what makes the provenance
+check meaningful. When the operator opts out of verification, the legacy
+branch-tip behaviour applies.
 """
 
 from __future__ import annotations
@@ -67,6 +76,21 @@ def _current_branch(project_dir: Path) -> str:
 
 def _upstream_commit(project_dir: Path, branch: str) -> str:
     return _git(project_dir, "rev-parse", f"origin/{branch}").stdout.strip()
+
+
+def _tag_commit(project_dir: Path, tag: str) -> str | None:
+    """Resolve a release tag to the commit it points at, or ``None``.
+
+    ``{tag}^{{commit}}`` dereferences an annotated tag object down to the
+    commit, so signed/annotated and lightweight tags both resolve the same
+    way. Returns ``None`` when the tag is unknown locally (not fetched, or
+    it does not exist upstream).
+    """
+    for ref in (f"refs/tags/{tag}^{{commit}}", f"{tag}^{{commit}}"):
+        result = _git(project_dir, "rev-parse", "--verify", "--quiet", ref, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    return None
 
 
 def _has_local_changes(project_dir: Path) -> bool:
@@ -238,17 +262,24 @@ def _run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _handle_verification(skip: bool) -> bool:
-    """Verify the latest release's attestation. Returns True if we should proceed.
+def _handle_verification(skip: bool) -> tuple[bool, str | None]:
+    """Verify the latest release's attestation.
 
-    - ``skip=True``: print a notice, return True.
-    - Hard verification failure: print red error, return False.
-    - Environmental issue (no gh, offline): print yellow warning, prompt user.
-    - Verified: print confirmation, return True.
+    Returns ``(proceed, verified_tag)``. ``verified_tag`` is non-``None``
+    only when ``gh`` positively confirmed the release artifact's provenance;
+    the caller uses it to pin the checkout to that exact release, so the code
+    we install is the code we verified. A ``None`` tag alongside
+    ``proceed=True`` means the user consented to an unverified update
+    (``--skip-verification``, or an environmental soft-fail they accepted).
+
+    - ``skip=True``: print a notice, proceed unpinned.
+    - Hard verification failure: print red error, refuse.
+    - Environmental issue (no gh, offline): print yellow warning, prompt.
+    - Verified: print confirmation, proceed pinned to the tag.
     """
     if skip:
         print(f"{_YELLOW}Skipping attestation verification (--skip-verification).{_RESET}")
-        return True
+        return (True, None)
 
     tag = fetch_latest_tag()
     if tag is None:
@@ -256,17 +287,17 @@ def _handle_verification(skip: bool) -> bool:
             f"{_YELLOW}Warning: could not determine latest release tag "
             f"(GitHub API unreachable). Attestation not verified.{_RESET}"
         )
-        return _confirm("Proceed without verification? [y/N]: ")
+        return (_confirm("Proceed without verification? [y/N]: "), None)
 
     print(f"Verifying build provenance attestation for {tag}...")
     verified, reason = verify_release_attestation(tag)
     if verified:
         print(f"  OK — {reason}")
-        return True
+        return (True, tag)
 
     if reason.startswith("environment:"):
         print(f"{_YELLOW}Warning: attestation verification could not run ({reason}).{_RESET}")
-        return _confirm("Proceed without verification? [y/N]: ")
+        return (_confirm("Proceed without verification? [y/N]: "), None)
 
     print(
         f"{_RED}ERROR: attestation verification failed ({reason}).{_RESET}\n"
@@ -274,7 +305,49 @@ def _handle_verification(skip: bool) -> bool:
         f" signed by our CI workflow.{_RESET}",
         file=sys.stderr,
     )
-    return False
+    return (False, None)
+
+
+def _resolve_update_target(
+    project_dir: Path, branch: str, verified_tag: str | None, upstream: str
+) -> tuple[str, str] | None:
+    """Decide which commit to move to, and describe it.
+
+    Returns ``(commit, description)`` or ``None`` to abort.
+
+    When the attestation verified release tag T, the update must land on T's
+    commit — NOT on the branch tip. Verifying a release tarball and then
+    pulling ``origin/<branch>`` checks one artifact and installs a different
+    one: a compromised branch tip sails through, because nothing ever tied
+    the verification to the code being installed. Pinning to the tag is what
+    makes the provenance check meaningful.
+
+    If the branch tip is ahead of the tag, those extra commits carry no
+    attestation; we say so and land on the tag anyway.
+    """
+    if verified_tag is None:
+        # Unverified path (user consented): legacy branch-tip behaviour.
+        return (upstream, f"origin/{branch}")
+
+    commit = _tag_commit(project_dir, verified_tag)
+    if commit is None:
+        print(
+            f"{_RED}ERROR: verified release {verified_tag} could not be resolved to a "
+            f"commit in this checkout.{_RESET}\n"
+            f"{_RED}Refusing update rather than falling back to the unverified "
+            f"branch tip.{_RESET}",
+            file=sys.stderr,
+        )
+        return None
+
+    if commit != upstream:
+        print(
+            f"{_YELLOW}Note: origin/{branch} is not at the verified release "
+            f"{verified_tag}. Updating to {verified_tag} ({commit[:12]}) — the commit "
+            f"whose build provenance was just verified — and leaving the newer "
+            f"unattested commits on {branch} alone.{_RESET}"
+        )
+    return (commit, f"{verified_tag} ({commit[:12]})")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -308,8 +381,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    # Fetch.
-    fetch = _git(project_dir, "fetch", "origin", check=False)
+    # Fetch. ``--tags`` so the verified release tag is resolvable locally —
+    # the update pins to that tag's commit rather than the branch tip.
+    fetch = _git(project_dir, "fetch", "--tags", "origin", check=False)
     if fetch.returncode != 0:
         print(f"git fetch failed: {fetch.stderr.strip()}", file=sys.stderr)
         return 1
@@ -343,14 +417,29 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # Verify the latest release's build provenance before touching the repo.
-    if not _handle_verification(skip_verification):
+    proceed, verified_tag = _handle_verification(skip_verification)
+    if not proceed:
         return 1
 
-    # Fast-forward pull.
-    pull = _git(project_dir, "pull", "--ff-only", "origin", branch, check=False)
+    # Resolve what we actually move to. On the verified path this is the
+    # release tag's commit, so the code we install is the code whose
+    # provenance we just checked.
+    target = _resolve_update_target(project_dir, branch, verified_tag, upstream)
+    if target is None:
+        return 1
+    target_commit, target_desc = target
+
+    if target_commit == current:
+        print(f"Already at the verified release {target_desc}.")
+        return 0
+
+    # Fast-forward only: refuses if the target isn't a descendant of HEAD,
+    # so an update can never rewrite or discard local history.
+    print(f"Updating to {target_desc}...")
+    pull = _git(project_dir, "merge", "--ff-only", target_commit, check=False)
     if pull.returncode != 0:
         print(
-            "Update failed — local changes detected. Resolve manually with git.",
+            "Update failed — cannot fast-forward to the target commit. Resolve manually with git.",
             file=sys.stderr,
         )
         if pull.stderr.strip():

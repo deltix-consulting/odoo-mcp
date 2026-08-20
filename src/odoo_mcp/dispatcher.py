@@ -33,7 +33,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 from mcp.types import TextContent
 
@@ -47,6 +47,7 @@ from .errors import (
     InstanceNotFoundError,
     ModelNotAllowedError,
     OdooMcpError,
+    OperationNotAllowedError,
     ProdGuardError,
 )
 from .security.allowlist import (
@@ -57,6 +58,7 @@ from .security.allowlist import (
     check_model,
     check_operation,
     classify_model_block,
+    is_write,
 )
 from .security.document_actions import (
     WizardCompletion,
@@ -70,6 +72,7 @@ from .security.fields import (
     restrict_fields_meta,
     validate_aggregate_fields,
     validate_groupby,
+    validate_order,
     validate_requested_fields,
     validate_write_values,
 )
@@ -121,6 +124,35 @@ def _read_only_session() -> bool:
     """
     raw = os.environ.get("ODOO_MCP_READ_ONLY", "")
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _disabled_tool_names() -> frozenset[str]:
+    """Return the set of tool names disabled via ``ODOO_MCP_DISABLE_TOOLS``.
+
+    Comma-separated, whitespace tolerated; empty / unset → no tools. Read
+    per-call (cheap) so the enforcement matches the ``tools/list`` filtering
+    in :mod:`odoo_mcp.server` and so tests can toggle it dynamically — the
+    same pattern as :func:`_read_only_session`.
+
+    This is what makes ``ODOO_MCP_DISABLE_TOOLS`` a real refusal rather than
+    a mere ``tools/list`` cosmetic: hiding a tool from the advertisement does
+    not stop a client (or a hallucinating / prompt-injected model) from
+    sending the name directly, so the dispatcher must refuse it too.
+    """
+    raw = os.environ.get("ODOO_MCP_DISABLE_TOOLS", "")
+    return frozenset(n.strip() for n in raw.split(",") if n.strip())
+
+
+# Odoo field types whose write value is interpreted as a relation into another
+# model (and, for x2many, as command tuples that create/update/link records
+# there). Relational write payloads are policed by
+# ``Dispatcher._validate_relational_writes``.
+_RELATIONAL_TYPES: Final[frozenset[str]] = frozenset({"many2one", "one2many", "many2many"})
+
+# Maximum depth of nested relational create/update commands accepted in a
+# single write. A sale order with lines is depth 1; deeper is rare and mostly
+# a sign of an abusive payload, so we bound it.
+_MAX_RELATIONAL_WRITE_DEPTH: Final[int] = 4
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +272,18 @@ class Dispatcher:
         return [_text({"ok": True, **result}, default=str)]
 
     def _dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        # Enforce ODOO_MCP_DISABLE_TOOLS at CALL time, not just in the
+        # tools/list advertisement. Hiding a tool from the list does not
+        # stop a client — or a hallucinating / prompt-injected model — from
+        # sending the name directly, so the operator's disable directive has
+        # to be a real refusal here. Checked before the handler lookup so a
+        # disabled tool is rejected identically whether or not it exists,
+        # and the attempt is recorded on the audit failure path.
+        if name in _disabled_tool_names():
+            raise OperationNotAllowedError(
+                f"Tool {name!r} is disabled on this server via "
+                f"ODOO_MCP_DISABLE_TOOLS and cannot be invoked."
+            )
         handler = _HANDLERS.get(name)
         if handler is None:
             raise OdooMcpError(f"Unknown tool: {name!r}")
@@ -257,6 +301,12 @@ class Dispatcher:
         self.app.rate_limiter.take(instance)
         rt.client.ensure_authenticated()
         check_operation(op)
+        if is_write(op):
+            # Fail closed BEFORE the mutation: a write we can't audit must not
+            # happen at all. Auditing after the commit can only report an
+            # unaudited change, never prevent it — and reporting it as an
+            # error would invite the agent to retry and write twice.
+            self.app.audit.preflight()
         model: str | None = None
         if require_model:
             model = _require_str(args, "model")
@@ -539,13 +589,26 @@ class Dispatcher:
         fields, smart = self._resolve_read_fields(
             rt, model, fields_meta, known, args, allow_sensitive
         )
-        domain = sandbox_domain(args.get("domain") or [], known)
+        domain = sandbox_domain(
+            args.get("domain") or [],
+            known,
+            model=model,
+            allow_sensitive=allow_sensitive,
+            instance_overrides=overrides,
+            extra_redacted=rt.extra_redacted,
+        )
         limit = clamp_limit(
             args.get("limit"), rt.config.max_records_default, rt.config.max_records_hard_cap
         )
-        records = rt.client.search_read(
-            model, domain, fields, limit, offset, _optional_str(args, "order")
+        order = validate_order(
+            model,
+            _optional_str(args, "order"),
+            known,
+            allow_sensitive=allow_sensitive,
+            instance_overrides=overrides,
+            extra_redacted=rt.extra_redacted,
         )
+        records = rt.client.search_read(model, domain, fields, limit, offset, order)
         redacted = redact_response(
             model,
             records,
@@ -601,7 +664,18 @@ class Dispatcher:
         ctx = self._begin("odoo_search_count", args, Operation.SEARCH_COUNT)
         assert ctx.model is not None
         known = frozenset(self._fields_meta(ctx.rt, ctx.model).keys())
-        domain = sandbox_domain(args.get("domain") or [], known)
+        # search_count is the sharpest value-oracle surface (a bare boolean /
+        # match count, no rows to redact), so the domain redaction policy
+        # matters most here.
+        allow_sensitive = frozenset(args.get("allow_sensitive_fields") or [])
+        domain = sandbox_domain(
+            args.get("domain") or [],
+            known,
+            model=ctx.model,
+            allow_sensitive=allow_sensitive,
+            instance_overrides=ctx.rt.config.sensitive_fields,
+            extra_redacted=ctx.rt.extra_redacted,
+        )
         count = ctx.rt.client.search_count(ctx.model, domain)
         self._audit_ok(
             ctx,
@@ -639,10 +713,25 @@ class Dispatcher:
             instance_overrides=overrides,
             extra_redacted=rt.extra_redacted,
         )
-        domain = sandbox_domain(args.get("domain") or [], known)
+        domain = sandbox_domain(
+            args.get("domain") or [],
+            known,
+            model=model,
+            allow_sensitive=allow_sensitive,
+            instance_overrides=overrides,
+            extra_redacted=rt.extra_redacted,
+        )
         # Clamp group count to the hard cap regardless of caller input.
         cap = rt.config.max_records_hard_cap
         limit = clamp_limit(args.get("limit"), cap, cap)
+        orderby = validate_order(
+            model,
+            _optional_str(args, "orderby"),
+            known,
+            allow_sensitive=allow_sensitive,
+            instance_overrides=overrides,
+            extra_redacted=rt.extra_redacted,
+        )
 
         rows = rt.client.read_group(
             model,
@@ -651,7 +740,7 @@ class Dispatcher:
             groupby,
             limit=limit,
             offset=offset,
-            orderby=_optional_str(args, "orderby"),
+            orderby=orderby,
             lazy=lazy,
         )
         # Token discipline: Odoo returns a literal __domain per group for
@@ -722,6 +811,141 @@ class Dispatcher:
             result["smart_fields_used"] = fields
         return result
 
+    def _validate_relational_writes(
+        self,
+        rt: InstanceRuntime,
+        model: str,
+        validated: dict[str, Any],
+        fields_meta: dict[str, dict[str, Any]],
+        *,
+        depth: int = 0,
+    ) -> None:
+        """Police relational (x2many / many2one) command payloads in a write.
+
+        :func:`validate_write_values` checks only the top-level key names.
+        Odoo, however, interprets a relational field's value as *command
+        tuples* that create, update, delete, or link records on the RELATED
+        model — e.g. ``(0, 0, vals)`` creates, ``(1, id, vals)`` updates,
+        ``(4, id)`` links. Without this pass a caller could smuggle a write
+        into a model it can't name directly:
+
+        * ``message_ids=[(0, 0, {...})]`` → forge a chatter message with a
+          spoofed author (``mail.message`` is write-blocklisted for exactly
+          this reason, and it sidesteps the ``odoo_send_message`` opt-in).
+        * ``user_ids=[(1, uid, {'password': ...})]`` → reset a login password
+          (``res.users`` is write-blocklisted; ``password`` is always-redacted).
+        * ``groups_id=[(4, admin_group_id)]`` → self-grant a group
+          (``res.groups`` is denylisted).
+        * any denylisted or non-allowlisted model reachable via a relation.
+
+        So every command's TARGET model is run through the same
+        :func:`check_model` (denylist + allowlist) and
+        :func:`_refuse_write_blocklisted` gates the top-level model passed,
+        and nested ``create`` / ``update`` value dicts are recursed through
+        :func:`validate_write_values` (keeping always-redacted fields blocked
+        at any depth) and this same check. Nesting is bounded to
+        :data:`_MAX_RELATIONAL_WRITE_DEPTH` levels.
+        """
+        if depth > _MAX_RELATIONAL_WRITE_DEPTH:
+            raise FieldPolicyError(
+                f"Relational write nesting exceeds {_MAX_RELATIONAL_WRITE_DEPTH} levels "
+                f"on {model!r} — refusing (possible abuse of nested command payloads)."
+            )
+        for name, value in validated.items():
+            meta = fields_meta.get(name) or {}
+            ttype = meta.get("type")
+            if ttype not in _RELATIONAL_TYPES:
+                continue
+            relation = meta.get("relation")
+            if ttype == "many2one":
+                # A many2one takes a scalar id (or False/None). A list/dict
+                # here is a smuggled nested create/command payload — refuse.
+                if isinstance(value, (list, dict)):
+                    raise FieldPolicyError(
+                        f"Field {name!r} on {model!r} is a many2one and takes a record id, "
+                        f"not a nested create or command payload."
+                    )
+                continue
+            # one2many / many2many: a list of Odoo command tuples.
+            if value is None or value is False:
+                continue
+            if not isinstance(value, list):
+                raise FieldPolicyError(
+                    f"Field {name!r} on {model!r} is a {ttype} and must be a list of Odoo "
+                    f"commands (e.g. [(6, 0, [ids])]), got {type(value).__name__}."
+                )
+            if not isinstance(relation, str) or not relation:
+                raise FieldPolicyError(
+                    f"Cannot validate relational writes to {name!r} on {model!r}: the field "
+                    f"metadata reports no target model."
+                )
+            self._validate_x2many_commands(rt, model, name, relation, value, depth)
+
+    def _validate_x2many_commands(
+        self,
+        rt: InstanceRuntime,
+        parent_model: str,
+        field_name: str,
+        relation: str,
+        commands: list[Any],
+        depth: int,
+    ) -> None:
+        """Validate each Odoo command tuple for one x2many field."""
+        # The related model must clear the SAME gates as a top-level target:
+        # built-in denylist + per-instance allowlist, and the write-blocklist.
+        check_model(relation, rt.config.allowed_models)
+        _refuse_write_blocklisted(relation)
+        related_meta: dict[str, dict[str, Any]] | None = None
+        for cmd in commands:
+            if not isinstance(cmd, (list, tuple)) or not cmd:
+                raise FieldPolicyError(
+                    f"Field {field_name!r} on {parent_model!r}: each x2many entry must be a "
+                    f"non-empty Odoo command tuple, got {cmd!r}."
+                )
+            code = cmd[0]
+            if code in (0, 1):
+                # (0, 0, vals) create; (1, id, vals) update — carry nested vals.
+                nested = cmd[2] if len(cmd) >= 3 else None
+                if not isinstance(nested, dict) or not nested:
+                    raise FieldPolicyError(
+                        f"Field {field_name!r} on {parent_model!r}: relational command {code} "
+                        f"requires a non-empty values dict."
+                    )
+                if related_meta is None:
+                    related_meta = self._fields_meta(rt, relation)
+                related_known = frozenset(related_meta.keys())
+                validated_nested = validate_write_values(
+                    relation, nested, related_known, extra_redacted=rt.extra_redacted
+                )
+                self._validate_relational_writes(
+                    rt, relation, validated_nested, related_meta, depth=depth + 1
+                )
+            elif code in (2, 3, 4):
+                # id-only: delete / unlink / link an existing related record.
+                if len(cmd) < 2 or not isinstance(cmd[1], int) or isinstance(cmd[1], bool):
+                    raise FieldPolicyError(
+                        f"Field {field_name!r} on {parent_model!r}: relational command {code} "
+                        f"requires an integer record id."
+                    )
+            elif code == 5:
+                pass  # clear all links — no target record, no payload
+            elif code == 6:
+                # (6, 0, [ids]) — replace the link set with these ids.
+                ids = cmd[2] if len(cmd) >= 3 else None
+                if not isinstance(ids, list) or not all(
+                    isinstance(i, int) and not isinstance(i, bool) for i in ids
+                ):
+                    raise FieldPolicyError(
+                        f"Field {field_name!r} on {parent_model!r}: relational command 6 "
+                        f"requires a list of integer ids."
+                    )
+            else:
+                raise FieldPolicyError(
+                    f"Field {field_name!r} on {parent_model!r}: unsupported relational command "
+                    f"{code!r}. Allowed: 0 (create), 1 (update), 2 (delete), 3 (unlink), "
+                    f"4 (link), 5 (clear), 6 (set)."
+                )
+
     def _create(self, args: dict[str, Any]) -> dict[str, Any]:
         _refuse_if_read_only_session()
         ctx = self._begin("odoo_create", args, Operation.CREATE)
@@ -731,8 +955,10 @@ class Dispatcher:
         values = _require_dict(args, "values")
         self.app.prod_guard.check_write(ctx.instance, rt.config.production)
 
-        known = frozenset(self._fields_meta(rt, model).keys())
+        fields_meta = self._fields_meta(rt, model)
+        known = frozenset(fields_meta.keys())
         validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
+        self._validate_relational_writes(rt, model, validated, fields_meta)
         n = len(validated)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
@@ -781,8 +1007,10 @@ class Dispatcher:
         if len(ids) > cap:
             raise OdooMcpError(f"Cannot write to more than {cap} ids at once.")
 
-        known = frozenset(self._fields_meta(rt, model).keys())
+        fields_meta = self._fields_meta(rt, model)
+        known = frozenset(fields_meta.keys())
         validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
+        self._validate_relational_writes(rt, model, validated, fields_meta)
         n = len(validated)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
@@ -1815,10 +2043,20 @@ class Dispatcher:
         _refuse_if_read_only_session()
         instance_name = _require_str(args, "instance")
         rt = self.app.instance(instance_name)
+        # This tool does not go through ``_begin`` (there is no model and no
+        # Odoo round-trip), so it has to take a rate-limit token itself.
+        # Without it, unlocking is free and unbounded: an agent can re-call
+        # in a loop to keep the 15-minute window alive indefinitely and reset
+        # the per-unlock commit budget every time, which turns two of the
+        # four prod-write gates into no-ops.
+        self.app.rate_limiter.take(instance_name)
+        # An unlock is a write-shaped event; refuse it too if we can't audit.
+        self.app.audit.preflight()
         expiry = self.app.prod_guard.unlock(
             instance_name,
             rt.config.production,
             max_commits=rt.config.max_commits_per_unlock,
+            ttl_seconds=rt.config.unlock_ttl_seconds,
         )
         self._audit(
             "odoo_enable_prod_writes",
@@ -1836,9 +2074,10 @@ class Dispatcher:
             "expires_in_seconds": int(expiry - time.monotonic()),
             "commits_remaining": rt.config.max_commits_per_unlock,
             "note": (
-                f"Writes are unlocked for 15 minutes of activity. Every write still "
-                f"defaults to dry_run=true on prod; you must pass dry_run=false and a "
-                f"confirmation_token to commit. Up to "
+                f"Writes are unlocked for {rt.config.unlock_ttl_seconds // 60} minutes "
+                f"of activity (sliding window: every commit extends it). Every write "
+                f"still defaults to dry_run=true on prod; you must pass dry_run=false "
+                f"and a confirmation_token to commit. Up to "
                 f"{rt.config.max_commits_per_unlock} commits allowed in this window."
             ),
         }
@@ -1898,7 +2137,9 @@ class Dispatcher:
         """
         instance = arguments.get("instance") if isinstance(arguments, dict) else None
         model = arguments.get("model") if isinstance(arguments, dict) else None
-        raw: dict[str, Any] = {"error": error.user_message[:500]}
+        # audit_message, not user_message: Odoo-supplied fault text can quote
+        # record values, and this log is retained for 30 days.
+        raw: dict[str, Any] = {"error": error.audit_message[:500]}
         if isinstance(arguments, dict):
             raw["args"] = _args_shape(arguments)
         try:
