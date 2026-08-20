@@ -10,6 +10,39 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo-mcp update` no longer reports success on post-update checks it
+  never looked at.** The update runs eight sub-commands. `git fetch`,
+  `git pull`, `uv sync` and `pytest` all had their exit status checked;
+  the two post-pull steps that decide whether the *installed* tool works
+  did not:
+
+  - `uv tool install --editable --force` (the `odoo-mcp` PATH shim
+    refresh) had its `CompletedProcess` discarded entirely;
+  - `doctor.main([])` — whose whole purpose is to return 0 for a healthy
+    install and 1 for a broken one — had its return value discarded.
+
+  So an update could print `Update complete.` and exit 0 on an install
+  that had just failed its own health check, or whose PATH command still
+  exposed the previous version's subcommands. A maintenance cron running
+  `odoo-mcp update` saw success either way.
+
+  The shim refresh matters more than it looks: `uv sync` installs from
+  `uv.lock` while `uv tool install` resolves from `pyproject.toml`, so it
+  is the only step in the update that exercises the dependency set a
+  fresh install actually gets — exactly the split that let an unbounded
+  `mcp` constraint ship a non-starting CLI past a green `uv sync`.
+
+  Both results are now kept and reported, and all three post-update
+  checks (test suite, CLI shim refresh, doctor) roll into one verdict
+  naming whichever failed. This is the exit-code semantics `update`
+  already had — a failing test suite has always returned 1 — applied
+  consistently rather than to one check out of three. Exit codes are now
+  documented in the command's help text.
+
+  The existing rollback hint on a failing test suite is unchanged.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

@@ -10,6 +10,12 @@ The update flow assumes a git checkout that runs the package via ``uv``. If
 no ``pyproject.toml`` can be found by walking up from this file, the command
 aborts — self-update from a wheel install is not supported.
 
+Exit status::
+
+    0  update applied (or already up to date) and every post-update check passed
+    1  the update was refused or failed, or it applied but a post-update check
+       (test suite, CLI shim refresh, ``doctor``) reported a problem
+
 Before the checkout moves, the latest release tarball's GitHub
 build-provenance attestation is verified via ``gh attestation verify``. A
 hard verification failure — ``gh`` ran and rejected the artifact, or the
@@ -466,7 +472,27 @@ def main(argv: list[str] | None = None) -> int:
     # that imports from the checkout, so a fresh git pull is technically
     # already live, but re-installing makes sure entry-point metadata
     # (new subcommands, version) is picked up.
-    _run(["uv", "tool", "install", "--editable", str(project_dir), "--force"], cwd=project_dir)
+    #
+    # Its exit code is load-bearing and must not be discarded: `uv sync`
+    # above installs from `uv.lock`, while this step resolves from
+    # `pyproject.toml` alone. It is therefore the ONLY step in the update
+    # that exercises the dependency set a fresh install actually gets, and
+    # the only place a bad constraint (an unbounded upper bound that has
+    # since gone incompatible) can surface.
+    shim = _run(
+        ["uv", "tool", "install", "--editable", str(project_dir), "--force"], cwd=project_dir
+    )
+    shim_ok = shim.returncode == 0
+    if not shim_ok:
+        print(
+            f"{_RED}Refreshing the `odoo-mcp` CLI shim failed "
+            f"(uv tool install exited {shim.returncode}).{_RESET}\n"
+            f"{_RED}The checkout is updated, but the `odoo-mcp` command on your PATH "
+            f"may still expose the previous version's subcommands and metadata.{_RESET}",
+            file=sys.stderr,
+        )
+        if shim.stderr.strip():
+            print(shim.stderr.rstrip(), file=sys.stderr)
 
     # Run the test suite.
     tests = _run(["uv", "run", "pytest", "-q"], cwd=project_dir)
@@ -487,16 +513,40 @@ def main(argv: list[str] | None = None) -> int:
         print("SECURITY: This update includes security-relevant changes. Review CHANGELOG.md.")
         print("=" * 60)
 
-    # Run doctor automatically.
+    # Run doctor automatically. Its exit code is the whole point of running
+    # it — 0 when the install is healthy, 1 when it is not — so keep it.
     print()
     print("Running doctor...")
     from . import doctor
 
-    doctor.main([])
+    doctor_ok = doctor.main([]) == 0
 
+    # One verdict over every post-update check. `update` has always meant
+    # "applied AND healthy" — a failing test suite already returned 1 — so
+    # the shim refresh and doctor belong in the same verdict rather than
+    # being reported as success.
+    failed = [
+        name
+        for name, ok in (
+            ("test suite", tests_ok),
+            ("CLI shim refresh", shim_ok),
+            ("doctor", doctor_ok),
+        )
+        if not ok
+    ]
     print()
+    if failed:
+        print(
+            f"{_RED}Update applied, but post-update checks failed: "
+            f"{', '.join(failed)}.{_RESET}\n"
+            f"{_RED}The new code is in place -- review the output above before "
+            f"restarting Claude Desktop / Cowork and Codex.{_RESET}",
+            file=sys.stderr,
+        )
+        return 1
+
     print("Update complete. Restart Claude Desktop / Cowork and Codex to use the new version.")
-    return 0 if tests_ok else 1
+    return 0
 
 
 if __name__ == "__main__":
