@@ -36,6 +36,7 @@ from ._scan_heuristics import (
     is_custom_field_name,
     is_studio_field_name,
 )
+from .errors import OdooRemoteError, redact
 from .security.fields import is_always_redacted, is_default_hidden
 
 # ---------------------------------------------------------------------------
@@ -61,6 +62,14 @@ class ModelFinding:
 
 
 @dataclass(slots=True)
+class ModelScanError:
+    """A model listed by ``ir.model`` whose schema could not be read."""
+
+    model: str
+    error: str
+
+
+@dataclass(slots=True)
 class ScanResult:
     instance: str
     scanned_at: str
@@ -69,6 +78,18 @@ class ScanResult:
     fields_total: int
     custom_models: list[ModelFinding] = field(default_factory=list)
     custom_fields_on_standard: list[FieldFinding] = field(default_factory=list)
+    unscanned_models: list[ModelScanError] = field(default_factory=list)
+    unusable_rows: int = 0
+
+    @property
+    def complete(self) -> bool:
+        """True when every model ``ir.model`` listed was actually read.
+
+        An incomplete scan cannot report a model as clean — it only knows
+        that it saw nothing there. Callers must not treat the emitted policy
+        as covering the models in :attr:`unscanned_models`.
+        """
+        return not self.unscanned_models and self.unusable_rows == 0
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +97,13 @@ class ScanResult:
 # ---------------------------------------------------------------------------
 
 
-def _list_models(client: Any) -> list[dict[str, Any]]:
+def _list_models(client: Any) -> tuple[list[dict[str, Any]], int]:
+    """Every model ``ir.model`` knows about, plus the count of unusable rows.
+
+    Fails closed on a malformed response: an empty model list would otherwise
+    render as "this instance has no custom fields", which is the one thing a
+    policy-generating scan must never say without having looked.
+    """
     rows = client._execute(
         "ir.model",
         "search_read",
@@ -84,12 +111,22 @@ def _list_models(client: Any) -> list[dict[str, Any]]:
         {"fields": ["model", "name"]},
     )
     if not isinstance(rows, list):
-        return []
-    return [r for r in rows if isinstance(r, dict) and isinstance(r.get("model"), str)]
+        raise OdooRemoteError(
+            f"ir.model.search_read returned {type(rows).__name__}, expected a list of rows"
+        )
+    usable = [r for r in rows if isinstance(r, dict) and isinstance(r.get("model"), str)]
+    return usable, len(rows) - len(usable)
 
 
-def _fields_get(client: Any, model: str) -> dict[str, dict[str, Any]]:
-    """Schema for *model*. Returns a dict, even if the call fails for one model."""
+def _fields_get(client: Any, model: str) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """Schema for *model*, plus the reason it is empty when the read failed.
+
+    One unreadable model still must not abort the whole scan (a stale
+    ``ir.model`` row for an uninstalled module is enough to trigger it), but
+    the caller has to be able to tell "read it, nothing custom there" from
+    "never saw it" — those produce identical field lists and very different
+    redaction policies.
+    """
     try:
         result = client._execute(
             model,
@@ -97,25 +134,28 @@ def _fields_get(client: Any, model: str) -> dict[str, dict[str, Any]]:
             [],
             {"attributes": ["type", "string", "help", "manual"]},
         )
-    except Exception:  # noqa: BLE001 — never fail the whole scan on one model
-        return {}
+    except Exception as exc:  # noqa: BLE001 — never fail the whole scan on one model
+        return {}, redact(f"{type(exc).__name__}: {exc}")
     if not isinstance(result, dict):
-        return {}
-    return {k: v for k, v in result.items() if isinstance(k, str) and isinstance(v, dict)}
+        return {}, f"fields_get returned {type(result).__name__}, expected a dict"
+    return {k: v for k, v in result.items() if isinstance(k, str) and isinstance(v, dict)}, None
 
 
 def perform_scan(client: Any, instance_name: str) -> ScanResult:
     """Drive the scan. Stateless wrt the dispatcher; uses ``_execute`` directly."""
     scanned_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    models = _list_models(client)
+    models, unusable_rows = _list_models(client)
     custom_models: list[ModelFinding] = []
     custom_fields: list[FieldFinding] = []
+    unscanned: list[ModelScanError] = []
     fields_total = 0
 
     for row in models:
         model_name = str(row["model"])
         model_label = str(row.get("name") or model_name)
-        schema = _fields_get(client, model_name)
+        schema, read_error = _fields_get(client, model_name)
+        if read_error is not None:
+            unscanned.append(ModelScanError(model=model_name, error=read_error))
         fields_total += len(schema)
 
         is_standard_model = model_name in ODOO_STANDARD_MODELS
@@ -170,6 +210,8 @@ def perform_scan(client: Any, instance_name: str) -> ScanResult:
         fields_total=fields_total,
         custom_models=custom_models,
         custom_fields_on_standard=custom_fields,
+        unscanned_models=unscanned,
+        unusable_rows=unusable_rows,
     )
 
 
@@ -180,6 +222,37 @@ def perform_scan(client: Any, instance_name: str) -> ScanResult:
 _SENSITIVE_VERDICTS: frozenset[Sensitivity] = frozenset(
     {Sensitivity.LIKELY_SENSITIVE, Sensitivity.LIKELY_FINANCIAL}
 )
+
+
+#: How many unreadable models to name inline before summarising the rest.
+#: The full list always survives in ``--json``.
+_MAX_LISTED_ERRORS = 20
+
+
+def _incomplete_lines(result: ScanResult, prefix: str) -> list[str]:
+    """Lines naming what the scan could not read, or ``[]`` when it read all.
+
+    Shared by the human report and the TOML snippet so the warning cannot
+    exist in one output format and be missing from another.
+    """
+    if result.complete:
+        return []
+    out: list[str] = []
+    count = len(result.unscanned_models)
+    if count:
+        out.append(f"{prefix}INCOMPLETE SCAN — {count} model(s) could not be read. Their custom")
+        out.append(f"{prefix}fields are MISSING below: this report says nothing was seen there,")
+        out.append(f"{prefix}not that they are clean. Re-run before deploying a policy.")
+        for e in result.unscanned_models[:_MAX_LISTED_ERRORS]:
+            out.append(f"{prefix}  {e.model}: {e.error}")
+        hidden = count - _MAX_LISTED_ERRORS
+        if hidden > 0:
+            out.append(f"{prefix}  ... and {hidden} more (--json lists all of them)")
+    if result.unusable_rows:
+        out.append(
+            f"{prefix}{result.unusable_rows} ir.model row(s) were unusable and were skipped."
+        )
+    return out
 
 
 def _group_fields_by_model(findings: Iterable[FieldFinding]) -> dict[str, list[FieldFinding]]:
@@ -202,6 +275,10 @@ def render_human(result: ScanResult, *, uid: int | None, login: str | None) -> s
         f"(reference: Odoo {result.odoo_reference_version})"
     )
     out.append("")
+    warning = _incomplete_lines(result, "  !! ")
+    if warning:
+        out.extend(warning)
+        out.append("")
 
     # Custom models
     out.append("== Custom models (not in Odoo Community standard) ==")
@@ -232,6 +309,7 @@ def render_human(result: ScanResult, *, uid: int | None, login: str | None) -> s
     for f in result.custom_fields_on_standard:
         counts[f.verdict.sensitivity] += 1
     out.append("== Summary ==")
+    out.append(f"  Models unreadable:            {len(result.unscanned_models)}")
     out.append(f"  Custom models:                {len(result.custom_models)}")
     out.append(f"  Custom fields on standard:    {len(result.custom_fields_on_standard)}")
     out.append(f"    BLOCKED (built-in):         {counts[Sensitivity.BLOCKED]}")
@@ -242,6 +320,8 @@ def render_human(result: ScanResult, *, uid: int | None, login: str | None) -> s
     out.append(f"    UNCERTAIN — review:         {counts[Sensitivity.UNCERTAIN]}")
     out.append("")
     out.append("Run with --toml to get a paste-ready config snippet, or --json for scripting.")
+    if not result.complete:
+        out.append("This scan was INCOMPLETE — see the warning above before trusting it.")
     return "\n".join(out)
 
 
@@ -255,6 +335,10 @@ def render_toml(result: ScanResult) -> str:
     out.append(f"# Generated by `odoo-mcp scan-custom {result.instance}` on {result.scanned_at}")
     out.append(f"# against Odoo {result.odoo_reference_version} reference data.")
     out.append("# Review UNCERTAIN entries manually before deploying.")
+    # The snippet is pasted into config.toml and becomes the redaction policy,
+    # so an incomplete scan has to say so *inside the artefact* — the operator
+    # who pastes it may never have seen the console output.
+    out.extend(_incomplete_lines(result, "# !! "))
     out.append("")
 
     # Build per-model lists for sensitive_fields, plus a flat list of regex
@@ -268,7 +352,8 @@ def render_toml(result: ScanResult) -> str:
         custom_patterns.append(f)
 
     if not custom_patterns:
-        out.append(f"# No flagged sensitive custom fields found for {result.instance!r}.")
+        scope = "" if result.complete else " in the models that could be read"
+        out.append(f"# No flagged sensitive custom fields found for {result.instance!r}{scope}.")
         out.append("# (UNCERTAIN findings still warrant manual review — see the human report.)")
         return "\n".join(out)
 
@@ -306,7 +391,14 @@ def render_json(result: ScanResult) -> str:
             "fields_total": result.fields_total,
             "models_custom": len(result.custom_models),
             "fields_custom_on_standard": len(result.custom_fields_on_standard),
+            "models_unscanned": len(result.unscanned_models),
+            "ir_model_rows_unusable": result.unusable_rows,
         },
+        "scan_complete": result.complete,
+        "unscanned_models": [
+            {"model": e.model, "error": e.error}
+            for e in sorted(result.unscanned_models, key=lambda x: x.model)
+        ],
         "custom_models": [
             {
                 "name": m.name,
@@ -367,6 +459,12 @@ Output formats (mutually exclusive):
   --toml   TOML snippet for the instance's config.toml block.
   --json   Machine-readable JSON for scripting.
 
+Exit status:
+  0  scan complete
+  1  scan failed, or completed but could not read every model (the report is
+     still written to stdout; the models it missed are named on stderr)
+  2  usage error
+
 Note: this command bypasses the Claude-facing dispatcher denylist on
 purpose. It is admin tooling — the operator is the consultant, not Claude.
 The denylist exists to constrain Claude, not the operator.
@@ -412,17 +510,22 @@ def main(argv: list[str]) -> int:
         return 1
 
     if args.json:
-        sys.stdout.write(render_json(result))
-        sys.stdout.write("\n")
-        return 0
-    if args.toml:
-        sys.stdout.write(render_toml(result))
-        sys.stdout.write("\n")
-        return 0
+        payload = render_json(result)
+    elif args.toml:
+        payload = render_toml(result)
+    else:
+        uid = getattr(rt.client, "uid", None)
+        creds = getattr(rt.client, "_credentials", None)
+        login = getattr(creds, "username", None) if creds is not None else None
+        payload = render_human(result, uid=uid, login=login)
 
-    uid = getattr(rt.client, "uid", None)
-    creds = getattr(rt.client, "_credentials", None)
-    login = getattr(creds, "username", None) if creds is not None else None
-    sys.stdout.write(render_human(result, uid=uid, login=login))
+    sys.stdout.write(payload)
     sys.stdout.write("\n")
+
+    if not result.complete:
+        # stdout stays a clean payload so `--json | jq` keeps working; the
+        # diagnostic goes to stderr and the exit code carries the failure.
+        for line in _incomplete_lines(result, "warning: "):
+            print(line, file=sys.stderr)
+        return 1
     return 0

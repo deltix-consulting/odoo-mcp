@@ -10,6 +10,49 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo-mcp scan-custom` no longer reports a model it could not read as
+  a model with nothing to redact.** `_fields_get` swallowed every
+  exception per model and returned `{}`, which is byte-identical to
+  "read it, nothing custom there". The scan's output is not a report,
+  it is a *policy source* — the operator pastes
+  `sensitive_fields` / `custom_sensitive_field_patterns` into
+  `config.toml` and the redaction layer runs off it — so a swallowed
+  read silently drops that model's custom fields out of the policy and
+  they flow to Claude unredacted.
+
+  Reachable two ways: a single stale `ir.model` row (uninstalled module)
+  fails one model, and a connection drop or session expiry mid-scan
+  fails *every remaining* model — an ~800-model instance then emitted an
+  empty policy, printed `(none)`, and exited `0`.
+
+  Now `perform_scan` records each unreadable model and all three output
+  formats say so:
+
+  - human report: an `!! INCOMPLETE SCAN` block under the header naming
+    the models and the errors (clamped to 20 inline, and it says when it
+    clamped), a `Models unreadable:` summary row, and a closing line;
+  - `--toml`: the same warning as `# !!` comments *inside the snippet*,
+    because the person pasting it may never have seen the console. The
+    no-findings line now reads "found ... in the models that could be
+    read" instead of claiming the instance is clean;
+  - `--json`: `scan_complete`, `stats.models_unscanned`,
+    `stats.ir_model_rows_unusable`, and the full `unscanned_models` list.
+
+  `main` keeps stdout a clean payload (`--json | jq` still works), writes
+  the diagnostic to stderr, and **exits 1** when the scan was incomplete
+  — the exit code is what a scripted re-scan reads.
+
+  Also fails closed where it used to fail open: a non-list response from
+  `ir.model.search_read` raised nothing and produced a 0-model scan; it
+  now raises `OdooRemoteError` and the command reports `scan failed`.
+  Unusable `ir.model` rows are counted instead of silently dropped.
+
+  Same class as the audit-reader and config-loader fixes in the previous
+  two cycles: a reader that fails open turns a broken read into a clean
+  bill of health. Here the clean bill of health becomes a config file.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
