@@ -10,6 +10,36 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo-mcp onboarding` scanned the wrong Odoo after "add a new
+  instance".** Option 1 of the existing-config branch adds a second
+  instance and then runs the doctor + custom-surface scan. It picked the
+  instance to scan with `_pick_primary_instance()`, which returns the
+  *first* name in `config.toml` — but `setup --add` appends, so the
+  primary is the pre-existing instance, never the one just onboarded.
+
+  The consequence lands in a config artefact, not just the console. The
+  scan exists to propose a redaction policy: it writes
+  `~/.odoo-mcp/suggestions.toml` and the closing summary tells the user
+  to copy the `[instances.<name>.sensitive_fields]` block into
+  `config.toml`. So onboarding a fresh — often production — instance
+  printed a green `✓ Scan complete` checklist and handed the user a
+  sensitive-field block for a *different* instance. The instance being
+  onboarded was never scanned, got no redaction suggestions, and if its
+  neighbour's block had already been pasted, the second paste was a
+  no-op that looked like coverage. Nothing in the output said which
+  Odoo had been scanned before the final summary named it, and by then
+  it reads as confirmation rather than a correction.
+
+  The flow now snapshots the configured instance names before delegating
+  to `setup --add` and scans the one that appeared. If it cannot tell
+  which instance is new (zero or several appeared), it refuses and points
+  at option 2 rather than falling back to the primary — a silent fallback
+  is what produced a policy for the wrong Odoo in the first place. The
+  add-instance branch had no test at all; two now pin both outcomes.
+
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

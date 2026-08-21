@@ -248,3 +248,96 @@ def test_help_flag_prints_usage(capsys: pytest.CaptureFixture[str]) -> None:
     assert rc == 0
     out = capsys.readouterr().out
     assert "Usage: odoo-mcp onboarding" in out
+
+
+_SECOND_INSTANCE_BLOCK = """\
+
+[instances.second]
+url = "https://klanty.odoo.com"
+database = "klanty-prod"
+credentials_env_prefix = "ODOO_MCP_SECOND"
+production = true
+"""
+
+
+def test_add_instance_scans_the_instance_that_was_just_added(
+    fake_paths: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Choice 1 ('add a new instance') must scan the NEW instance.
+
+    ``_cmd_add`` appends the new instance to the end of ``config.toml``, so
+    picking the *first* configured instance hands the scan — and the
+    ``sensitive_fields`` suggestions the user is told to paste — to the
+    pre-existing instance instead of the one being onboarded.
+    """
+    cfg_path = fake_paths / "config.toml"
+    cfg_path.write_text(_SAMPLE_CONFIG)
+    os.chmod(cfg_path, 0o600)
+
+    def _fake_add() -> int:
+        # Mirror _cmd_add: the new instance is appended after the existing one.
+        cfg_path.write_text(_SAMPLE_CONFIG + _SECOND_INSTANCE_BLOCK)
+        return 0
+
+    scanned: list[str] = []
+
+    def _fake_run_scan(name: str) -> tuple[int, str]:
+        scanned.append(name)
+        onboarding_cli._run_scan.last_summary = {  # type: ignore[attr-defined]
+            "models_total": 1088,
+            "custom_models": 1,
+            "custom_fields": 0,
+            "uid": 42,
+            "login": "user@klanty.be",
+        }
+        return 0, scan_cli.render_toml(_fake_scan_result(name))
+
+    monkeypatch.setattr(onboarding_cli, "_run_setup_add", _fake_add)
+    monkeypatch.setattr(onboarding_cli, "_run_scan", _fake_run_scan)
+    _patch_doctor_pass(monkeypatch)
+    _stdin(monkeypatch, ["", "1"])
+
+    rc = onboarding_cli.main([])
+    assert rc == 0
+
+    assert scanned == ["second"], f"scanned the wrong instance: {scanned}"
+
+    suggestions = (fake_paths / "suggestions.toml").read_text()
+    assert "scan-custom second" in suggestions
+
+    out = capsys.readouterr().out
+    assert "instances.second" in out
+
+
+def test_add_instance_refuses_to_scan_when_the_new_instance_is_unidentifiable(
+    fake_paths: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A silent fallback to the primary instance would policy the wrong Odoo."""
+    cfg_path = fake_paths / "config.toml"
+    cfg_path.write_text(_SAMPLE_CONFIG)
+    os.chmod(cfg_path, 0o600)
+
+    # setup --add reports success but the config gained no instance (e.g. the
+    # file became unreadable in between). Fail loudly instead of scanning
+    # 'main' and telling the user to paste its block.
+    monkeypatch.setattr(onboarding_cli, "_run_setup_add", lambda: 0)
+
+    scanned: list[str] = []
+
+    def _scan_should_not_run(name: str) -> tuple[int, str]:
+        scanned.append(name)
+        return 0, ""
+
+    monkeypatch.setattr(onboarding_cli, "_run_scan", _scan_should_not_run)
+    _patch_doctor_pass(monkeypatch)
+    _stdin(monkeypatch, ["", "1"])
+
+    rc = onboarding_cli.main([])
+    assert rc == 1
+    assert scanned == []
+    assert not (fake_paths / "suggestions.toml").exists()
+    assert "Could not tell which instance was just added" in capsys.readouterr().err

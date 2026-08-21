@@ -52,17 +52,31 @@ def _print_intro() -> None:
         input("Press Enter to begin (or Ctrl+C to abort)...")
 
 
-def _pick_primary_instance() -> str | None:
-    """Return the first configured instance name (treated as 'primary')."""
+def _configured_instance_names() -> list[str]:
+    """Return the configured instance names, in config-file order.
+
+    Empty when there is no config yet, no instances in it, or it cannot be
+    parsed (config issues surface on the doctor step).
+    """
     if not DEFAULT_CONFIG_PATH.exists():
-        return None
+        return []
     try:
         _, instances = setup_wizard._load_raw_config()
     except Exception:  # noqa: BLE001 — config issues surface on the doctor step
-        return None
-    if not instances:
-        return None
-    return next(iter(instances))
+        return []
+    return list(instances)
+
+
+def _pick_primary_instance() -> str | None:
+    """Return the first configured instance name (treated as 'primary')."""
+    names = _configured_instance_names()
+    return names[0] if names else None
+
+
+def _instances_added_since(before: list[str]) -> list[str]:
+    """Return the instance names that appeared since *before* was taken."""
+    known = set(before)
+    return [name for name in _configured_instance_names() if name not in known]
 
 
 def _run_setup_first_time() -> int:
@@ -191,10 +205,27 @@ def _onboard_existing_config() -> int:
         return 0
 
     if choice == "1":
+        before = _configured_instance_names()
         rc = _run_setup_add()
         if rc != 0:
             return rc
-        instance = _pick_primary_instance() or ""
+        # Scan the instance that was just added, not the first one in the
+        # file. ``setup --add`` appends, so the primary is the *pre-existing*
+        # instance — scanning it would hand the sensitive-field suggestions
+        # the user is told to paste to the wrong Odoo, and leave the instance
+        # being onboarded with no redaction policy at all.
+        added = _instances_added_since(before)
+        if len(added) != 1:
+            print(
+                "Could not tell which instance was just added "
+                f"(found {len(added)}: {', '.join(added) or 'none'}). "
+                "Re-run 'odoo-mcp onboarding' and choose option 2 to scan an "
+                "instance by name.",
+                file=sys.stderr,
+            )
+            return 1
+        instance = added[0]
+        print(f"\nOnboarding the instance you just added: '{instance}'.")
     else:
         instance = _pick_primary_instance() or ""
         if not instance:
