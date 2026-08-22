@@ -7,7 +7,16 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Pieter-Jan Luyssen" }]
 dependencies = [
-    "mcp>=1.2.0",
+    # Capped below 2.0: the SDK's 2.x line rebuilt the low-level server API
+    # that `server.build_server` is written against. `Server.list_tools` /
+    # `.call_tool` / `.list_prompts` / `.get_prompt` no longer exist there
+    # (handlers register via `add_request_handler` instead), so building the
+    # server raises AttributeError before it can serve a single request.
+    # uv.lock protects `uv sync`, but `uv tool install` (install.sh step 8)
+    # resolves from this constraint alone — without the cap it puts a
+    # non-starting `odoo-mcp` on the user's PATH. Lift the cap only together
+    # with the 2.x handler-API migration.
+    "mcp>=1.2.0,<2",
     "keyring>=25.0",
 ]
 
