@@ -959,3 +959,170 @@ def test_config_warns_on_missing_attachment_source_path(
         f"expected a WARN mentioning the missing path; saw {[r.getMessage() for r in warnings]}"
     )
     assert any("'dev'" in r.getMessage() for r in warnings)
+
+
+# ---------------------------------------------------------------------------
+# source_path provenance — the approval gate and the audit log must name
+# the file that was read.
+#
+# ``attachment_source_paths`` allowlists DIRECTORIES, so enabling one
+# authorises reads of everything beneath it. ``filename`` is caller-chosen
+# and need not resemble the source, and ``source_path`` is canonicalised
+# out of ``args`` before the digest is computed (the digest binds content,
+# not the path). Without an explicit provenance entry the operator
+# approving the token — and anyone reading the audit log afterwards —
+# cannot tell which file in an allowed tree left the disk, nor even that a
+# file was read at all rather than the agent typing base64 inline.
+# ---------------------------------------------------------------------------
+
+
+def _audit_events(app: OdooMcpApp) -> list[dict[str, Any]]:
+    """Tool events from the audit log, skipping the ``audit_log_open``
+    startup marker ``AuditLog._open`` writes as the first line."""
+    lines = app.config.audit_log_path.read_text(encoding="utf-8").splitlines()
+    parsed = [json.loads(line) for line in lines if line.strip()]
+    return [event for event in parsed if "tool" in event]
+
+
+def _source_path_case(tmp_path: Path) -> tuple[OdooMcpApp, Dispatcher, Path]:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    payroll = inbox / "payroll-2026-Q2.csv"
+    payroll.write_bytes(b"employee,salary\nalice,120000\n")
+
+    fake = _AttachFake(create_id=4242)
+    app = _build(
+        tmp_path,
+        fake,
+        production=True,
+        attachment_source_paths=(str(inbox.resolve()),),
+    )
+    app.prod_guard.unlock("prod", production=True)
+    return app, Dispatcher(app), payroll
+
+
+def test_preview_names_the_source_file_that_would_be_read(tmp_path: Path) -> None:
+    """The dry-run preview must identify the file on disk, not just the
+    caller-chosen attachment name. Approving ``attach 'notes.pdf' to
+    res.partner(7)`` should not be able to hide that the bytes came from
+    ``payroll-2026-Q2.csv``."""
+    app, dispatcher, payroll = _source_path_case(tmp_path)
+
+    preview = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "res_model": "res.partner",
+            "res_id": 7,
+            "filename": "notes.pdf",  # deliberately unlike the source
+            "source_path": str(payroll),
+            "dry_run": True,
+        },
+    )
+
+    assert preview["preview"] is True
+    assert preview["source_path"] == str(payroll)
+    # No symlink involved, so the resolved key stays absent — the preview
+    # does not carry a redundant duplicate of the same string.
+    assert "source_path_resolved" not in preview
+
+
+def test_preview_reveals_a_symlink_pointing_elsewhere(tmp_path: Path) -> None:
+    """A symlink inside the allowlisted dir is legal (realpath must still
+    land inside it), but the file actually opened is not the one named.
+    The preview must show both so the operator sees the redirection."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    real = inbox / "payroll-2026-Q2.csv"
+    real.write_bytes(b"employee,salary\nalice,120000\n")
+    link = inbox / "invoice.pdf"
+    link.symlink_to(real)
+
+    fake = _AttachFake(create_id=4242)
+    app = _build(
+        tmp_path,
+        fake,
+        production=True,
+        attachment_source_paths=(str(inbox.resolve()),),
+    )
+    app.prod_guard.unlock("prod", production=True)
+    dispatcher = Dispatcher(app)
+
+    preview = _call(
+        dispatcher,
+        {
+            "instance": "prod",
+            "res_model": "res.partner",
+            "res_id": 7,
+            "filename": "invoice.pdf",
+            "source_path": str(link),
+            "dry_run": True,
+        },
+    )
+
+    assert preview["source_path"] == str(link)
+    assert preview["source_path_resolved"] == os.path.realpath(real)
+
+
+def test_commit_result_and_audit_record_the_source_file(tmp_path: Path) -> None:
+    """Both audit records — the dry run and the commit — must name the
+    source file. The audit log is the only forensic trail: ir.attachment
+    is denylisted, so the attachment cannot be found again through the
+    MCP after the fact."""
+    app, dispatcher, payroll = _source_path_case(tmp_path)
+    call_args: dict[str, Any] = {
+        "instance": "prod",
+        "res_model": "res.partner",
+        "res_id": 7,
+        "filename": "notes.pdf",
+        "source_path": str(payroll),
+    }
+
+    preview = _call(dispatcher, {**call_args, "dry_run": True})
+    result = _call(
+        dispatcher,
+        {
+            **call_args,
+            "dry_run": False,
+            "confirmation_token": preview["confirmation_token"],
+        },
+    )
+
+    assert result["committed"] is True
+    assert result["source_path"] == str(payroll)
+
+    events = _audit_events(app)
+    attach = [e for e in events if e["tool"] == "odoo_create_attachment"]
+    assert len(attach) == 2, f"expected dry-run + commit audit rows, got {attach}"
+    dry, commit = attach
+    assert dry["dry_run"] is True
+    assert commit["dry_run"] is False
+    for event in attach:
+        assert event["details"]["source_path"] == str(payroll)
+
+
+def test_inline_base64_carries_no_source_path_keys(tmp_path: Path) -> None:
+    """The inline path reads nothing off disk, so it must not grow a
+    ``source_path`` key. Absence is what distinguishes an agent-typed
+    payload from a server-side file read in the audit log."""
+    fake = _AttachFake(create_id=77)
+    app = _build(tmp_path, fake)
+    dispatcher = Dispatcher(app)
+
+    preview = _call(
+        dispatcher,
+        {
+            "instance": "dev",
+            "res_model": "res.partner",
+            "res_id": 7,
+            "filename": "notes.txt",
+            "datas_base64": _b64(b"hello"),
+            "dry_run": True,
+        },
+    )
+
+    assert "source_path" not in preview
+    assert "source_path_resolved" not in preview
+    events = _audit_events(app)
+    assert events
+    assert "source_path" not in events[-1]["details"]
