@@ -10,6 +10,34 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo-mcp client-config --client codex` emitted invalid TOML on
+  Windows.** The Codex block is the one snippet in this command that is
+  not JSON, and it was the one built by interpolating the resolved
+  executable path straight into an f-string. On Windows
+  `shutil.which("odoo-mcp")` returns
+  `C:\Users\<name>\.local\bin\odoo-mcp.exe`, and a backslash inside a
+  TOML basic string opens an escape sequence — `\U` wants eight hex
+  digits — so the snippet failed to parse (`Invalid hex value`).
+
+  The damage is not confined to odoo-mcp. Codex reads a single
+  `~/.codex/config.toml`; one unparseable table takes the whole file
+  down, so pasting the snippet silently disconnected every other MCP
+  server the user had configured there. And the command exists precisely
+  to remove this footgun: its module docstring names
+  `%USERPROFILE%\.local\bin\odoo-mcp.exe` as the path shape it resolves
+  on the user's behalf.
+
+  The path is now escaped with `_toml_basic_string`, which mirrors
+  `setup_wizard._toml_value` — the serialiser `odoo-mcp setup` already
+  writes the identical `[mcp_servers.odoo-mcp]` table with. A third
+  hand-rolled escaper is what shipped the bug, so a test asserts the two
+  produce byte-identical output rather than trusting them to stay in
+  step. The existing Codex test only matched substrings while the JSON
+  blocks were parsed with `json.loads`; the Codex block is now parsed
+  with `tomllib` too, on both a POSIX and a Windows path.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from io import StringIO
 from unittest.mock import patch
 
@@ -68,6 +69,59 @@ def test_codex_block_is_toml_shape() -> None:
     assert rc == 0
     assert "[mcp_servers.odoo-mcp]" in out
     assert 'args = ["launch"]' in out
+
+
+def _parse_codex_toml(out: str) -> dict[str, object]:
+    """Parse the Codex block out of the CLI output, minus the trailing note."""
+    body = out.split("\nPath:")[0]
+    start = body.index("[mcp_servers.odoo-mcp]")
+    return tomllib.loads(body[start:])
+
+
+def test_codex_block_parses_as_toml() -> None:
+    rc, out, _ = _run(["--client", "codex"])
+    assert rc == 0
+    parsed = _parse_codex_toml(out)
+    assert parsed["mcp_servers"]["odoo-mcp"]["args"] == ["launch"]  # type: ignore[index]
+
+
+def test_codex_block_parses_for_a_windows_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A backslash path must not turn the snippet into unparseable TOML.
+
+    ``\\U`` starts an eight-hex-digit escape in a TOML basic string, so an
+    unescaped ``C:\\Users\\...`` makes Codex reject the entire
+    ``config.toml`` — every other MCP server in that file included.
+    """
+    win = r"C:\Users\pieterjan\.local\bin\odoo-mcp.exe"
+    monkeypatch.setattr(client_config_cli.shutil, "which", lambda _: win)
+    rc, out, _ = _run(["--client", "codex"])
+    assert rc == 0
+    parsed = _parse_codex_toml(out)
+    # Round-trips verbatim: escaped on the way out, identical on the way in.
+    assert parsed["mcp_servers"]["odoo-mcp"]["command"] == win  # type: ignore[index]
+
+
+def test_codex_escaping_matches_the_setup_wizard_serializer() -> None:
+    """Pin the two TOML string serialisers together.
+
+    ``setup_wizard._toml_value`` writes the same ``[mcp_servers.odoo-mcp]``
+    table during ``odoo-mcp setup``; this module renders the copy the user
+    pastes by hand. A third divergent hand-rolled escaper is what shipped
+    the Windows bug, so the copies are asserted equal rather than trusted.
+    """
+    from odoo_mcp import setup_wizard
+
+    for value in (
+        r"C:\Users\me\.local\bin\odoo-mcp.exe",
+        "/usr/local/bin/odoo-mcp",
+        "/opt/Odoo MCP/odoo-mcp",
+        'weird"quote',
+        "tab\there",
+        "newline\nhere",
+        "carriage\rreturn",
+        "back\\slash",
+    ):
+        assert client_config_cli._toml_basic_string(value) == setup_wizard._toml_value(value)
 
 
 def test_cursor_block_mentions_cursor_path() -> None:

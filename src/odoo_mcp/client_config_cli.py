@@ -38,6 +38,33 @@ def _resolve_command() -> str:
     return found or "odoo-mcp"
 
 
+def _toml_basic_string(value: str) -> str:
+    """Serialise ``value`` as a TOML basic string, escapes included.
+
+    Every other client block here is rendered by :func:`json.dumps`, which
+    escapes for us. The Codex block is TOML, so it needs the equivalent —
+    and it needs it for the exact input this command exists to supply: on
+    Windows ``shutil.which`` returns ``C:\\Users\\...\\odoo-mcp.exe``, and
+    a raw backslash in a TOML basic string starts an escape sequence
+    (``\\U`` wants eight hex digits). Interpolating the path unescaped
+    yields a snippet that makes Codex reject the whole ``config.toml``,
+    taking every other MCP server in it down with odoo-mcp.
+
+    Kept byte-for-byte in step with ``setup_wizard._toml_value`` for
+    ``str`` — that is the serialiser the wizard already writes the very
+    same ``[mcp_servers.odoo-mcp]`` table with, and a test pins the two
+    together so they cannot drift apart again.
+    """
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
+
+
 _SUPPORTED_CLIENTS: Final[list[tuple[str, str]]] = [
     ("claude-desktop", "Claude Desktop (claude_desktop_config.json)"),
     ("claude-code", "Claude Code CLI (~/.claude.json)"),
@@ -85,7 +112,9 @@ def _block_for(client: str, command: str) -> str:
 
     if client == "codex":
         # Codex uses TOML, not JSON.
-        toml = f'[mcp_servers.odoo-mcp]\ncommand = "{command}"\nargs = ["launch"]\n'
+        toml = (
+            f'[mcp_servers.odoo-mcp]\ncommand = {_toml_basic_string(command)}\nargs = ["launch"]\n'
+        )
         return f"{toml}\nPath: ~/.codex/config.toml"
 
     if client == "cursor":
