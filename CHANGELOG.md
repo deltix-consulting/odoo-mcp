@@ -10,6 +10,38 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`scan-custom` no longer drops sensitive Binary fields from the
+  suggested redaction policy.** `classify_field` tested `type == "binary"`
+  *before* the name / help-text sensitivity keywords, so a Studio field
+  like `x_studio_loonfiche` (payslip PDF) or `x_studio_iban_bewijs` was
+  reported as `BINARY_AUTO_STRIPPED` — documented as "informational
+  only" — instead of `LIKELY_SENSITIVE`. Only the `LIKELY_*` verdicts are
+  written into the generated `custom_sensitive_field_patterns` /
+  `sensitive_fields` snippet, so the field never entered the redaction
+  policy the consultant pastes into `config.toml`.
+
+  That mattered because binary stripping is ergonomics, not security:
+  `redact_response` applies the redaction policy *before* the binary
+  branch, and `include_binary=true` bypasses the placeholder outright. A
+  field the scan classified as merely "auto-stripped" was therefore
+  returned as a raw base64 blob to any later caller passing
+  `include_binary=true`. The scan's own output was what decided otherwise,
+  and it stayed silent.
+
+  The exposure was concentrated on exactly the fields the built-in
+  policy does not already cover: `_ALWAYS_REDACTED_PATTERNS` matches
+  `salary` / `payroll` / `compensation` in English only, so the Dutch and
+  French names BE klanten actually use (`loonfiche`, `loonbrief`,
+  `geboorteakte`, `rijksregister_scan`) relied on this heuristic alone.
+
+  The sensitivity checks now run first, per the module docstring's
+  "most-severe wins" contract, and the Binary fact is preserved in the
+  verdict reason rather than lost. Binary fields with no sensitivity
+  signal (`x_studio_pasfoto`, `x_attachment_blob`) are unchanged, so the
+  policy does not inflate.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
