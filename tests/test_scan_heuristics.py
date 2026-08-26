@@ -181,3 +181,56 @@ def test_no_match_for_keynote() -> None:
     # "keynote" contains "key" but the keyword set requires word/underscore
     # boundary — these are tested via the always-redacted regex elsewhere.
     assert _classify("x_keynote_color") is Sensitivity.UNCERTAIN
+
+
+# ---- Binary fields that are ALSO sensitive -------------------------------
+#
+# Regression guard for the ordering contract in the module docstring
+# ("most-severe wins"). Binary stripping is ergonomics, not security: it is
+# bypassed by ``include_binary=true`` and never reaches the generated
+# redaction policy, so a Binary field with a sensitive name must be reported
+# as LIKELY_SENSITIVE rather than BINARY_AUTO_STRIPPED.
+#
+# These names matter for BE klanten specifically: the built-in
+# ``_ALWAYS_REDACTED_PATTERNS`` cover ``salary`` / ``payroll`` in English
+# only, so the Dutch / French equivalents below reach the operator's config
+# ONLY via this heuristic.
+
+
+def test_binary_with_sensitive_name_is_reported_sensitive() -> None:
+    assert _classify("x_studio_loonfiche", ftype="binary") is Sensitivity.LIKELY_SENSITIVE
+
+
+def test_binary_with_sensitive_name_iban() -> None:
+    assert _classify("x_studio_iban_bewijs", ftype="binary") is Sensitivity.LIKELY_SENSITIVE
+
+
+def test_binary_with_sensitive_help_text_is_reported_sensitive() -> None:
+    assert (
+        _classify("x_studio_attest", ftype="binary", help_text="Strikt vertrouwelijk")
+        is Sensitivity.LIKELY_SENSITIVE
+    )
+
+
+def test_binary_verdict_reason_still_mentions_stripping() -> None:
+    """The Binary fact is preserved in the reason, not lost to the upgrade."""
+    verdict = classify_field(
+        "hr.employee",
+        "x_studio_loonfiche",
+        {"type": "binary", "help": ""},
+        is_blocked=False,
+        is_gated=False,
+    )
+    assert "loon" in verdict.reason
+    assert "include_binary" in verdict.reason
+
+
+def test_plain_binary_still_informational() -> None:
+    """No sensitivity signal -> unchanged behaviour (no false-positive inflation)."""
+    assert _classify("x_studio_photo", ftype="binary") is Sensitivity.BINARY_AUTO_STRIPPED
+    assert _classify("x_attachment_blob", ftype="binary") is Sensitivity.BINARY_AUTO_STRIPPED
+
+
+def test_blocked_and_gated_still_outrank_binary() -> None:
+    assert _classify("x_studio_loonfiche", ftype="binary", blocked=True) is Sensitivity.BLOCKED
+    assert _classify("x_studio_loonfiche", ftype="binary", gated=True) is Sensitivity.GATED

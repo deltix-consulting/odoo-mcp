@@ -17,8 +17,12 @@ Classification levels (most-severe wins):
   ``sensitive_fields[<model>]`` block.
 * ``LIKELY_FINANCIAL`` — Float / Monetary type AND a financial keyword.
   Same suggestion as LIKELY_SENSITIVE.
-* ``BINARY_AUTO_STRIPPED`` — Binary field. Stripped by default for
-  ergonomics; informational only.
+* ``BINARY_AUTO_STRIPPED`` — Binary field with no other sensitivity
+  signal. Stripped by default for ergonomics; informational only. A Binary
+  field whose name or help text DOES match a sensitivity keyword is
+  reported as ``LIKELY_SENSITIVE`` instead (most-severe wins) — stripping
+  is ergonomics, not security, and only the ``LIKELY_*`` verdicts reach the
+  generated redaction policy.
 * ``UNCERTAIN`` — nothing matched. Operator should review manually.
 
 Belgian / Dutch keyword coverage is deliberate — deltix klanten are mostly
@@ -234,13 +238,23 @@ def classify_field(
     help_raw = field_meta.get("help")
     help_text = help_raw if isinstance(help_raw, str) else ""
 
-    # Binary stripping is informational, not a sensitivity flag in itself —
-    # but it's worth surfacing so the consultant knows we'll auto-strip.
-    if ftype == "binary":
-        return FieldVerdict(
-            Sensitivity.BINARY_AUTO_STRIPPED,
-            "Binary field — auto-stripped from responses unless include_binary=true",
-        )
+    # A sensitive name / help text OUTRANKS the binary placeholder — the
+    # module docstring's contract is "most-severe wins", and
+    # BINARY_AUTO_STRIPPED sits below LIKELY_SENSITIVE.
+    #
+    # This ordering is load-bearing, not cosmetic. Binary stripping is
+    # ergonomics, not security (``security.fields`` says so in as many
+    # words): ``redact_response`` applies the redaction policy BEFORE the
+    # binary branch, and the placeholder is bypassed outright by
+    # ``include_binary=true``. Only the two LIKELY_* verdicts are written
+    # into the generated ``custom_sensitive_field_patterns`` snippet, so
+    # classifying ``x_studio_loonfiche`` (a payslip PDF) as merely
+    # BINARY_AUTO_STRIPPED silently omits it from the redaction policy the
+    # consultant pastes into ``config.toml`` — and any later caller passing
+    # ``include_binary=true`` then reads the raw blob.
+    binary_note = (
+        " (also Binary — auto-stripped unless include_binary=true)" if ftype == "binary" else ""
+    )
 
     # Name-based PII match.
     name_match = _NAME_KEYWORD_RE.search(field_name)
@@ -248,7 +262,7 @@ def classify_field(
         keyword = name_match.group(0).strip("_")
         return FieldVerdict(
             Sensitivity.LIKELY_SENSITIVE,
-            f"name contains sensitive keyword: {keyword!r}",
+            f"name contains sensitive keyword: {keyword!r}{binary_note}",
         )
 
     # Help-text match (case-insensitive substring is enough — false positives
@@ -260,8 +274,17 @@ def classify_field(
             if kw in lowered:
                 return FieldVerdict(
                     Sensitivity.LIKELY_SENSITIVE,
-                    f"help text mentions {kw!r}",
+                    f"help text mentions {kw!r}{binary_note}",
                 )
+
+    # Binary with no sensitivity signal of its own — informational, so the
+    # consultant knows we auto-strip it. Deliberately AFTER the two checks
+    # above; see the comment there.
+    if ftype == "binary":
+        return FieldVerdict(
+            Sensitivity.BINARY_AUTO_STRIPPED,
+            "Binary field — auto-stripped from responses unless include_binary=true",
+        )
 
     # Numeric + financial keyword.
     if ftype in _NUMERIC_TYPES and _FINANCIAL_KEYWORD_RE.search(field_name):

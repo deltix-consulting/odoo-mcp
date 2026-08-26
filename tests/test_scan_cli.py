@@ -266,3 +266,63 @@ def test_main_full_flow_toml(
     assert rc == 0
     parsed = tomllib.loads(captured.out)
     assert "instances" in parsed
+
+
+# ---------------------------------------------------------------------------
+# A sensitive Binary field must survive scan -> TOML -> redaction policy.
+#
+# Binary stripping is ergonomics, not security: `redact_response` applies the
+# redaction policy BEFORE the binary branch, and `include_binary=true`
+# bypasses the placeholder entirely. So the ONLY thing standing between a
+# payslip PDF in a custom field and the model context is whether the scan put
+# the field into `custom_sensitive_field_patterns`.
+#
+# `_ALWAYS_REDACTED_PATTERNS` covers `salary` / `payroll` in English only, so
+# for the Dutch names BE klanten actually use this heuristic is the whole
+# control.
+# ---------------------------------------------------------------------------
+
+
+def _binary_fixture() -> _FakeClient:
+    return _FakeClient(
+        models=[{"id": 1, "model": "hr.employee", "name": "Employee"}],
+        schemas={
+            "hr.employee": {
+                "id": {"type": "integer"},
+                "x_studio_loonfiche": {"type": "binary", "help": "Loonfiche PDF"},
+                "x_studio_pasfoto": {"type": "binary", "help": ""},
+            }
+        },
+    )
+
+
+def test_sensitive_binary_field_reaches_the_generated_policy() -> None:
+    result = perform_scan(_binary_fixture(), "prod")
+    parsed = tomllib.loads(render_toml(result))
+    patterns = parsed["instances"]["prod"]["custom_sensitive_field_patterns"]
+    assert "x_studio_loonfiche" in patterns
+    # The neutral binary field must NOT be inflated into the policy.
+    assert "x_studio_pasfoto" not in patterns
+
+
+def test_generated_policy_actually_drops_the_blob_despite_include_binary() -> None:
+    """The end-to-end property: scan output, fed back as config, stops the leak."""
+    from odoo_mcp.security.fields import compile_extra_patterns, redact_response
+
+    result = perform_scan(_binary_fixture(), "prod")
+    parsed = tomllib.loads(render_toml(result))
+    patterns = parsed["instances"]["prod"]["custom_sensitive_field_patterns"]
+
+    records = [{"id": 1, "x_studio_loonfiche": "JVBERi0xLjQKJTFRA=="}]
+    field_types = {"id": "integer", "x_studio_loonfiche": "binary"}
+
+    cleaned = redact_response(
+        "hr.employee",
+        records,
+        field_types=field_types,
+        include_binary=True,  # the placeholder is bypassed; only the policy is left
+        allow_sensitive=frozenset(),
+        instance_overrides=None,
+        extra_redacted=compile_extra_patterns(list(patterns)),
+    )
+    assert cleaned == [{"id": 1}]
