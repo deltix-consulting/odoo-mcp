@@ -151,6 +151,52 @@ def test_float_without_financial_keyword_is_uncertain() -> None:
     assert _classify("x_studio_priority_pct", ftype="float") is Sensitivity.UNCERTAIN
 
 
+def test_financial_keyword_matches_dutch_inflections() -> None:
+    """NL plurals of the financial keywords must classify like the singular.
+
+    The PII regex is deliberately loose on the trailing side for exactly
+    this reason (see the ``_NAME_KEYWORD_RE`` comment); the financial
+    regex shares that posture, so "kosten" is as flagged as "kost".
+    """
+    for name in (
+        "x_studio_kosten",  # NL plural of kost
+        "x_studio_bedragen",  # NL plural of bedrag
+        "x_studio_marges",  # NL plural of marge
+        "x_studio_omzetten",  # NL plural of omzet
+    ):
+        assert _classify(name, ftype="monetary") is Sensitivity.LIKELY_FINANCIAL, name
+
+
+def test_financial_keyword_matches_dutch_compound_head() -> None:
+    """A NL compound whose FIRST element is the keyword must be flagged."""
+    assert _classify("x_studio_kostprijs", ftype="monetary") is Sensitivity.LIKELY_FINANCIAL
+
+
+def test_financial_keyword_matches_english_plurals() -> None:
+    for name in ("x_studio_amounts", "x_studio_costs", "x_studio_prices"):
+        assert _classify(name, ftype="monetary") is Sensitivity.LIKELY_FINANCIAL, name
+
+
+def test_financial_keyword_matches_suffixed_compound() -> None:
+    assert _classify("x_studio_pricelist_extra", ftype="float") is Sensitivity.LIKELY_FINANCIAL
+
+
+def test_anchored_financial_keywords_do_not_swallow_common_words() -> None:
+    """``fee``/``rate`` keep their trailing boundary — "feedback" and
+    "rating" are plausible Float custom fields and are not financial."""
+    assert _classify("x_studio_feedback_score", ftype="float") is Sensitivity.UNCERTAIN
+    assert _classify("x_studio_rating_avg", ftype="float") is Sensitivity.UNCERTAIN
+    # ...but the anchored forms themselves still match.
+    assert _classify("x_studio_setup_fee", ftype="monetary") is Sensitivity.LIKELY_FINANCIAL
+    assert _classify("x_studio_billing_rate", ftype="float") is Sensitivity.LIKELY_FINANCIAL
+
+
+def test_financial_leading_boundary_still_holds() -> None:
+    """Loosening the trailing side must not loosen the leading side —
+    "corporate" must not match via "rate"."""
+    assert _classify("x_studio_corporate_score", ftype="float") is Sensitivity.UNCERTAIN
+
+
 # ---- Binary stripping ----------------------------------------------------
 
 
