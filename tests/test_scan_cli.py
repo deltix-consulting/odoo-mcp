@@ -183,6 +183,38 @@ def test_render_toml_no_findings() -> None:
     assert "No flagged sensitive custom fields" in snippet
 
 
+def test_render_toml_includes_dutch_financial_fields() -> None:
+    """A NL-inflected monetary custom field must reach the redaction policy.
+
+    ``custom_sensitive_field_patterns`` is what the consultant pastes into
+    ``config.toml``, so a field the heuristic never flags is silently
+    absent from the shipped policy — not merely absent from a report.
+    ``x_studio_kosten`` is not covered by ``_ALWAYS_REDACTED_PATTERNS``, so
+    the heuristic is the only thing standing between it and the caller.
+    """
+    client = _FakeClient(
+        [{"id": 1, "model": "hr.employee", "name": "Employee"}],
+        {
+            "hr.employee": {
+                "id": {"type": "integer"},
+                "name": {"type": "char"},
+                "x_studio_kosten": {"type": "monetary", "help": ""},
+                "x_studio_bedragen": {"type": "monetary", "help": ""},
+                "x_studio_kostprijs": {"type": "float", "help": ""},
+            }
+        },
+    )
+    result = perform_scan(client, "prod")
+    by_name = {f.name: f for f in result.custom_fields_on_standard}
+    for name in ("x_studio_kosten", "x_studio_bedragen", "x_studio_kostprijs"):
+        assert by_name[name].verdict.sensitivity.value == "LIKELY_FINANCIAL", name
+
+    parsed = tomllib.loads(render_toml(result))
+    patterns = parsed["instances"]["prod"]["custom_sensitive_field_patterns"]
+    for name in ("x_studio_kosten", "x_studio_bedragen", "x_studio_kostprijs"):
+        assert name in patterns, f"{name} missing from the generated policy"
+
+
 def test_main_help_no_instance(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -142,7 +142,10 @@ _HELP_SENSITIVE_KEYWORDS: Final[tuple[str, ...]] = (
 )
 
 # Financial keyword set — narrower than the PII set above. Used only in
-# combination with a numeric field type.
+# combination with a numeric field type. Matched with the same loose
+# trailing side as the PII set, so plurals and Dutch inflections
+# ("kosten", "bedragen", "kostprijs", "costs") land in the same bucket as
+# their singular form.
 _FINANCIAL_KEYWORDS: Final[tuple[str, ...]] = (
     "amount",
     "bedrag",  # NL: amount
@@ -150,8 +153,6 @@ _FINANCIAL_KEYWORDS: Final[tuple[str, ...]] = (
     "prijs",  # NL: price
     "cost",
     "kost",  # NL: cost
-    "fee",
-    "rate",
     "margin",
     "marge",  # NL/FR: margin
     "tarif",
@@ -160,7 +161,17 @@ _FINANCIAL_KEYWORDS: Final[tuple[str, ...]] = (
     "turnover",
 )
 
-# Compiled name-keyword regex. The leading boundary (`^|_|\b`) prevents
+# Financial keywords that must keep a trailing boundary: their loose form
+# swallows a common non-financial word ("fee" -> "feedback", "rate" ->
+# "rating"), and both of those are plausible Float custom fields. Same
+# treatment as the ``intern`` omission from the PII list above — constrain
+# the individual keyword, not the whole regex.
+_FINANCIAL_KEYWORDS_ANCHORED: Final[tuple[str, ...]] = (
+    "fee",
+    "rate",
+)
+
+# Compiled keyword regexes. The leading boundary (`^|_|\b`) prevents
 # "internalisation" matching "intern", but the trailing side is
 # deliberately loose — Dutch compound nouns like "geboortedatum" or
 # inflections like "burgerlijke" stick a suffix straight onto the
@@ -168,12 +179,23 @@ _FINANCIAL_KEYWORDS: Final[tuple[str, ...]] = (
 # word boundary. False-positive cost is low (the flagged field still
 # only ends up in the suggested-config snippet, which the consultant
 # reviews).
+#
+# Both regexes share that posture: the financial keyword set is just as
+# Dutch as the PII one ("bedrag", "kost", "prijs", "marge", "omzet") and
+# inflects the same way, and English plurals ("costs", "amounts") need it
+# too. The handful of financial keywords whose loose form is genuinely
+# ambiguous are listed in _FINANCIAL_KEYWORDS_ANCHORED and keep the
+# trailing boundary.
 _NAME_KEYWORD_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:^|_|\b)(?:" + "|".join(re.escape(k) for k in _NAME_SENSITIVE_KEYWORDS) + r")",
     re.IGNORECASE,
 )
 _FINANCIAL_KEYWORD_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?:^|_|\b)(?:" + "|".join(re.escape(k) for k in _FINANCIAL_KEYWORDS) + r")(?:_|\b|$)",
+    r"(?:^|_|\b)(?:"
+    + "|".join(re.escape(k) for k in _FINANCIAL_KEYWORDS)
+    + r"|(?:"
+    + "|".join(re.escape(k) for k in _FINANCIAL_KEYWORDS_ANCHORED)
+    + r")(?:_|\b|$))",
     re.IGNORECASE,
 )
 
