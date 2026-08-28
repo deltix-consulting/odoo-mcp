@@ -147,35 +147,34 @@ def check_for_update(current_version: str) -> tuple[str, str] | None:
     return None
 
 
-def extract_security_section(changelog_text: str) -> str | None:
-    """Extract the ``### Security`` block from the most recent release.
+def _section_bounds(lines: list[str]) -> list[tuple[str, int, int]]:
+    """Split *lines* into ``## [<label>]`` sections.
 
-    Scans for the first ``## [``-prefixed version header and returns the
-    body of a ``### Security`` subsection that appears before the next
-    ``## [`` header. Returns None if no such section exists or is empty.
+    Returns ``(label, body_start, body_end)`` per section, in file order.
+    ``label`` is the raw bracket content — ``"Unreleased"`` or a version
+    like ``"0.27.0"``.
     """
-    lines = changelog_text.splitlines()
-    # Find first top-level version header.
-    start = None
+    heads: list[tuple[str, int]] = []
     for i, line in enumerate(lines):
-        if line.startswith("## ["):
-            start = i
-            break
-    if start is None:
-        return None
+        if not line.startswith("## ["):
+            continue
+        close = line.find("]", 4)
+        if close == -1:
+            continue
+        heads.append((line[4:close].strip(), i))
 
-    # Find end of this version's block.
-    end = len(lines)
-    for i in range(start + 1, len(lines)):
-        if lines[i].startswith("## ["):
-            end = i
-            break
+    out: list[tuple[str, int, int]] = []
+    for n, (label, i) in enumerate(heads):
+        end = heads[n + 1][1] if n + 1 < len(heads) else len(lines)
+        out.append((label, i + 1, end))
+    return out
 
-    # Find the Security subsection.
+
+def _security_body(lines: list[str], start: int, end: int) -> str | None:
+    """Return the ``### Security`` body within ``lines[start:end]``, if any."""
     sec_start = None
-    for i in range(start + 1, end):
-        stripped = lines[i].strip()
-        if stripped == "### Security":
+    for i in range(start, end):
+        if lines[i].strip() == "### Security":
             sec_start = i + 1
             break
     if sec_start is None:
@@ -191,11 +190,77 @@ def extract_security_section(changelog_text: str) -> str | None:
     return body or None
 
 
-def read_changelog_security(project_dir: Path) -> str | None:
-    """Read ``CHANGELOG.md`` from *project_dir* and extract its Security block."""
+def extract_security_section(
+    changelog_text: str,
+    *,
+    since_version: str | None = None,
+) -> str | None:
+    """Extract the ``### Security`` content this update brings in.
+
+    Scans **every** ``## [<version>]`` section newer than *since_version*
+    (newest first) and joins their Security bodies. Returns None when no
+    such section exists or all of them are empty.
+
+    Two things this deliberately does not do, both of which it used to:
+
+    - **Stop at the first ``## [`` header.** Every release tag in this repo
+      ships an empty ``## [Unreleased]`` on top of the CHANGELOG, so the
+      first header is almost never a release — the scan found no
+      ``### Security`` under it and reported "no security changes" for
+      every update ever made, including the ones that were security
+      releases.
+    - **Look at one section only.** An update that spans several releases
+      (0.24.0 -> 0.27.0) includes the Security notes of all of them, not
+      just the newest.
+
+    ``## [Unreleased]`` is always in scope: an update that lands on the
+    branch tip installs it. At a release tag that section is empty and
+    contributes nothing. When *since_version* is None or unparseable
+    (e.g. the ``"dev"`` sentinel), the newest released section is scanned
+    — erring toward showing the notice rather than withholding it.
+    """
+    lines = changelog_text.splitlines()
+    sections = _section_bounds(lines)
+    if not sections:
+        return None
+
+    since = _parse_version(since_version) if since_version else ()
+
+    bodies: list[str] = []
+    newest_release_seen = False
+    for label, start, end in sections:
+        if label.lower() == "unreleased":
+            in_scope = True
+        elif since:
+            in_scope = _is_newer(since, _parse_version(label))
+        else:
+            # No usable baseline: the newest released section only.
+            in_scope = not newest_release_seen
+            newest_release_seen = True
+
+        if not in_scope:
+            continue
+        body = _security_body(lines, start, end)
+        if body:
+            bodies.append(body)
+
+    return "\n\n".join(bodies) or None
+
+
+def read_changelog_security(
+    project_dir: Path,
+    *,
+    since_version: str | None = None,
+) -> str | None:
+    """Read ``CHANGELOG.md`` from *project_dir* and extract its Security block.
+
+    *since_version* is the version the caller is updating **from**; every
+    released section newer than it is scanned. See
+    :func:`extract_security_section` for what happens without it.
+    """
     path = project_dir / "CHANGELOG.md"
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return None
-    return extract_security_section(text)
+    return extract_security_section(text, since_version=since_version)

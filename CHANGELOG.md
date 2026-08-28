@@ -10,6 +10,35 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo-mcp update` now actually prints its SECURITY banner.** The
+  post-update notice ("This update includes security-relevant changes")
+  had never fired for any user, at any release. `extract_security_section`
+  scanned only the *first* `## [` section of `CHANGELOG.md`, and every
+  release tag in this repo ships an empty `## [Unreleased]` on top of the
+  release it describes — so the scan looked at the empty placeholder,
+  found no `### Security`, and reported "no security changes". Twelve
+  released versions carry a `### Security` block, v0.27.0 (the accumulated
+  security release) among them; none of them were ever announced on the
+  update path.
+
+  The parser now walks every version section and reports the `### Security`
+  content of each release **newer than the version being updated from**,
+  which `update_cli` passes as `since_version=__version__` (bound at import,
+  i.e. before the fast-forward). Two consequences beyond the placeholder
+  fix: an update spanning several releases (0.24.0 -> 0.27.0) now reports
+  all of their Security notes rather than only the newest, and a release
+  already installed is no longer re-announced. `## [Unreleased]` stays in
+  scope because `--skip-verification` lands on the branch tip, which
+  installs it; at a release tag that section is empty and contributes
+  nothing.
+
+  Five tests pin the behaviour, including one that reads this repo's own
+  `CHANGELOG.md` — the previous fixtures both omitted the `## [Unreleased]`
+  header, which is exactly why the shape that occurs in production went
+  untested.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
