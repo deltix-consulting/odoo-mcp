@@ -269,7 +269,7 @@ def test_update_proceeds_with_skip_verification_flag(
     monkeypatch.setattr(update_cli, "verify_release_attestation", fake_verify)
     # Stub _run so uv sync / pytest don't actually execute.
     monkeypatch.setattr(update_cli, "_run", lambda _cmd, cwd: _completed(0))
-    monkeypatch.setattr(update_cli, "read_changelog_security", lambda _p: None)
+    monkeypatch.setattr(update_cli, "read_changelog_security", lambda _p, **_kw: None)
 
     # Stub doctor.main to a no-op so we don't drag in real doctor logic.
     import odoo_mcp.doctor as doctor_mod

@@ -143,6 +143,109 @@ def test_extract_security_no_versions():
     assert extract_security_section("# Changelog\n\nNothing here.\n") is None
 
 
+# The shape this repo's own CHANGELOG.md actually has: an empty
+# ``## [Unreleased]`` sitting on top of the release being described.
+# Every release tag ships it, so this — not the fixtures above — is what
+# the parser meets in production.
+_CHANGELOG_WITH_UNRELEASED_ON_TOP = """\
+# Changelog
+
+## [Unreleased]
+
+## [0.27.0] - 2026-08-20
+
+### Changed
+
+- Something.
+
+### Security
+
+- Patched CVE-XXXX-YYYY in the XML-RPC client.
+
+## [0.26.0] - 2026-06-16
+
+### Added
+
+- Older thing.
+"""
+
+
+_CHANGELOG_SPANNING_RELEASES = """\
+# Changelog
+
+## [Unreleased]
+
+## [0.27.0] - 2026-08-20
+
+### Added
+
+- No security note in this one.
+
+## [0.26.0] - 2026-06-16
+
+### Security
+
+- Middle-release fix.
+
+## [0.25.0] - 2026-06-16
+
+### Security
+
+- Oldest-release fix.
+
+## [0.24.0] - 2026-06-15
+
+### Security
+
+- Already installed, must not be reported.
+"""
+
+
+def test_extract_security_skips_empty_unreleased_header():
+    """An empty ``[Unreleased]`` on top must not mask the release below it."""
+    body = extract_security_section(_CHANGELOG_WITH_UNRELEASED_ON_TOP)
+    assert body is not None
+    assert "CVE-XXXX-YYYY" in body
+
+
+def test_extract_security_reports_every_release_in_the_span():
+    """Updating across several releases reports all of their Security notes."""
+    body = extract_security_section(_CHANGELOG_SPANNING_RELEASES, since_version="0.25.0")
+    assert body is not None
+    assert "Middle-release fix" in body
+    assert "Oldest-release fix" not in body
+    assert "Already installed" not in body
+
+
+def test_extract_security_includes_unreleased_content():
+    """Landing on the branch tip installs ``[Unreleased]`` — report it."""
+    text = _CHANGELOG_WITH_UNRELEASED_ON_TOP.replace(
+        "## [Unreleased]\n",
+        "## [Unreleased]\n\n### Security\n\n- Tip-only fix.\n",
+    )
+    body = extract_security_section(text, since_version="0.27.0")
+    assert body is not None
+    assert "Tip-only fix" in body
+    # 0.27.0 is not newer than the version we came from.
+    assert "CVE-XXXX-YYYY" not in body
+
+
+def test_extract_security_dev_version_falls_back_to_newest_release():
+    """The ``dev`` sentinel is unparseable — show the notice, don't withhold it."""
+    body = extract_security_section(_CHANGELOG_WITH_UNRELEASED_ON_TOP, since_version="dev")
+    assert body is not None
+    assert "CVE-XXXX-YYYY" in body
+
+
+def test_extract_security_real_repo_changelog_reports_0_27_0():
+    """Guard against regressing on the file actually shipped in this repo."""
+    repo_changelog = Path(__file__).resolve().parents[1] / "CHANGELOG.md"
+    body = extract_security_section(
+        repo_changelog.read_text(encoding="utf-8"), since_version="0.26.0"
+    )
+    assert body is not None
+
+
 def test_read_changelog_security_missing_file(tmp_path: Path):
     assert read_changelog_security(tmp_path) is None
 

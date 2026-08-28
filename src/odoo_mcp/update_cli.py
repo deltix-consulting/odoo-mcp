@@ -479,8 +479,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         print("!" * 60)
 
-    # Changelog security highlight.
-    security = read_changelog_security(project_dir)
+    # Changelog security highlight. ``__version__`` was bound at import,
+    # i.e. before the fast-forward above, so it is the version we updated
+    # *from* — every release newer than it is part of this update.
+    security = read_changelog_security(project_dir, since_version=__version__)
     if security:
         print()
         print("=" * 60)
