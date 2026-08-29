@@ -10,6 +10,39 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo-mcp config show` hid every security tunable it was asked to
+  dump.** The renderer printed eleven of the nineteen per-instance
+  settings the loader accepts. Missing: `refuse_admin_on_production`,
+  `external_comms_enabled`, `attachment_source_paths`,
+  `custom_sensitive_field_patterns`, `smart_fields_overrides`,
+  `max_commits_per_unlock`, `unlock_ttl_seconds` and both record caps —
+  i.e. exactly the settings that decide what the MCP may do on that
+  instance. `config show` is the documented answer to "what is the MCP
+  configured to do" (ONBOARDING.md, Part 3), and no other command
+  surfaces these: `doctor` reads `refuse_admin_on_production` for one
+  check without printing it, `status` doesn't touch them at all.
+
+  The record caps made the omission an actively wrong answer rather
+  than a partial one: the Defaults block prints the global
+  `max_records_hard_cap`, so an instance overriding it to 5000 rendered
+  as though the global 500 applied. `timeout_seconds` — the same
+  defaults-plus-override shape sitting two lines above — was printed in
+  both blocks all along; the caps were simply never added.
+
+  Every setting is now rendered, unset ones included, because "not
+  configured" is itself the posture an operator is checking for
+  (`external_comms_enabled: false`, `attachment_source_paths: (none,
+  source_path refused)`). `[defaults]` likewise gained
+  `rotation_warning_days` and `fields_cache_path`. Credentials handling
+  is unchanged — values are still never printed, only Keychain presence.
+
+  Four new tests, one of which walks `dataclasses.fields()` on
+  `Defaults` and `InstanceConfig` and fails if any field has no line in
+  the output — so the next tunable added to the config schema cannot
+  repeat this.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
