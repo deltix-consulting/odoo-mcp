@@ -5,8 +5,11 @@ Usage::
     odoo-mcp config show                # dump the effective config (sanitized)
     odoo-mcp config validate [PATH]     # parse and validate config; exit 0 if OK
 
-``show`` never prints credential values — only a presence check against the
-macOS Keychain. ``validate`` never authenticates or reads credentials; it only
+``show`` prints every setting the loader resolved — including the security
+tunables (admin refusal, external comms, prod-write unlock window, attachment
+source paths, redaction patterns) — because "what the MCP is configured to do"
+is exactly what those decide. It never prints credential values, only a
+presence check against the macOS Keychain. ``validate`` never authenticates or reads credentials; it only
 runs :func:`odoo_mcp.config.load_config` and reports the outcome.
 """
 
@@ -72,6 +75,8 @@ def _render_show(cfg: AppConfig, *, check_keychain: bool) -> list[str]:
     lines.append(f"timeout_seconds:       {d.timeout_seconds}")
     lines.append(f"max_records_default:   {d.max_records_default}")
     lines.append(f"max_records_hard_cap:  {d.max_records_hard_cap}")
+    lines.append(f"rotation_warning_days: {d.rotation_warning_days}")
+    lines.append(f"fields_cache_path:     {cfg.fields_cache_path or '(disabled)'}")
     lines.append(f"allowed_models:        {_format_allowlist(list(d.allowed_models))}")
     lines.append(f"denylist:              {len(MODEL_DENYLIST)} models (always blocked)")
 
@@ -91,14 +96,33 @@ def _render_instance(
     check_keychain: bool,
 ) -> list[str]:
     lines: list[str] = []
-    lines.append(f"url:                     {inst.url}")
-    lines.append(f"database:                {inst.database}")
-    lines.append(f"production:              {_bool(inst.production)}")
-    lines.append(f"credentials_env_prefix:  {inst.credentials_env_prefix}")
-    lines.append(f"credentials_status:      {_credentials_status(inst, check_keychain)}")
-    lines.append(f"timeout_seconds:         {inst.timeout_seconds}")
-    lines.append(f"rate_limit_per_minute:   {inst.rate_limit_per_minute}")
-    lines.append(f"allow_self_signed:       {_bool(inst.allow_self_signed)}")
+    lines.append(_kv("url", inst.url))
+    lines.append(_kv("database", inst.database))
+    lines.append(_kv("production", _bool(inst.production)))
+    lines.append(_kv("credentials_env_prefix", inst.credentials_env_prefix))
+    lines.append(_kv("credentials_status", _credentials_status(inst, check_keychain)))
+    lines.append(_kv("timeout_seconds", inst.timeout_seconds))
+    # Both caps are per-instance overridable. The Defaults block above prints
+    # the global pair, so omitting these here doesn't read as "not configured"
+    # — it reads as "the global value applies", which is wrong on an override.
+    lines.append(_kv("max_records_default", inst.max_records_default))
+    lines.append(_kv("max_records_hard_cap", inst.max_records_hard_cap))
+    lines.append(_kv("rate_limit_per_minute", inst.rate_limit_per_minute))
+    lines.append(_kv("allow_self_signed", _bool(inst.allow_self_signed)))
+
+    # Security posture: what this instance is allowed to do. Every one of
+    # these changes the answer to "what can the MCP do here", so a dump that
+    # claims to be the effective config has to carry them.
+    lines.append(_kv("refuse_admin_on_production", _bool(inst.refuse_admin_on_production)))
+    lines.append(_kv("external_comms_enabled", _bool(inst.external_comms_enabled)))
+    lines.append(_kv("max_commits_per_unlock", inst.max_commits_per_unlock))
+    lines.append(_kv("unlock_ttl_seconds", inst.unlock_ttl_seconds))
+    if not inst.attachment_source_paths:
+        lines.append(_kv("attachment_source_paths", "(none, source_path refused)"))
+    else:
+        lines.append("attachment_source_paths:")
+        for source_path in inst.attachment_source_paths:
+            lines.append(f"  {source_path}")
 
     # allowed_models: show full list only when overridden. Open mode gets a
     # one-line summary that includes the denylist size.
@@ -121,7 +145,33 @@ def _render_instance(
         for model in sorted(inst.sensitive_fields.keys()):
             names = sorted(inst.sensitive_fields[model])
             lines.append(f"  {model}: [{', '.join(names)}]")
+
+    # The redaction policy the scan wrote and the smart-default bypass are
+    # both field-level policy — same disclosure duty as sensitive_fields.
+    if not inst.custom_sensitive_field_patterns:
+        lines.append("custom_sensitive_field_patterns: (none)")
+    else:
+        lines.append("custom_sensitive_field_patterns:")
+        for pattern in inst.custom_sensitive_field_patterns:
+            lines.append(f"  {pattern}")
+
+    if not inst.smart_fields_overrides:
+        lines.append("smart_fields_overrides:   (none, using built-in smart defaults)")
+    else:
+        lines.append("smart_fields_overrides:")
+        for model in sorted(inst.smart_fields_overrides.keys()):
+            smart_names = inst.smart_fields_overrides[model]
+            lines.append(f"  {model}: [{', '.join(smart_names)}]")
     return lines
+
+
+def _kv(label: str, value: object) -> str:
+    """Render one ``label: value`` row on the instance block's value column.
+
+    Labels longer than the column (``refuse_admin_on_production``) overflow
+    with a single space rather than pushing every other row across.
+    """
+    return f"{label + ':':<24} {value}"
 
 
 def _bool(value: bool) -> str:
