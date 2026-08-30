@@ -10,6 +10,28 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The audit table could not tell a permanent delete from an archive
+  preview.** `odoo-mcp audit` (and the "Recent activity" block of
+  `odoo-mcp status`) rendered six of the ten fields each audit record
+  carries; `op` and `dry_run` were both dropped. Because
+  `odoo_archive_or_delete` logs `op=archive` (reversible) or `op=unlink`
+  (permanent) under one tool name, and because a `dry_run=true` preview
+  changes nothing in Odoo, a committed delete of three production
+  records rendered byte-identical to an archive dry run:
+
+  ```text
+  2026-08-30T09:00:00Z  ok  odoo_archive_or_delete  prod  sale.order  3 records 42ms
+  2026-08-30T09:00:00Z  ok  odoo_archive_or_delete  prod  sale.order  3 records 42ms
+  ```
+
+  The table now carries an `OP` column, and the detail cell leads with a
+  `dry-run` marker on preview rows. Both renderers are covered by
+  `test_render_table_surfaces_every_audit_event_field`, which walks
+  `dataclasses.fields(AuditEvent)` so a future field added to the record
+  cannot silently miss the operator's review surface.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

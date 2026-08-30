@@ -159,6 +159,12 @@ def _format_detail(entry: dict[str, Any]) -> str:
     rc = entry.get("record_count")
     dur = entry.get("duration_ms")
     parts: list[str] = []
+    # The dry-run marker leads the cell: an operator scanning "what did the
+    # MCP actually change on prod" must be able to separate previews from
+    # committed mutations at a glance. Without it a dry_run=true preview and
+    # a real commit render identically.
+    if entry.get("dry_run") is True:
+        parts.append("dry-run")
     if isinstance(rc, int):
         parts.append(f"{rc} records")
     if isinstance(dur, int):
@@ -173,21 +179,25 @@ def _format_detail(entry: dict[str, Any]) -> str:
 
 
 def _render_table(entries: list[dict[str, Any]]) -> str:
-    header = ("TIME", "RESULT", "TOOL", "INSTANCE", "MODEL", "DETAIL")
-    rows: list[tuple[str, str, str, str, str, str]] = [header]
+    header = ("TIME", "RESULT", "TOOL", "OP", "INSTANCE", "MODEL", "DETAIL")
+    rows: list[tuple[str, str, str, str, str, str, str]] = [header]
     for e in entries:
         rows.append(
             (
                 str(e.get("ts", "")),
                 str(e.get("result", "")),
                 str(e.get("tool", "")),
+                # OP is not redundant with TOOL: odoo_archive_or_delete logs
+                # either "archive" (reversible) or "unlink" (permanent), and
+                # the tool name alone cannot tell those two rows apart.
+                str(e.get("op") or "-"),
                 str(e.get("instance", "")),
                 str(e.get("model") or "-"),
                 _format_detail(e),
             )
         )
     # Compute column widths (excluding DETAIL which is last and free-form).
-    widths = [0, 0, 0, 0, 0, 0]
+    widths = [0, 0, 0, 0, 0, 0, 0]
     for row in rows:
         for i, cell in enumerate(row):
             if len(cell) > widths[i]:
