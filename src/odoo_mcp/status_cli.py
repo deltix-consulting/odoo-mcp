@@ -123,27 +123,30 @@ def _render(app: OdooMcpApp) -> str:
     else:
         # Compute dynamic column widths so long values (e.g. "model_not_allowed")
         # don't break the alignment.
-        rows: list[tuple[str, str, str, str, str, str]] = []
+        rows: list[tuple[str, str, str, str, str, str, str]] = []
         for e in recent:
             rows.append(
                 (
                     str(e.get("ts", "")),
                     str(e.get("result", "")),
                     str(e.get("tool", "")),
+                    # Same reason as the audit CLI table: odoo_archive_or_delete
+                    # logs "archive" or "unlink" under one tool name.
+                    str(e.get("op") or "-"),
                     str(e.get("instance", "-")),
                     str(e.get("model") or "-"),
                     _format_detail(e),
                 )
             )
-        widths = [0, 0, 0, 0, 0]
+        widths = [0, 0, 0, 0, 0, 0]
         for row in rows:
-            for i in range(5):  # all but the last (free-form detail)
+            for i in range(6):  # all but the last (free-form detail)
                 widths[i] = max(widths[i], len(row[i]))
-        for ts, result, tool, inst, model, detail in rows:
+        for ts, result, tool, op, inst, model, detail in rows:
             lines.append(
                 f"{ts:<{widths[0]}}  {result:<{widths[1]}}  "
-                f"{tool:<{widths[2]}}  {inst:<{widths[3]}}  "
-                f"{model:<{widths[4]}}  {detail}".rstrip()
+                f"{tool:<{widths[2]}}  {op:<{widths[3]}}  "
+                f"{inst:<{widths[4]}}  {model:<{widths[5]}}  {detail}".rstrip()
             )
 
     return "\n".join(lines) + "\n"

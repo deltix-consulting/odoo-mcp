@@ -244,3 +244,140 @@ def test_audit_files_excludes_old_rotations_when_since_set(  # type: ignore[no-u
     files_all = audit_cli._audit_files(since_minutes=None)
     names = {Path(f).name for f in files_all}
     assert f"audit-{(today - timedelta(days=30)).isoformat()}.jsonl" in names
+
+
+# ---------------------------------------------------------------------------
+# Renderer vs. record shape
+#
+# The audit table is the operator's review surface (SECURITY.md checklist:
+# "Audit log is being reviewed at a real cadence"). Every field the record
+# carries has to reach it, or the reviewer draws a conclusion the row does
+# not support.
+# ---------------------------------------------------------------------------
+
+# One probe per AuditEvent field: the value to log, and the token that must
+# show up in the rendered row. ``ts`` is added by AuditLog.log() around the
+# event, so it is probed separately below.
+_FIELD_PROBES: dict[str, tuple[Any, str]] = {
+    "instance": ("acme-prod", "acme-prod"),
+    "tool": ("odoo_archive_or_delete", "odoo_archive_or_delete"),
+    "op": ("unlink", "unlink"),
+    "model": ("sale.order", "sale.order"),
+    "result": ("ok", "ok"),
+    "record_count": (3, "3 records"),
+    "duration_ms": (42, "42ms"),
+    "dry_run": (True, "dry-run"),
+    "details": ({"error": "boom"}, "boom"),
+}
+
+
+def _probe_entry() -> dict[str, Any]:
+    entry: dict[str, Any] = {"ts": "2026-08-30T09:00:00Z"}
+    entry.update({name: value for name, (value, _) in _FIELD_PROBES.items()})
+    return entry
+
+
+def test_render_table_surfaces_every_audit_event_field() -> None:
+    """Every :class:`AuditEvent` field must reach the rendered row.
+
+    Walks the dataclass rather than a hand-written list, so adding a field
+    to the audit record without giving it an output line fails here instead
+    of silently disappearing from the operator's view.
+    """
+    import dataclasses
+
+    from odoo_mcp.audit import AuditEvent
+
+    declared = {f.name for f in dataclasses.fields(AuditEvent)}
+    assert declared == set(_FIELD_PROBES), (
+        "AuditEvent fields changed; add a probe (value + expected token) for "
+        f"{declared ^ set(_FIELD_PROBES)} and render it in _render_table."
+    )
+
+    table = audit_cli._render_table([_probe_entry()])
+    assert "2026-08-30T09:00:00Z" in table
+    for name, (_, token) in _FIELD_PROBES.items():
+        assert token in table, f"audit table drops the {name!r} field ({token!r} missing)"
+
+
+def test_render_table_separates_archive_preview_from_permanent_delete() -> None:
+    """The two odoo_archive_or_delete outcomes must not render identically.
+
+    ``mode='archive'`` logs op=archive (reversible) and ``mode='delete'``
+    logs op=unlink (permanent); a dry run changes nothing in Odoo at all.
+    Both distinctions live only in ``op`` / ``dry_run``.
+    """
+
+    def row(op: str, dry_run: bool) -> dict[str, Any]:
+        return {
+            "ts": "2026-08-30T09:00:00Z",
+            "instance": "prod",
+            "tool": "odoo_archive_or_delete",
+            "op": op,
+            "model": "sale.order",
+            "result": "ok",
+            "record_count": 3,
+            "duration_ms": 42,
+            "dry_run": dry_run,
+            "details": {},
+        }
+
+    committed_delete, archive_preview = audit_cli._render_table(
+        [row("unlink", False), row("archive", True)]
+    ).splitlines()[1:]
+    assert committed_delete != archive_preview
+    assert "unlink" in committed_delete and "dry-run" not in committed_delete
+    assert "archive" in archive_preview and "dry-run" in archive_preview
+
+
+def test_status_recent_activity_shares_the_audit_row_shape(monkeypatch: Any, tmp_path: Any) -> None:
+    """``odoo-mcp status`` renders the same rows and must not drop the same fields."""
+    from odoo_mcp import status_cli
+    from odoo_mcp.audit import AuditLog
+    from odoo_mcp.client import OdooClient
+    from odoo_mcp.config import AppConfig, Defaults, InstanceConfig
+    from odoo_mcp.credentials import Credentials
+    from odoo_mcp.dispatcher import InstanceRuntime, OdooMcpApp
+    from odoo_mcp.security.allowlist import ALLOWLIST_WILDCARD
+    from odoo_mcp.security.limits import RateLimiter
+    from odoo_mcp.security.prod_guard import ProdGuard
+
+    cfg = InstanceConfig(
+        name="prod",
+        url="https://example.odoo.com",
+        database="db",
+        credentials_env_prefix="ODOO_MCP_PROD",
+        production=True,
+        timeout_seconds=30,
+        max_records_default=50,
+        max_records_hard_cap=500,
+        rate_limit_per_minute=300,
+        allow_self_signed=False,
+        allowed_models=frozenset({ALLOWLIST_WILDCARD}),
+    )
+    creds = Credentials(instance_name=cfg.name, username="u", _api_key="k" * 10)
+    app_cfg = AppConfig(
+        path=tmp_path / "config.toml",
+        defaults=Defaults(),
+        instances={cfg.name: cfg},
+        audit_log_path=tmp_path / "audit.jsonl",
+    )
+    rl = RateLimiter()
+    rl.configure(cfg.name, cfg.rate_limit_per_minute)
+    app = OdooMcpApp(
+        config=app_cfg,
+        audit=AuditLog(app_cfg.audit_log_path),
+        prod_guard=ProdGuard(),
+        rate_limiter=rl,
+        instances={
+            cfg.name: InstanceRuntime(config=cfg, client=OdooClient(cfg, credentials=creds))
+        },
+    )
+    entry = _probe_entry() | {"instance": "prod"}
+    monkeypatch.setattr(status_cli, "_load_all_entries", lambda **_: [entry])
+
+    out = status_cli._render(app)
+    for name, (_, token) in _FIELD_PROBES.items():
+        if name == "instance":
+            token = "prod"
+        assert token in out, f"status recent-activity drops the {name!r} field ({token!r} missing)"
