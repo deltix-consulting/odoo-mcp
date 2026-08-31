@@ -102,11 +102,11 @@ def _render(app: OdooMcpApp) -> str:
             lines.append("  Writes:      unlocked (non-production instance)")
         elif app.prod_guard.is_unlocked(name, now=now_mono):
             # Peek at expiry without mutating state.
-            state = app.prod_guard._unlocked.get(name)
+            expires_in = app.prod_guard.unlock_expires_in(name, now=now_mono)
             commits = app.prod_guard.commits_remaining(name, now=now_mono)
             commits_part = f", {commits} commits remaining" if commits is not None else ""
-            if state is not None:
-                remain = _format_relative(state.expires_at - now_mono)
+            if expires_in is not None:
+                remain = _format_relative(expires_in)
                 lines.append(f"  Writes:      unlocked (auto-lock in {remain}{commits_part})")
             else:
                 lines.append("  Writes:      unlocked")
@@ -149,9 +149,51 @@ def _render(app: OdooMcpApp) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _recent_entry_payload(entry: dict[str, Any]) -> dict[str, Any]:
+    """Shape one audit entry for ``--json``.
+
+    Carries the same facts the human table shows and nothing more: the
+    identifying columns, the two fields that decide what a row *means*
+    (``op`` — ``archive`` vs ``unlink`` share one tool name — and
+    ``dry_run``, which says whether Odoo changed at all), plus the parts
+    :func:`_format_detail` renders as prose. The rest of ``details`` is
+    deliberately not forwarded, so ``--json`` discloses no more than the
+    table an operator already reads.
+    """
+    details = entry.get("details")
+    error = details.get("error") if isinstance(details, dict) else None
+    return {
+        "ts": str(entry.get("ts", "")),
+        "result": str(entry.get("result", "")),
+        "tool": str(entry.get("tool", "")),
+        "instance": str(entry.get("instance", "-")),
+        "model": entry.get("model") or None,
+        "op": entry.get("op"),
+        "dry_run": entry.get("dry_run"),
+        "record_count": entry.get("record_count"),
+        "duration_ms": entry.get("duration_ms"),
+        "error": error if isinstance(error, str) and error else None,
+    }
+
+
 def _status_payload(app: OdooMcpApp) -> dict[str, Any]:
-    """Machine-readable equivalent of :func:`_render` for ``--json``."""
+    """Machine-readable equivalent of :func:`_render` for ``--json``.
+
+    Every fact the human render shows must be reachable here — the
+    ``--json`` form is what CI and dashboards read, so an omission is
+    invisible to exactly the consumer that cannot ask a follow-up
+    question. :func:`tests.test_cli_json` pins that parity.
+    """
     now_mono = time.monotonic()
+
+    # Same 24h window as ``_render`` — see the note there on the trade.
+    all_entries = _load_all_entries(since_minutes=24 * 60)
+    last_by_instance: dict[str, dict[str, Any]] = {}
+    for e in all_entries:
+        inst = str(e.get("instance", ""))
+        if inst and inst != "-":
+            last_by_instance[inst] = e
+
     instances: list[dict[str, Any]] = []
     for name, rt in app.instances.items():
         uid = rt.client._uid  # noqa: SLF001 — same lazy-state read as the human render
@@ -168,6 +210,12 @@ def _status_payload(app: OdooMcpApp) -> dict[str, Any]:
             True if not rt.config.production else app.prod_guard.is_unlocked(name, now=now_mono)
         )
         commits_remaining = app.prod_guard.commits_remaining(name, now=now_mono)
+        # How long the window still has to run. ``writes_unlocked: true``
+        # alone cannot distinguish a window that closes in 5 seconds from
+        # one that just opened for 30 minutes — the human render has said
+        # "auto-lock in Xm" since v0.19.1.
+        expires_in = app.prod_guard.unlock_expires_in(name, now=now_mono)
+        last = last_by_instance.get(name)
         instances.append(
             {
                 "name": name,
@@ -178,6 +226,8 @@ def _status_payload(app: OdooMcpApp) -> dict[str, Any]:
                 "rate_limit": rate_info,
                 "writes_unlocked": writes_unlocked,
                 "commits_remaining": commits_remaining,
+                "unlock_expires_in_seconds": (None if expires_in is None else round(expires_in, 1)),
+                "last_call_ts": str(last.get("ts", "")) if last is not None else None,
             }
         )
     return {
@@ -185,6 +235,7 @@ def _status_payload(app: OdooMcpApp) -> dict[str, Any]:
         "config_path": str(app.config.path),
         "audit_log_path": str(app.config.audit_log_path),
         "instances": instances,
+        "recent_activity": [_recent_entry_payload(e) for e in all_entries[-5:]],
     }
 
 
