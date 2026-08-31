@@ -10,6 +10,42 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`status --json` is now the machine-readable equivalent it claims to
+  be.** `_status_payload`'s docstring called itself "machine-readable
+  equivalent of `_render`", and ONBOARDING lists `status --json` as the
+  output "for CI / scripts" — but three facts the human table has always
+  printed never reached it:
+
+  - **the unlock expiry.** The payload said `writes_unlocked: true` and
+    stopped there. A dashboard could not tell a prod-write window that
+    auto-locks in 5 seconds from one that just opened for 30 minutes —
+    the exact question a "prod writes are open" alert exists to answer.
+    The human render has printed `auto-lock in Xm` since v0.19.1. Now
+    exposed as `unlock_expires_in_seconds` (null when locked, never a
+    stale number).
+  - **the per-instance last call.** `last_call_ts` mirrors the render's
+    `(last call Xs ago)`, as an ISO timestamp rather than prose.
+  - **the recent activity rows.** The render's "last 5 audit entries"
+    block had no `--json` counterpart at all. Now `recent_activity`,
+    carrying the table's identifying columns plus `op` and `dry_run` —
+    the two fields that decide what a row *means*, since
+    `odoo_archive_or_delete` logs a reversible `archive` and a permanent
+    `unlink` under one tool name, and a `dry_run` row changed nothing in
+    Odoo. Only the `details` parts `_format_detail` already renders
+    (`record_count`, `duration_ms`, `error`) are forwarded, so `--json`
+    discloses no more than the table an operator already reads.
+
+  New `ProdGuard.unlock_expires_in()` — the sibling of
+  `commits_remaining()`, read-only and non-relocking — replaces the
+  private `_unlocked` peek `_render` used to do; reading that dict from
+  outside is how the two renderers drifted apart in the first place.
+
+  Six new tests. The parity one asserts the *implication* rather than
+  today's key list: whenever `_render` states a fact, the payload must
+  carry it, so a line added to the human render alone fails the suite.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

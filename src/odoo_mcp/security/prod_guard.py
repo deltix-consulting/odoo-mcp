@@ -228,6 +228,23 @@ class ProdGuard:
                 return None
             return state.commits_remaining
 
+    def unlock_expires_in(self, instance: str, *, now: float | None = None) -> float | None:
+        """Return seconds until auto-lock, or ``None`` if not unlocked.
+
+        The sibling of :meth:`commits_remaining`: the other half of "how
+        much of this unlock window is left". Both reporting surfaces
+        (``status`` human render and ``status --json``) need it, and
+        reading ``_unlocked`` from outside is how the two drifted apart.
+        Read-only — unlike :meth:`is_unlocked` this never auto-relocks,
+        so a status command cannot mutate guard state.
+        """
+        current = now if now is not None else time.monotonic()
+        with self._lock:
+            state = self._unlocked.get(instance)
+            if state is None or state.expires_at < current:
+                return None
+            return state.expires_at - current
+
     def touch(self, instance: str, *, now: float | None = None) -> None:
         """Extend the unlock window on activity (sliding window).
 
