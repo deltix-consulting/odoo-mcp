@@ -223,7 +223,8 @@ def test_audit_files_excludes_old_rotations_when_since_set(  # type: ignore[no-u
         d = today - timedelta(days=delta)
         (audit_dir / f"audit-{d.isoformat()}.jsonl").write_text("")
 
-    monkeypatch.setattr(audit_cli, "_audit_dir", lambda: audit_dir)
+    # ``_audit_current`` is now the single source for both the current log
+    # and the directory its rotations live in, so only one patch is needed.
     monkeypatch.setattr(audit_cli, "_audit_current", lambda: current)
 
     # 24h window: only the 1-day-old file qualifies (plus current).
@@ -244,3 +245,145 @@ def test_audit_files_excludes_old_rotations_when_since_set(  # type: ignore[no-u
     files_all = audit_cli._audit_files(since_minutes=None)
     names = {Path(f).name for f in files_all}
     assert f"audit-{(today - timedelta(days=30)).isoformat()}.jsonl" in names
+
+
+# ---------------------------------------------------------------------------
+# The reviewer must read the log the server writes.
+#
+# Every other consumer of ``[defaults] audit_log`` honours it — the server
+# opens ``cfg.audit_log_path``, doctor probes it for writability, and both
+# ``config show`` and ``status`` print it. ``audit_cli`` alone resolved
+# ``DEFAULT_AUDIT_LOG`` directly, so on an install that sets ``audit_log``
+# the review CLI read an unrelated (usually absent) file and reported "no
+# entries" — indistinguishable from a quiet system. These tests drive the
+# real ``_audit_current`` against a real config file rather than patching it
+# out, which is what let the gap survive.
+# ---------------------------------------------------------------------------
+
+
+def _write_cfg_with_audit_log(tmp_path, audit_log):  # type: ignore[no-untyped-def]
+    import os
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[defaults]\n"
+        f'audit_log = "{audit_log}"\n'
+        "\n"
+        "[instances.dev]\n"
+        'url = "https://dev.example.odoo.com"\n'
+        'database = "dev_db"\n'
+        'credentials_env_prefix = "ODOO_MCP_DEV"\n'
+        "production = false\n"
+    )
+    if os.name == "posix":
+        cfg.chmod(0o600)
+    return cfg
+
+
+def test_audit_current_follows_configured_audit_log(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    """``[defaults] audit_log`` decides which file ``odoo-mcp audit`` reads."""
+    from odoo_mcp import config as config_mod
+
+    configured = tmp_path / "logs" / "audit.jsonl"
+    configured.parent.mkdir()
+    cfg = _write_cfg_with_audit_log(tmp_path, configured)
+    monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", cfg)
+
+    assert audit_cli._audit_current() == configured
+
+
+def test_audit_reads_entries_from_the_configured_log(tmp_path, monkeypatch, capsys):  # type: ignore[no-untyped-def]
+    """An entry written to the configured log shows up in ``audit --tail``.
+
+    The regression: it used to land in the configured file and be invisible
+    to the CLI, which was reading ``~/.odoo-mcp/audit.jsonl``.
+    """
+    import json as _json
+
+    from odoo_mcp import config as config_mod
+
+    configured = tmp_path / "logs" / "audit.jsonl"
+    configured.parent.mkdir()
+    entry = _entry(datetime.now(tz=UTC), tool="odoo_write", instance="prod")
+    configured.write_text(_json.dumps(entry) + "\n")
+
+    cfg = _write_cfg_with_audit_log(tmp_path, configured)
+    monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", cfg)
+
+    assert audit_cli.main(["--tail", "5"]) == 0
+    out = capsys.readouterr().out
+    assert "odoo_write" in out
+    assert "no audit entries" not in out
+
+
+def test_audit_falls_back_to_default_when_config_is_unloadable(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    """A broken/absent config must not break the forensics command."""
+    from pathlib import Path
+
+    from odoo_mcp import config as config_mod
+    from odoo_mcp.config import DEFAULT_AUDIT_LOG
+
+    monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", tmp_path / "does-not-exist.toml")
+
+    assert audit_cli._audit_current() == Path(DEFAULT_AUDIT_LOG).expanduser()
+
+
+def test_rotations_are_resolved_beside_the_configured_log(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    """Rotated files are found next to the configured log, not next to the default.
+
+    ``AuditLog`` writes rotations with ``Path.with_name``, so they always sit
+    in the current log's directory. Deriving the scan directory independently
+    of the current log is what allowed the two to point at different places.
+    """
+    from pathlib import Path
+
+    from odoo_mcp import config as config_mod
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    current = logs / "audit.jsonl"
+    current.write_text("")
+    yesterday = (datetime.now(tz=UTC) - timedelta(days=1)).date()
+    rotated = logs / f"audit-{yesterday.isoformat()}.jsonl"
+    rotated.write_text("")
+
+    cfg = _write_cfg_with_audit_log(tmp_path, current)
+    monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", cfg)
+
+    # Compare full paths, not basenames: the developer's own
+    # ``~/.odoo-mcp`` holds an ``audit.jsonl`` plus dated rotations, so a
+    # name-only assertion passes even when the scan read the wrong directory.
+    found = {Path(f) for f in audit_cli._audit_files(since_minutes=24 * 60)}
+    assert found == {current, rotated}
+
+
+def test_status_reads_the_same_log_it_prints(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    """``status`` must not print one path and tabulate rows from another.
+
+    Asserts the implication rather than the call: whatever path the report
+    names is the path the "Recent activity" rows were loaded from.
+    """
+    from pathlib import Path
+
+    from odoo_mcp import status_cli
+
+    seen: list[Path | None] = []
+
+    def _spy(*, since_minutes=None, path=None):  # type: ignore[no-untyped-def]
+        seen.append(path)
+        return []
+
+    monkeypatch.setattr(status_cli, "_load_all_entries", _spy)
+
+    class _Cfg:
+        path = tmp_path / "config.toml"
+        audit_log_path = tmp_path / "logs" / "audit.jsonl"
+
+    class _App:
+        config = _Cfg()
+        instances: dict[str, Any] = {}
+
+    rendered = status_cli._render(_App())  # type: ignore[arg-type]
+
+    assert seen == [_Cfg.audit_log_path]
+    assert str(_Cfg.audit_log_path) in rendered

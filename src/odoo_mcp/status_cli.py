@@ -63,7 +63,9 @@ def _render(app: OdooMcpApp) -> str:
     # hours rather than reading the entire 30-day rotation history.
     # Per-instance "last call" lines may show "no activity" instead of
     # "Xd ago" for instances idle longer than 24h — acceptable trade.
-    all_entries = _load_all_entries(since_minutes=24 * 60)
+    # Pass the config's own path: the "Audit log:" line above and these
+    # rows must describe the same file, and we already hold the config.
+    all_entries = _load_all_entries(since_minutes=24 * 60, path=app.config.audit_log_path)
     last_by_instance: dict[str, dict[str, Any]] = {}
     for e in all_entries:
         inst = str(e.get("instance", ""))

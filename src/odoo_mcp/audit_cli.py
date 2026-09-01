@@ -17,18 +17,31 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_AUDIT_LOG
+from .config import DEFAULT_AUDIT_LOG, load_config
+from .errors import ConfigError
 
 _ROTATED_PATTERN = re.compile(r"audit-\d{4}-\d{2}-\d{2}\.jsonl$")
 _DATED_PATTERN = re.compile(r"audit-(\d{4}-\d{2}-\d{2})\.jsonl$")
 
 
-def _audit_dir() -> Path:
-    return Path(DEFAULT_AUDIT_LOG).expanduser().parent
-
-
 def _audit_current() -> Path:
-    return Path(DEFAULT_AUDIT_LOG).expanduser()
+    """Return the audit log the server actually writes to.
+
+    ``audit_log`` is a supported ``[defaults]`` key (see
+    ``_VALID_DEFAULT_KEYS``) and :func:`odoo_mcp.server.build_app` opens
+    ``cfg.audit_log_path``, so the *reviewer* has to follow the same
+    setting — otherwise ``odoo-mcp audit`` reports "no entries" on an
+    install that is logging normally somewhere else.
+
+    Falls back to the packaged default when the config cannot be loaded:
+    this is a forensics command and must keep working on a broken
+    install. Mirrors :func:`odoo_mcp.cache_cli._resolve_cache_path`,
+    which already does this for the sibling ``fields_cache_path`` key.
+    """
+    try:
+        return load_config().audit_log_path
+    except ConfigError:
+        return Path(DEFAULT_AUDIT_LOG).expanduser()
 
 
 def _read_last_lines(path: Path, n: int) -> list[str]:
@@ -47,7 +60,7 @@ def _read_last_lines(path: Path, n: int) -> list[str]:
     return lines[-n:] if n > 0 else lines
 
 
-def _audit_files(*, since_minutes: int | None = None) -> list[Path]:
+def _audit_files(*, since_minutes: int | None = None, path: Path | None = None) -> list[Path]:
     """Return the audit log files to scan, newest-first by date.
 
     The current ``audit.jsonl`` is always included (it holds today's
@@ -57,9 +70,16 @@ def _audit_files(*, since_minutes: int | None = None) -> list[Path]:
 
     With ``since_minutes=None`` every rotated file is included (the
     pre-v0.15.4 behaviour, used by ``--stats`` over the full history).
+
+    ``path`` overrides the configured log; callers that already hold an
+    :class:`~odoo_mcp.config.AppConfig` (``odoo-mcp status``) pass
+    ``cfg.audit_log_path`` so the config is read once and both halves of
+    the report describe the same file. Rotations are resolved relative to
+    whichever current log is in play — :class:`odoo_mcp.audit.AuditLog`
+    writes them with ``Path.with_name``, so they always sit beside it.
     """
     files: list[Path] = []
-    cur = _audit_current()
+    cur = _audit_current() if path is None else path.expanduser()
     if cur.exists():
         files.append(cur)
 
@@ -69,7 +89,7 @@ def _audit_files(*, since_minutes: int | None = None) -> list[Path]:
         cutoff_date = cutoff.date()
 
     try:
-        for entry in sorted(_audit_dir().iterdir()):
+        for entry in sorted(cur.parent.iterdir()):
             m = _DATED_PATTERN.match(entry.name)
             if not m:
                 continue
@@ -86,7 +106,9 @@ def _audit_files(*, since_minutes: int | None = None) -> list[Path]:
     return files
 
 
-def _load_all_entries(*, since_minutes: int | None = None) -> list[dict[str, Any]]:
+def _load_all_entries(
+    *, since_minutes: int | None = None, path: Path | None = None
+) -> list[dict[str, Any]]:
     """Merge the current and rotated audit logs into a single list.
 
     When ``since_minutes`` is set, rotated files older than that window
@@ -96,7 +118,7 @@ def _load_all_entries(*, since_minutes: int | None = None) -> list[dict[str, Any
     parsed as JSON; malformed lines and open-markers are silently
     skipped. Returns entries sorted by timestamp ascending.
     """
-    files = _audit_files(since_minutes=since_minutes)
+    files = _audit_files(since_minutes=since_minutes, path=path)
     entries: list[dict[str, Any]] = []
     for f in files:
         for line in _read_last_lines(f, 0):
