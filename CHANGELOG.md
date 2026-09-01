@@ -10,6 +10,43 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo-mcp audit` read the default log path, not the configured
+  one.** `audit_log` is a supported `[defaults]` key, and every other
+  consumer honours it: the server opens `cfg.audit_log_path`, `doctor`
+  probes that path for writability, and both `config show` and `status`
+  print it. `audit_cli` alone resolved `DEFAULT_AUDIT_LOG`
+  (`~/.odoo-mcp/audit.jsonl`) directly. On an install that sets
+  `audit_log` — a shared `/var/log` location, a mounted volume, a
+  per-environment file — the entire review surface (`--tail`,
+  `--errors`, `--since`, `--instance`, `--stats`, `--json`) read a
+  different, usually non-existent file and printed *"(no audit entries
+  match the filters)"*. That is indistinguishable from a quiet system,
+  so the failure is silent in the direction that matters: SECURITY.md's
+  operator checklist asks that the audit log "is being reviewed at a
+  real cadence", and the tool that does the reviewing was reading the
+  wrong file. `_audit_current()` now resolves `[defaults] audit_log`,
+  falling back to the packaged default when the config cannot be loaded
+  (this is a forensics command and has to work on a broken install) —
+  the same shape `cache_cli._resolve_cache_path` already uses for the
+  sibling `fields_cache_path` key.
+
+- **`odoo-mcp status` tabulated rows from a different file than the one
+  it printed.** `status` shows `Audit log: <configured path>` and then
+  filled both the "Recent activity" block and the per-instance "last
+  call Xs ago" line from `_load_all_entries()`, which had the bug above.
+  It now passes `app.config.audit_log_path` explicitly, so the config is
+  read once and the report cannot describe two files at the same time.
+
+- **Rotated audit files are now resolved relative to the current log.**
+  `_audit_files` derived the scan directory from `DEFAULT_AUDIT_LOG`
+  independently of the current-log lookup — two derivations of one
+  location, free to diverge. `AuditLog` writes rotations with
+  `Path.with_name`, so they always sit beside the current file;
+  `_audit_dir()` is removed and the directory now comes from the
+  resolved log itself.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
