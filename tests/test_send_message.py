@@ -68,6 +68,7 @@ def _build(
     *,
     production: bool = False,
     external_comms_enabled: bool = True,
+    max_records_hard_cap: int = 500,
 ) -> tuple[OdooMcpApp, _FakeClient]:
     cfg = InstanceConfig(
         name="dev",
@@ -76,8 +77,10 @@ def _build(
         credentials_env_prefix="ODOO_MCP_DEV",
         production=production,
         timeout_seconds=30,
-        max_records_default=50,
-        max_records_hard_cap=500,
+        # Keep the pair coherent with what config.load_config would accept:
+        # the loader refuses max_records_default above the hard cap.
+        max_records_default=min(50, max_records_hard_cap),
+        max_records_hard_cap=max_records_hard_cap,
         rate_limit_per_minute=300,
         allow_self_signed=False,
         allowed_models=frozenset({ALLOWLIST_WILDCARD}),
@@ -364,3 +367,113 @@ def test_read_only_session_blocks_send(
     )
     assert payload["ok"] is False
     assert "read-only" in payload["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Recipient-list ceiling
+# ---------------------------------------------------------------------------
+
+
+def test_partner_ids_over_the_hard_cap_are_refused(
+    tmp_path: Path, external_comms_env: None
+) -> None:
+    """The recipient list is bounded like every other id list the MCP takes.
+
+    ``partner_ids`` is the one caller-supplied list whose length is a count
+    of humans who receive an email. It has to be capped for the same reason
+    ``_read`` / ``_write`` / ``_archive_or_delete`` / ``_run_document_action``
+    cap theirs — and more so, because off production the commit needs no
+    confirmation token.
+    """
+    app, fake = _build(tmp_path, max_records_hard_cap=3)
+    payload = _call(
+        Dispatcher(app),
+        {
+            "instance": "dev",
+            "model": "res.partner",
+            "record_id": 7,
+            "body": "hi",
+            "partner_ids": [1, 2, 3, 4],
+        },
+    )
+    assert payload["ok"] is False
+    assert "3" in payload["error"]
+    assert "partner_ids" in payload["error"]
+    assert fake.message_post_calls == []
+
+
+def test_partner_ids_at_the_hard_cap_are_allowed(tmp_path: Path, external_comms_env: None) -> None:
+    """Exactly at the ceiling still works — the bound is inclusive."""
+    app, _fake = _build(tmp_path, max_records_hard_cap=3)
+    payload = _call(
+        Dispatcher(app),
+        {
+            "instance": "dev",
+            "model": "res.partner",
+            "record_id": 7,
+            "body": "hi",
+            "partner_ids": [1, 2, 3],
+        },
+    )
+    assert payload["ok"] is True
+    assert payload["preview"] is True
+    assert payload["partner_ids"] == [1, 2, 3]
+
+
+def test_over_cap_dry_run_does_not_mint_a_confirmation_token(
+    tmp_path: Path, external_comms_env: None
+) -> None:
+    """A refused preview must not hand back a token the commit could reuse.
+
+    The check sits ahead of ``create_pending`` deliberately: if the ceiling
+    were enforced only on the commit leg, the dry run would still issue a
+    token bound to the over-long payload.
+    """
+    app, fake = _build(tmp_path, production=True, max_records_hard_cap=2)
+    disp = Dispatcher(app)
+    app.prod_guard.unlock("dev", production=True)
+    payload = _call(
+        disp,
+        {
+            "instance": "dev",
+            "model": "res.partner",
+            "record_id": 7,
+            "body": "hi",
+            "partner_ids": [1, 2, 3],
+        },
+    )
+    assert payload["ok"] is False
+    assert "confirmation_token" not in payload
+    assert fake.message_post_calls == []
+
+
+def test_over_cap_call_is_refused_before_the_send(tmp_path: Path, external_comms_env: None) -> None:
+    """A direct commit (dry_run=false) is refused too, not just the preview.
+
+    Off production ``_consume_token_on_prod`` is a no-op, so this path is
+    the one an agent reaches in a single call — it is where an unbounded
+    recipient list actually turns into mail.
+    """
+    app, fake = _build(tmp_path, max_records_hard_cap=2)
+    payload = _call(
+        Dispatcher(app),
+        {
+            "instance": "dev",
+            "model": "res.partner",
+            "record_id": 7,
+            "body": "hi",
+            "partner_ids": [1, 2, 3],
+            "dry_run": False,
+        },
+    )
+    assert payload["ok"] is False
+    assert fake.message_post_calls == []
+
+
+def test_send_message_schema_states_the_recipient_ceiling(tmp_path: Path) -> None:
+    """The agent-facing contract has to name the bound it will be refused by."""
+    from odoo_mcp.tools import build_tools
+
+    tool = next(t for t in build_tools() if t.name == "odoo_send_message")
+    description = tool.inputSchema["properties"]["partner_ids"]["description"]
+    assert "max_records_hard_cap" in description

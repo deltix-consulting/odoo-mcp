@@ -1192,6 +1192,24 @@ class Dispatcher:
                 raise OdooMcpError("partner_ids must contain only integers.")
             partner_ids.append(pid)
 
+        # Bound the recipient list by the same per-instance ceiling every
+        # other caller-supplied id list already respects (``_read``,
+        # ``_write``, ``_archive_or_delete``, ``_run_document_action``).
+        # This one counts *humans who receive an email*, so it is the last
+        # list in the dispatcher that should have been left unbounded:
+        # off production no confirmation token is required, so a single
+        # ``dry_run=false`` call commits whatever length the caller
+        # computed. Checked before ``check_write`` so an over-long list is
+        # refused without touching the unlock state or minting a token.
+        cap = rt.config.max_records_hard_cap
+        if len(partner_ids) > cap:
+            raise OdooMcpError(
+                f"Cannot send to more than {cap} partner_ids at once "
+                f"(got {len(partner_ids)}); max_records_hard_cap for instance "
+                f"{ctx.instance!r}. Split the recipients across calls, or post "
+                f"once on a record whose followers are the intended audience."
+            )
+
         self.app.prod_guard.check_write(ctx.instance, rt.config.production)
 
         # Outbound communications always default to dry-run, on prod AND
