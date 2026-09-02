@@ -10,6 +10,44 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_send_message` never bounded its recipient list.** Every other
+  caller-supplied id list in the dispatcher is refused above the
+  instance's `max_records_hard_cap` — `odoo_read` ("Cannot read more
+  than N ids at once"), `odoo_write`, `odoo_archive_or_delete` and
+  `odoo_run_document_action` all carry the same three-line check.
+  `partner_ids` carried none, at any layer: no `maxItems` in the tool
+  schema, no length check in the handler, and `OdooClient.message_post`
+  passes the list straight to Odoo's `message_post`.
+
+  It is the wrong list to have left unbounded. Its length is not a
+  record count, it is a count of humans who receive an email, and
+  `odoo_send_message` is the only tool in the MCP whose side effect
+  leaves the customer's Odoo. Off production the exposure is direct:
+  `_consume_token_on_prod` returns early for non-production instances,
+  so a single `dry_run=false` call commits without a confirmation token
+  and an agent that computed `partner_ids` from a range instead of a
+  search result mails every one of them. On production the dry run does
+  gate the send, but it echoes the whole list back verbatim — while the
+  body two lines above it is truncated at 2000 characters, which is the
+  asymmetry that gave the omission away.
+
+  The recipient list is now refused above `max_records_hard_cap`, ahead
+  of `check_write` so an over-long call touches neither the unlock state
+  nor `create_pending` — a preview that cannot send must not hand back a
+  token either. The `partner_ids` schema description names the ceiling
+  so the agent can act on the refusal, and SECURITY.md's
+  runaway-resource section now states the rule for all four list-taking
+  tools instead of `read` and `write` alone.
+
+  Five tests: over-cap preview, over-cap direct commit, the inclusive
+  boundary, no token minted on a refused preview, and one pinning the
+  ceiling in the tool schema. `tests/test_send_message.py` already
+  pinned that every element of `partner_ids` is an integer — it had
+  never asked how many there were.
+
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

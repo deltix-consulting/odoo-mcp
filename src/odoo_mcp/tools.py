@@ -472,7 +472,10 @@ _TOOL_SEND_MESSAGE = Tool(
                 "type": "array",
                 "items": {"type": "integer"},
                 "default": [],
-                "description": "Recipient res.partner ids. For 'comment' type, these get the email.",
+                "description": (
+                    "Recipient res.partner ids. For 'comment' type, these get "
+                    "the email. Capped at the instance's max_records_hard_cap."
+                ),
             },
             "dry_run": {
                 "type": "boolean",

@@ -167,7 +167,10 @@ domain never reaches Odoo.
   `max_records_default` when the caller omits `limit`,
   `max_records_hard_cap` as an absolute ceiling.
 - `read` and `write` cap the `ids` list length at
-  `max_records_hard_cap`.
+  `max_records_hard_cap`; so do `archive_or_delete`,
+  `run_document_action` and `send_message`'s `partner_ids` recipient
+  list — every caller-supplied id list is bounded by the same
+  per-instance ceiling.
 - `read_group` caps `groupby` at four dimensions.
 - Per-call XML-RPC timeout (`timeout_seconds`, default 30s).
 
