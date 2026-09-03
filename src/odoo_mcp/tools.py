@@ -174,6 +174,16 @@ _TOOL_SEARCH_COUNT = Tool(
                 "description": "Odoo domain; same rules as odoo_search_read.",
                 "default": [],
             },
+            # The handler has always honoured this opt-in (a domain leaf on a
+            # default-hidden field is refused without it), but the schema is
+            # additionalProperties: false, so a schema-checking client could
+            # never send it. Declared here to match odoo_search_read.
+            "allow_sensitive_fields": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Per-call opt-in to filtering on default-hidden fields.",
+                "default": [],
+            },
         },
     },
 )
