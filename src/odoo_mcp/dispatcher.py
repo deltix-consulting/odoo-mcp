@@ -580,7 +580,7 @@ class Dispatcher:
         ctx = self._begin("odoo_search_read", args, Operation.SEARCH_READ)
         assert ctx.model is not None
         rt, model = ctx.rt, ctx.model
-        allow_sensitive = frozenset(args.get("allow_sensitive_fields") or [])
+        allow_sensitive = frozenset(_optional_list_of_str(args, "allow_sensitive_fields"))
         offset = _offset(args)
 
         fields_meta = self._fields_meta(rt, model)
@@ -667,7 +667,7 @@ class Dispatcher:
         # search_count is the sharpest value-oracle surface (a bare boolean /
         # match count, no rows to redact), so the domain redaction policy
         # matters most here.
-        allow_sensitive = frozenset(args.get("allow_sensitive_fields") or [])
+        allow_sensitive = frozenset(_optional_list_of_str(args, "allow_sensitive_fields"))
         domain = sandbox_domain(
             args.get("domain") or [],
             known,
@@ -691,7 +691,7 @@ class Dispatcher:
         ctx = self._begin("odoo_read_group", args, Operation.READ_GROUP)
         assert ctx.model is not None
         rt, model = ctx.rt, ctx.model
-        allow_sensitive = frozenset(args.get("allow_sensitive_fields") or [])
+        allow_sensitive = frozenset(_optional_list_of_str(args, "allow_sensitive_fields"))
         offset = _offset(args)
         lazy = bool(args.get("lazy", True))
 
@@ -769,7 +769,7 @@ class Dispatcher:
         assert ctx.model is not None
         rt, model = ctx.rt, ctx.model
         ids = _require_list_of_int(args, "ids")
-        allow_sensitive = frozenset(args.get("allow_sensitive_fields") or [])
+        allow_sensitive = frozenset(_optional_list_of_str(args, "allow_sensitive_fields"))
         cap = rt.config.max_records_hard_cap
         if len(ids) > cap:
             raise OdooMcpError(f"Cannot read more than {cap} ids at once.")
@@ -2686,6 +2686,29 @@ def _require_list_of_str(args: dict[str, Any], key: str) -> list[str]:
     return list(value)
 
 
+def _optional_list_of_str(args: dict[str, Any], key: str) -> list[str]:
+    """Optional list-of-strings arg. Absent, ``None``, or ``[]`` -> ``[]``.
+
+    Unlike :func:`_require_list_of_str` an empty list is legal here — it is
+    the schema default for opt-in lists. What is NOT legal is a non-list:
+    handing a raw value to ``frozenset()`` silently reinterprets it (a
+    ``str`` becomes its characters, a ``dict`` becomes its keys, an ``int``
+    raises ``TypeError``), so the shape has to be refused before it can be
+    reinterpreted.
+    """
+    value = args.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise OdooMcpError(
+            f"Argument {key!r} must be a list of field-name strings, got {type(value).__name__}."
+        )
+    for item in value:
+        if not isinstance(item, str):
+            raise OdooMcpError(f"{key!r} must contain only strings.")
+    return list(value)
+
+
 def _require_int(args: dict[str, Any], key: str) -> int:
     """Strict integer arg, no default. Rejects booleans (subclass of int)."""
     value = args.get(key)
@@ -2810,8 +2833,14 @@ def _args_shape(arguments: dict[str, Any]) -> dict[str, Any]:
             else:
                 out["values"] = _present(value)
         elif key == "allow_sensitive_fields":
-            # Never log the contents — just the count.
-            out["allow_sensitive_count"] = len(value) if isinstance(value, list) else 0
+            # Never log the contents — just the count. A non-list is refused
+            # by the handler, but the refusal is itself audited: record the
+            # shape that was attempted rather than a count of 0, which would
+            # read as "no sensitive fields were asked for".
+            if isinstance(value, list):
+                out["allow_sensitive_count"] = len(value)
+            else:
+                out["allow_sensitive_fields"] = _present(value)
         elif key == "confirmation_token":
             out["confirmation_token_present"] = bool(value)
         elif key in _SCALAR_KEYS:

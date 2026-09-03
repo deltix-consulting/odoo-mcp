@@ -59,7 +59,7 @@ relationship. The full per-threat narrative is in the next section.
 |---|---|---|---|
 | Accidental destructive writes on prod | Four gates: unlock (`ProdGuard.check_write`) + dry-run default (`effective_dry_run`) + single-use confirmation token (`consume_pending`) + burst budget. Read-only env (`ODOO_MCP_READ_ONLY=1`) and per-tool hide (`ODOO_MCP_DISABLE_TOOLS`) on top. | `tests/test_prod_guard.py`, `tests/test_archive_or_delete.py`, `tests/test_read_only_session.py` | Operator misconfigures `production = false` on a real prod Odoo. Setup wizard prompts with default `True` to mitigate. |
 | Credential exfiltration | OS credential store (Keychain / Credential Manager / libsecret), env-var purge after auth, `Credentials.__repr__` redaction, error-message scrubbing. No persistent storage of Odoo password — `renew-key` flow disposes after one use. | `tests/test_credentials.py`, `tests/test_credstore.py`, `tests/test_renew_key.py` | Compromised laptop reveals the keychain; OS account compromise reaches keys for every configured instance. |
-| Field-level PII leakage | Always-redacted regex set (`_ALWAYS_REDACTED_PATTERNS`), default-hidden per-model set (`_DEFAULT_HIDDEN`), binary stripping, `allow_sensitive_fields` opt-in per call, custom per-instance regex (`custom_sensitive_field_patterns`). | `tests/test_field_redaction.py`, `tests/test_smart_fields.py` | A custom field not matched by built-in patterns; operator must extend `custom_sensitive_field_patterns`. |
+| Field-level PII leakage | Always-redacted regex set (`_ALWAYS_REDACTED_PATTERNS`), default-hidden per-model set (`_DEFAULT_HIDDEN`), binary stripping, `allow_sensitive_fields` opt-in per call, custom per-instance regex (`custom_sensitive_field_patterns`). | `tests/test_field_redaction.py`, `tests/test_smart_fields.py`, `tests/test_allow_sensitive_fields_validation.py` | A custom field not matched by built-in patterns; operator must extend `custom_sensitive_field_patterns`. |
 | Privilege escalation via domain traversal | Domain sandbox rejects dotted fields, validates field existence + operator allowlist, caps leaves at 32. | `tests/test_domain_sandbox.py` | A custom Odoo method bypasses the sandbox; addressed by refusing arbitrary `execute_kw`. |
 | Runaway resource consumption | Per-instance token-bucket rate limiter, hard cap on record count (`max_records_hard_cap`), per-call XML-RPC timeout, latency-budget warning (`ODOO_MCP_TOOL_LATENCY_BUDGET_MS`). | `tests/test_limits.py` | A single very-slow Odoo call can still block the dispatcher for `timeout_seconds`. |
 | Unauthorized method execution | No generic `execute_kw` tool. Each Odoo method is wrapped behind a named tool with its own argument schema and security shape (`message_post` is the only named wrapper, behind double opt-in). | `tests/test_allowlist.py`, `tests/test_send_message.py` | A future maintainer adds a thin wrapper without the full pipeline. Pinned by `test_rights_modification_models_all_denied`. |
@@ -133,7 +133,10 @@ enforced:
 - Default-hidden fields (VAT, bank, SSN, employee PII) require
   per-call `allow_sensitive_fields=[...]` opt-in. The field list
   lives in `src/odoo_mcp/security/fields.py` and is kept explicit
-  rather than heuristic.
+  rather than heuristic. The argument must be a list of strings and
+  any other shape is refused: `frozenset()` reinterprets rather than
+  rejects, so a `dict` would otherwise collapse to its keys and grant
+  the opt-in through a shape the schema forbids.
 - `odoo_describe_model` marks default-hidden fields with
   `_sensitive: true` so the model knows an opt-in is required,
   without ever returning the value.

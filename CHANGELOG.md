@@ -10,6 +10,52 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **`allow_sensitive_fields` is now shape-validated before use.** The
+  per-call opt-in that unlocks default-hidden fields was passed
+  straight to `frozenset()` in all four read handlers
+  (`odoo_search_read`, `odoo_search_count`, `odoo_read_group`,
+  `odoo_read`). `frozenset()` does not reject a wrong shape, it
+  reinterprets one, so the argument had three distinct failure modes:
+  a `dict` collapsed to its keys and **granted** the opt-in through a
+  shape the schema forbids (`{"vat": true}` unlocked `vat`); a `str`
+  collapsed to its characters, so passing the field name itself was a
+  silent no-op whose refusal told the caller to do exactly what it had
+  just done; a non-iterable raised a raw `TypeError` that escaped to
+  the dispatcher's last-resort handler as `internal_error`. Every
+  other caller-supplied list on the read path was already validated
+  (`fields` and `groupby` via `_require_list_of_str`, `ids` via
+  `_require_list_of_int`, `domain` via the domain sandbox); the one
+  argument that decides whether hidden data is returned was not. Now
+  refused via a new `_optional_list_of_str` helper — which, unlike
+  `_require_list_of_str`, accepts `[]` because that is the schema
+  default for an opt-in list.
+
+- **A malformed opt-in is audited as a shape, not as a count of 0.**
+  `_args_shape` recorded `allow_sensitive_count: len(value) if
+  isinstance(value, list) else 0`, so the dict-shaped call that
+  *granted* sensitive fields was logged as having asked for none —
+  the fail-open path was also the path the audit log could not see.
+  It now falls through to the same `{present, type}` summary its
+  siblings (`fields`, `ids`, `groupby`, `values`) already use for a
+  non-list. Contents are still never logged.
+
+### Fixed
+
+- **`odoo_search_count` now declares the `allow_sensitive_fields`
+  opt-in its handler has always honoured.** The handler reads the
+  argument — its own comment calls `search_count` "the sharpest
+  value-oracle surface", so a domain leaf on a default-hidden field is
+  refused without the opt-in — but the tool's `inputSchema` never
+  listed it and sets `additionalProperties: false`. A schema-checking
+  client could not send the only argument that makes the refusal
+  actionable. Declared to match `odoo_search_read`.
+
+  33 new tests pin the refusal across all four handlers and all four
+  bad shapes, that a well-shaped opt-in still works, the audit shape,
+  and the schema/handler parity. 867 tests total (was 834).
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
