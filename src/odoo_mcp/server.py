@@ -85,10 +85,13 @@ def build_app(config_path: Any = None) -> OdooMcpApp:
     rate_limiter = RateLimiter()
 
     # Build the L2 fields cache once and share across all clients. Disabled
-    # if the operator set ``fields_cache_path = ""`` in [defaults].
+    # if the operator set ``fields_cache_path = ""`` in [defaults], and
+    # degraded to the same disabled state (with a logged warning) if the
+    # cache file itself is unusable — a regenerable metadata cache must not
+    # decide whether the server starts.
     fields_cache: PersistentFieldsCache | None = None
     if cfg.fields_cache_path is not None:
-        fields_cache = PersistentFieldsCache(cfg.fields_cache_path)
+        fields_cache = PersistentFieldsCache.open(cfg.fields_cache_path)
 
     instances: dict[str, InstanceRuntime] = {}
     for name, inst_cfg in cfg.instances.items():

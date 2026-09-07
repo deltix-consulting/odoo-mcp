@@ -10,19 +10,23 @@ wherever ``fields_cache_path`` points):
 
 We deliberately don't read the TOML config here: this CLI must work even
 if the user has a broken config (typo, bad permissions). The cache path
-falls back to the default constant.
+falls back to the default constant. For the same reason a cache *file*
+that cannot be opened at all is reported with the recovery command and a
+non-zero exit, not raised as a traceback — ``--clear`` is precisely what
+an operator runs to get out of that state.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
 from .config import DEFAULT_FIELDS_CACHE, load_config
 from .errors import ConfigError
-from .fields_cache import PersistentFieldsCache
+from .fields_cache import CACHE_UNAVAILABLE_ERRORS, PersistentFieldsCache
 
 
 def _resolve_cache_path() -> Path | None:
@@ -84,7 +88,24 @@ def main(argv: list[str] | None = None) -> int:
         print('Persistent fields cache is disabled in config (fields_cache_path = "").')
         return 0
 
-    cache = PersistentFieldsCache(cache_path)
+    # Opening is the one step that can fail on a file we did not write —
+    # truncated by a crash, a directory, mode 000. Report it instead of
+    # tracebacking: this CLI is the surface an operator reaches for when the
+    # cache is broken, and ``--clear`` is the documented way out of it.
+    try:
+        cache = PersistentFieldsCache(cache_path)
+    except CACHE_UNAVAILABLE_ERRORS as exc:
+        print(
+            f"Cannot open the fields cache at {cache_path}: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        print(
+            "It holds cached field metadata and nothing else, and is rebuilt on demand. "
+            f"Remove it to recover:\n    rm {cache_path}",
+            file=sys.stderr,
+        )
+        return 1
+
     if ns.info:
         return _print_info(cache, as_json=ns.json)
 

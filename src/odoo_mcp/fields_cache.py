@@ -24,7 +24,9 @@ Design notes
 
 The cache is opt-out at the config layer: an empty ``fields_cache_path``
 string disables the L2 entirely and the client falls back to its in-memory
-dict only.
+dict only. An unusable cache *file* reaches that same disabled state via
+:meth:`PersistentFieldsCache.open` — a regenerable metadata cache never gets
+to decide whether the server starts.
 """
 
 from __future__ import annotations
@@ -36,9 +38,17 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 logger = logging.getLogger(__name__)
+
+#: What opening the cache file can raise when the filesystem hands us
+#: something unusable: a truncated / non-SQLite file (``sqlite3.Error``), a
+#: path that is a directory or has mode ``000`` (``OSError``, including
+#: ``NotADirectoryError`` and ``PermissionError``), a full or read-only disk.
+#: Callers that want the cache only *if it works* catch this — or, more
+#: simply, use :meth:`PersistentFieldsCache.open`.
+CACHE_UNAVAILABLE_ERRORS: Final[tuple[type[BaseException], ...]] = (sqlite3.Error, OSError)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS fields (
@@ -66,6 +76,10 @@ class PersistentFieldsCache:
     Construction creates (or opens) the DB file, sets ``chmod 0o600`` if we
     just created it, and ensures the schema exists. All public methods are
     safe to call from multiple threads.
+
+    The constructor raises :data:`CACHE_UNAVAILABLE_ERRORS` on a file it
+    cannot open; :meth:`open` is the degrade-to-``None`` variant every
+    in-process caller should use.
     """
 
     def __init__(self, path: Path, ttl_seconds: int = 86400) -> None:
@@ -79,6 +93,38 @@ class PersistentFieldsCache:
             conn.commit()
         if not existed:
             self._chmod_owner_only()
+
+    @classmethod
+    def open(cls, path: Path, ttl_seconds: int = 86400) -> PersistentFieldsCache | None:
+        """Open the L2 cache, or return ``None`` if the file is unusable.
+
+        The L2 is a pure performance optimization — metadata only, no secrets
+        and no record values — and "no L2" is already a first-class runtime
+        state: an operator selects it with ``fields_cache_path = ""``, and
+        :meth:`odoo_mcp.client.OdooClient.fields_get` guards every use of the
+        cache with a ``None`` check. A cache file the *filesystem* hands us in
+        an unusable shape must therefore reach that same state rather than
+        abort the caller — otherwise a regenerable performance file decides
+        whether the MCP server starts at all.
+
+        Every other method on this class already logs and continues on
+        :class:`sqlite3.Error`; the constructor is the one that raises. It
+        still does, so a caller that genuinely needs the cache can say so by
+        constructing directly. This factory is for the callers that only want
+        it when it works.
+        """
+        try:
+            return cls(path, ttl_seconds)
+        except CACHE_UNAVAILABLE_ERRORS as exc:
+            logger.warning(
+                "Persistent fields cache at %s is unusable (%s: %s) — continuing with the "
+                "in-memory cache only. It holds cached field metadata and nothing else; "
+                "delete the file to have it rebuilt on demand.",
+                path,
+                type(exc).__name__,
+                exc,
+            )
+            return None
 
     # --- file-mode hardening ------------------------------------------------
 

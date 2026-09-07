@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
 from pathlib import Path
 
-from odoo_mcp.fields_cache import PersistentFieldsCache
+from odoo_mcp.fields_cache import CACHE_UNAVAILABLE_ERRORS, PersistentFieldsCache
 
 
 def _payload(n: int = 1) -> dict[str, dict[str, object]]:
@@ -181,3 +182,65 @@ def test_round_trip_uses_current_schema_version(tmp_path: Path) -> None:
     cache.put("dev", "res.partner", payload)
     out = cache.get("dev", "res.partner")
     assert out == payload
+
+
+# --- unusable cache FILE (as opposed to an unusable row) ------------------
+#
+# ``test_corrupt_payload_treated_as_miss`` covers a bad row inside a healthy
+# DB. These cover the other corruption: a cache file the filesystem hands us
+# in a shape SQLite cannot open at all.
+
+
+def _unusable_paths(tmp_path: Path) -> list[tuple[str, Path]]:
+    truncated = tmp_path / "truncated.db"
+    truncated.write_bytes(b"SQLite format 3\x00 ...cut off mid-write by a crash")
+
+    unreadable = tmp_path / "unreadable.db"
+    unreadable.write_bytes(b"")
+    unreadable.chmod(0o000)
+
+    a_directory = tmp_path / "a-directory.db"
+    a_directory.mkdir()
+
+    parent_is_a_file = tmp_path / "notadir"
+    parent_is_a_file.write_text("x")
+
+    return [
+        ("truncated", truncated),
+        ("unreadable", unreadable),
+        ("a_directory", a_directory),
+        ("parent_is_a_file", parent_is_a_file / "sub" / "fc.db"),
+    ]
+
+
+def test_constructor_still_raises_on_an_unusable_file(tmp_path: Path) -> None:
+    """The strict constructor keeps its contract — ``open`` is the soft variant."""
+    for label, path in _unusable_paths(tmp_path):
+        try:
+            PersistentFieldsCache(path)
+        except CACHE_UNAVAILABLE_ERRORS:
+            continue
+        raise AssertionError(f"{label}: constructor unexpectedly succeeded")
+
+
+def test_open_returns_none_on_an_unusable_file(tmp_path: Path) -> None:
+    """Every shape the constructor rejects degrades to ``None``, not an exception."""
+    for label, path in _unusable_paths(tmp_path):
+        assert PersistentFieldsCache.open(path) is None, label
+
+
+def test_open_warns_and_names_the_path(tmp_path: Path, caplog) -> None:
+    bad = tmp_path / "truncated.db"
+    bad.write_bytes(b"not a database")
+    with caplog.at_level(logging.WARNING, logger="odoo_mcp.fields_cache"):
+        assert PersistentFieldsCache.open(bad) is None
+    assert str(bad) in caplog.text
+    # The operator needs the remedy, not just the symptom.
+    assert "delete the file" in caplog.text.lower()
+
+
+def test_open_returns_a_working_cache_on_a_healthy_file(tmp_path: Path) -> None:
+    cache = PersistentFieldsCache.open(tmp_path / "fc.db")
+    assert cache is not None
+    cache.put("dev", "res.partner", _payload())
+    assert cache.get("dev", "res.partner") == _payload()

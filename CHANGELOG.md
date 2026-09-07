@@ -10,6 +10,36 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A regenerable metadata cache can no longer stop the server from
+  starting.** `PersistentFieldsCache.__init__` was the only method on the
+  class that did not fail soft — `get`, `put`, `invalidate`, `clear` and
+  `info` all catch `sqlite3.Error` and log — so a cache file the filesystem
+  handed back in an unusable shape (truncated by a crash, replaced by a
+  directory, mode `000`, a read-only or full disk) raised out of
+  `build_app()` and the whole MCP server refused to start: every tool, every
+  instance, over a file that holds nothing but cached `fields_get` metadata
+  and is rebuilt on demand. `odoo-mcp status` tracebacked with it (it only
+  catches `OdooMcpError`), and so did `odoo-mcp cache --info` and
+  `odoo-mcp cache --clear` — the documented way out of a broken cache was
+  itself a casualty of the broken cache.
+
+  "No L2 cache" was already a fully supported runtime state: an operator
+  selects it with `fields_cache_path = ""`, and `OdooClient.fields_get`
+  guards every use with a `None` check. The fix routes the filesystem's
+  version of that state to the same place. New
+  `PersistentFieldsCache.open()` returns `None` and logs a warning naming
+  the path and the remedy; `build_app` uses it and continues with the
+  in-memory L1 only. The strict constructor keeps its contract for callers
+  that genuinely need the cache. `odoo-mcp cache` reports the underlying
+  error and the `rm` that recovers it, exiting 1 instead of tracebacking.
+
+  Nine new tests. The existing `test_corrupt_payload_treated_as_miss`
+  covered a bad *row* inside a healthy database; nothing covered a bad
+  *file*, and every test that reaches `build_app` sets
+  `fields_cache_path = ""`, so the wired-up path was never exercised.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
