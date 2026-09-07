@@ -1312,3 +1312,31 @@ def test_scheduler_config_format_with_space_separator(
     assert rc == 0
     out = capsys.readouterr().out
     assert "ODOO_MCP_COMMAND=" in out
+
+
+# ---------------------------------------------------------------------------
+# Real-home write guard (tests/conftest.py::_no_real_home_config_writes)
+# ---------------------------------------------------------------------------
+
+
+def test_real_home_write_guard_refuses_a_write_into_the_real_home() -> None:
+    """The autouse guard must turn a real-home config write into a failure.
+
+    ``_atomic_write_text`` is the single choke point for every config file
+    the project writes, and its destinations (``~/.odoo-mcp/config.toml``,
+    the Claude Desktop JSON, ``~/.codex/config.toml``) are module-level
+    constants bound at import — so a test that reaches a registration helper
+    silently rewrites the developer's real files. This pins the guard that
+    catches that, so it cannot be dropped without a red suite.
+    """
+    target = Path.home() / ".odoo-mcp" / "guard-probe-should-never-exist.toml"
+    with pytest.raises(AssertionError, match="real home directory"):
+        setup_wizard._atomic_write_text(target, "x = 1\n")
+    assert not target.exists()
+
+
+def test_real_home_write_guard_allows_writes_under_tmp_path(tmp_path: Path) -> None:
+    """The guard must not interfere with tests that redirect to ``tmp_path``."""
+    target = tmp_path / "nested" / "config.toml"
+    setup_wizard._atomic_write_text(target, "x = 1\n")
+    assert target.read_text() == "x = 1\n"

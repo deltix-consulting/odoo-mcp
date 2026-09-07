@@ -222,6 +222,17 @@ def _stub_update_preconditions(monkeypatch: pytest.MonkeyPatch, project_dir: Any
     monkeypatch.setattr(update_cli, "_upstream_commit", lambda _p, _b: "bbb")
     monkeypatch.setattr(update_cli, "_confirm", lambda _msg: True)
 
+    # Both of these run against the developer's REAL home directory when the
+    # update flow gets past the merge: the Codex and Claude Desktop config
+    # destinations are module-level constants in ``setup_wizard``, bound from
+    # ``Path.home()`` at import, so nothing a test does to ``HOME`` redirects
+    # them. ``_maybe_register_codex`` rewrites ``~/.codex/config.toml`` (and
+    # *registers* odoo-mcp there on a machine where it was not registered);
+    # ``_maybe_migrate_launcher`` rewrites the real Claude Desktop config and
+    # deletes ``~/.odoo-mcp/launch.sh``. Neither is under test here.
+    monkeypatch.setattr(update_cli, "_maybe_migrate_launcher", lambda: None)
+    monkeypatch.setattr(update_cli, "_maybe_register_codex", lambda: None)
+
     git_mock = MagicMock()
 
     def fake_git(

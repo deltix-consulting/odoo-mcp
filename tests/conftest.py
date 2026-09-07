@@ -26,6 +26,57 @@ if str(SRC) not in sys.path:
 
 
 # ---------------------------------------------------------------------------
+# Real-home write guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_real_home_config_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Fail any test that writes one of our config files into the real home.
+
+    ``setup_wizard._atomic_write_text`` is the single choke point for every
+    config file this project writes: ``~/.odoo-mcp/config.toml``, the Claude
+    Desktop JSON, ``~/.codex/config.toml`` and the onboarding suggestions
+    file. Those destinations are module-level constants resolved from
+    ``Path.home()`` / ``$CODEX_HOME`` **at import time**, so a test that
+    drives a flow reaching ``_register_codex`` or ``_register_claude_desktop``
+    hits the developer's real files — setting ``HOME`` inside the test cannot
+    redirect a constant that was bound before the test started. The only
+    defences are stubbing the call or this guard.
+
+    The guard turns a silent mutation of the developer's machine into a test
+    failure. Writes aimed at pytest's own temp tree are left alone, so tests
+    that legitimately point the constants at ``tmp_path`` are unaffected.
+    """
+    from odoo_mcp import setup_wizard
+
+    real_home = Path.home().resolve()
+    basetemp = tmp_path_factory.getbasetemp().resolve()
+    original = setup_wizard._atomic_write_text
+
+    def _guarded(target: Path, content: str, *, mode: int = 0o600) -> None:
+        resolved = Path(target).expanduser().resolve()
+        under_home = resolved == real_home or real_home in resolved.parents
+        under_tmp = resolved == basetemp or basetemp in resolved.parents
+        if under_home and not under_tmp:
+            msg = (
+                f"test wrote to the real home directory: {resolved}\n"
+                f"Stub the call (see _stub_update_preconditions in "
+                f"tests/test_attestation.py) or point the destination at "
+                f"tmp_path. Config destinations in setup_wizard are "
+                f"module-level constants, so monkeypatching HOME will not "
+                f"redirect them."
+            )
+            raise AssertionError(msg)
+        original(target, content, mode=mode)
+
+    monkeypatch.setattr(setup_wizard, "_atomic_write_text", _guarded)
+
+
+# ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
 
