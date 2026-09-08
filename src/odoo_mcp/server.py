@@ -12,7 +12,6 @@ See :mod:`odoo_mcp.dispatcher` for the per-call security pipeline.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from mcp.server import Server
@@ -30,6 +29,7 @@ from .dispatcher import (
     OdooMcpApp,
     _args_shape,
     _sanitize_details,
+    hidden_tool_names,
 )
 from .fields_cache import PersistentFieldsCache
 from .security.fields import compile_extra_patterns
@@ -38,22 +38,6 @@ from .security.prod_guard import ProdGuard
 from .tools import build_tools
 
 _logger = logging.getLogger(__name__)
-
-
-def _disabled_tools() -> frozenset[str]:
-    """Return tool names hidden by ``ODOO_MCP_DISABLE_TOOLS``.
-
-    Comma-separated list (whitespace tolerated). Empty / unset → no tools
-    hidden. This filters the ``tools/list`` advertisement so a well-behaved
-    client never sees the tool. Enforcement is independent: the dispatcher
-    re-reads the same env var per call (see
-    :func:`odoo_mcp.dispatcher._disabled_tool_names`) and refuses a disabled
-    tool sent by name directly, so a misbehaving or prompt-injected client
-    cannot invoke it either.
-    """
-    raw = os.environ.get("ODOO_MCP_DISABLE_TOOLS", "")
-    names = {n.strip() for n in raw.split(",") if n.strip()}
-    return frozenset(names)
 
 
 __all__ = [
@@ -111,20 +95,11 @@ def build_server(app: OdooMcpApp) -> Server:
     server: Server = Server("odoo-mcp")
     dispatcher = Dispatcher(app)
     all_tools = build_tools()
-    disabled = set(_disabled_tools())
-    # External-communications tools are double-gated: they only show up
-    # in tools/list if (a) the env var is set AND (b) at least one
-    # configured instance has external_comms_enabled. Otherwise the
-    # tool is hidden, just as if the operator listed it in
-    # ODOO_MCP_DISABLE_TOOLS. The dispatcher refuses calls to a hidden
-    # tool too — this is defense in depth, not the primary gate.
-    if os.environ.get("ODOO_MCP_ENABLE_EXTERNAL_COMMS", "").strip().lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    } or not any(rt.config.external_comms_enabled for rt in app.instances.values()):
-        disabled.add("odoo_send_message")
+    # ODOO_MCP_DISABLE_TOOLS plus the external-communications double gate.
+    # Computed by the dispatcher so that this advertisement, the per-call
+    # refusal, and the ``odoo_help`` catalogue all read the same answer;
+    # hiding a tool here is defense in depth, not the primary gate.
+    disabled = set(hidden_tool_names(app))
     if disabled:
         unknown = disabled - {t.name for t in all_tools}
         if unknown:

@@ -211,6 +211,37 @@ class OdooMcpApp:
         return inst
 
 
+def hidden_tool_names(app: OdooMcpApp) -> frozenset[str]:
+    """Tool names this process does not serve, for this env + config.
+
+    The single source of truth for "which tools exist right now". Two
+    independent reasons a tool is hidden:
+
+    * the operator listed it in ``ODOO_MCP_DISABLE_TOOLS``;
+    * it is ``odoo_send_message`` and the double opt-in for outbound
+      communications is not satisfied (env var AND at least one instance
+      with ``external_comms_enabled``) — see
+      :func:`_external_comms_globally_enabled`, whose docstring already
+      states the gate governs whether the tool is "invoked or even
+      advertised".
+
+    Both inputs are read per call (env vars are cheap and tests toggle
+    them dynamically), and neither touches Odoo — safe to call from
+    ``odoo_help``, which promises never to authenticate.
+
+    Two callers, deliberately: :func:`odoo_mcp.server.build_server`
+    filters the ``tools/list`` advertisement with it, and
+    :meth:`Dispatcher._help` filters its capability catalogue with it, so
+    the two answers cannot drift.
+    """
+    hidden = set(_disabled_tool_names())
+    if not _external_comms_globally_enabled() or not any(
+        rt.config.external_comms_enabled for rt in app.instances.values()
+    ):
+        hidden.add("odoo_send_message")
+    return frozenset(hidden)
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
@@ -415,6 +446,11 @@ class Dispatcher:
         """Return a capability overview. Never authenticates, never contacts Odoo.
 
         Default response is a terse summary + tool one-liners + instance list.
+        The tool list is ``_HELP_TOOLS_TERSE`` minus whatever
+        :func:`hidden_tool_names` says this process does not serve, so it
+        matches the ``tools/list`` advertisement. A regression test pins the
+        catalogue against :func:`odoo_mcp.tools.build_tools`.
+
         Pass ``verbose=true`` to include the cookbook (common_patterns with
         examples) and gotchas — useful at the start of a session, but ~3x the
         token cost.
@@ -435,10 +471,15 @@ class Dispatcher:
                 "instances": instances,
             }
         else:
+            # Filter the catalogue through the same helper that filters
+            # ``tools/list``. Advertising a tool the dispatcher will refuse
+            # (ODOO_MCP_DISABLE_TOOLS, or send_message without the double
+            # opt-in) sends the agent down a dead end.
+            hidden = hidden_tool_names(self.app)
             payload = {
                 "version": __version__,
                 "summary": _HELP_SUMMARY_TERSE,
-                "tools": _HELP_TOOLS_TERSE,
+                "tools": [t for t in _HELP_TOOLS_TERSE if t["name"] not in hidden],
                 "instances": instances,
             }
         self._audit("odoo_help", Operation.HELP, None, None, 0, False, {})
@@ -2538,6 +2579,22 @@ _HELP_TOOLS_TERSE: list[dict[str, str]] = [
     {
         "name": "odoo_diagnose_routing",
         "purpose": "Stock rules + picking types for a (product, warehouse) pair.",
+    },
+    {
+        "name": "odoo_send_message",
+        "purpose": "Chatter message + email to partner_ids. Double opt-in; dry-runs.",
+    },
+    {
+        "name": "odoo_log_note",
+        "purpose": "Internal log note on a record. Never emails. Dry-run -> commit.",
+    },
+    {
+        "name": "odoo_run_document_action",
+        "purpose": "Confirm / cancel / post / validate. Hardcoded (model, action) map.",
+    },
+    {
+        "name": "odoo_create_attachment",
+        "purpose": "Attach a file to a record. Inline base64 or allowlisted source_path.",
     },
 ]
 

@@ -10,6 +10,42 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_help` advertised 14 of the 18 tools the server serves.**
+  `_HELP_TOOLS_TERSE` is a hand-maintained literal introduced in
+  v0.11.0 and never extended: `odoo_send_message`, `odoo_log_note`,
+  `odoo_run_document_action` and `odoo_create_attachment` were absent
+  from the capability catalogue, so an agent that asked what it could
+  do was told the bounded, dry-run-gated write tools did not exist —
+  and reached for `odoo_write` on a chatter-shaped task instead. The
+  four entries are added, and a regression test pins the catalogue
+  against `build_tools()` so a new tool cannot ship without one.
+
+- **`odoo_help` advertised tools this process refuses to run.** The
+  catalogue was a static literal, so `ODOO_MCP_DISABLE_TOOLS` hid a
+  tool from `tools/list` and from the dispatcher but not from
+  `odoo_help`, and `odoo_send_message` was never listed even when the
+  operator had satisfied both external-communications opt-ins. The
+  catalogue is now filtered by the same computation that filters the
+  advertisement.
+
+### Changed
+
+- **One derivation for "which tools does this process serve".**
+  `dispatcher.hidden_tool_names(app)` folds `ODOO_MCP_DISABLE_TOOLS`
+  together with the external-communications double gate.
+  `server.build_server` and `Dispatcher._help` are both consumers;
+  `server._disabled_tools` (a verbatim duplicate of
+  `dispatcher._disabled_tool_names`) and `build_server`'s inline copy
+  of the comms-gate env parse are gone. No behaviour change to
+  `tools/list`.
+
+- The `odoo_help` default-mode size gate moves from 1900 to 2250
+  characters. The old ceiling was measured against the incomplete
+  14-tool catalogue; a complete 18-tool list costs ~2.1k on the test
+  fixture, leaving about one tool of headroom as before.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

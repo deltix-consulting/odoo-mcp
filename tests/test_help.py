@@ -8,13 +8,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from odoo_mcp.audit import AuditLog
 from odoo_mcp.client import OdooClient
 from odoo_mcp.config import AppConfig, Defaults, InstanceConfig
 from odoo_mcp.credentials import Credentials
-from odoo_mcp.dispatcher import Dispatcher, InstanceRuntime, OdooMcpApp
+from odoo_mcp.dispatcher import (
+    _HELP_TOOLS_TERSE,
+    Dispatcher,
+    InstanceRuntime,
+    OdooMcpApp,
+    hidden_tool_names,
+)
 from odoo_mcp.security.limits import RateLimiter
 from odoo_mcp.security.prod_guard import ProdGuard
 from odoo_mcp.tools import build_tools
@@ -156,3 +164,87 @@ def test_help_and_list_instances_are_read_ops() -> None:
     assert is_read(Operation.LIST_INSTANCES)
     assert not is_write(Operation.HELP)
     assert not is_write(Operation.LIST_INSTANCES)
+
+
+def _help_tool_names(dispatcher: Dispatcher) -> list[str]:
+    payload = _call(dispatcher, "odoo_help")
+    tools = payload["tools"]
+    assert isinstance(tools, list)
+    return [t["name"] for t in tools]
+
+
+def test_help_catalogue_matches_the_served_tool_list() -> None:
+    """``odoo_help`` must name every tool ``build_tools`` serves, in that order.
+
+    ``_HELP_TOOLS_TERSE`` is a hand-maintained literal that was correct in
+    v0.11.0 and then stopped being extended: v0.27.0 served 18 tools and the
+    catalogue named 14, silently omitting ``odoo_send_message``,
+    ``odoo_log_note``, ``odoo_run_document_action`` and
+    ``odoo_create_attachment``. Pin the parity so adding a tool without a
+    catalogue entry fails here instead of in a customer's session.
+    """
+    assert [t["name"] for t in _HELP_TOOLS_TERSE] == [t.name for t in build_tools()]
+
+
+def test_help_catalogue_entries_are_one_liners() -> None:
+    """Every catalogue entry carries a non-empty purpose (terse mode's whole job)."""
+    for entry in _HELP_TOOLS_TERSE:
+        assert set(entry) == {"name", "purpose"}
+        assert entry["purpose"].strip()
+
+
+def test_help_omits_a_tool_disabled_by_env(tmp_path: Path, monkeypatch: Any) -> None:
+    """A tool hidden from tools/list must not be advertised by odoo_help either.
+
+    The dispatcher refuses ``ODOO_MCP_DISABLE_TOOLS`` names per call, and
+    ``build_server`` drops them from the advertisement. The help catalogue is
+    the third renderer of the same state and has to agree.
+    """
+    dispatcher = Dispatcher(_build_app(tmp_path))
+
+    monkeypatch.delenv("ODOO_MCP_DISABLE_TOOLS", raising=False)
+    assert "odoo_write" in _help_tool_names(dispatcher)
+
+    monkeypatch.setenv("ODOO_MCP_DISABLE_TOOLS", "odoo_write, odoo_archive_or_delete")
+    names = _help_tool_names(dispatcher)
+    assert "odoo_write" not in names
+    assert "odoo_archive_or_delete" not in names
+    # Everything else survives the filter.
+    assert "odoo_search_read" in names
+
+
+def test_help_gates_send_message_on_the_double_opt_in(tmp_path: Path, monkeypatch: Any) -> None:
+    """``odoo_send_message`` is advertised only when both opt-ins are satisfied."""
+    monkeypatch.delenv("ODOO_MCP_DISABLE_TOOLS", raising=False)
+
+    # Neither gate: hidden.
+    monkeypatch.delenv("ODOO_MCP_ENABLE_EXTERNAL_COMMS", raising=False)
+    closed = _build_app(tmp_path)
+    assert "odoo_send_message" not in _help_tool_names(Dispatcher(closed))
+
+    # Env var only, instance flag still false: still hidden.
+    monkeypatch.setenv("ODOO_MCP_ENABLE_EXTERNAL_COMMS", "1")
+    assert "odoo_send_message" not in _help_tool_names(Dispatcher(closed))
+
+    # Both gates: advertised.
+    opened = _build_app(tmp_path)
+    for name, rt in opened.instances.items():
+        opened.instances[name] = InstanceRuntime(
+            config=replace(rt.config, external_comms_enabled=True),
+            client=rt.client,
+        )
+    assert "odoo_send_message" in _help_tool_names(Dispatcher(opened))
+
+
+def test_help_catalogue_filter_agrees_with_build_server(tmp_path: Path, monkeypatch: Any) -> None:
+    """The advertisement and the catalogue are filtered by the same helper."""
+    monkeypatch.setenv("ODOO_MCP_DISABLE_TOOLS", "odoo_read_group")
+    monkeypatch.delenv("ODOO_MCP_ENABLE_EXTERNAL_COMMS", raising=False)
+    app = _build_app(tmp_path)
+
+    hidden = hidden_tool_names(app)
+    advertised = [t.name for t in build_tools() if t.name not in hidden]
+
+    assert _help_tool_names(Dispatcher(app)) == advertised
+    assert "odoo_read_group" not in advertised
+    assert "odoo_send_message" not in advertised
