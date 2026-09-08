@@ -3,6 +3,12 @@
 Hides specific tools from the MCP ``tools/list`` advertisement so a
 client never sees them — defense-in-depth on top of the per-tool
 allowlist + read-only session toggle.
+
+The env var is parsed once, by ``dispatcher._disabled_tool_names``;
+``dispatcher.hidden_tool_names`` folds in the external-communications
+double gate on top of it. ``server.build_server`` and the ``odoo_help``
+catalogue are both consumers, so they cannot disagree about which tools
+this process serves.
 """
 
 from __future__ import annotations
@@ -16,21 +22,23 @@ import pytest
 from mcp.types import ListToolsRequest
 
 from odoo_mcp import server
+from odoo_mcp.dispatcher import _disabled_tool_names, hidden_tool_names
+from odoo_mcp.tools import build_tools
 
 
 def test_no_env_returns_full_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ODOO_MCP_DISABLE_TOOLS", raising=False)
-    assert server._disabled_tools() == frozenset()
+    assert _disabled_tool_names() == frozenset()
 
 
 def test_env_parses_comma_list(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ODOO_MCP_DISABLE_TOOLS", "odoo_create,odoo_write")
-    assert server._disabled_tools() == frozenset({"odoo_create", "odoo_write"})
+    assert _disabled_tool_names() == frozenset({"odoo_create", "odoo_write"})
 
 
 def test_env_tolerates_whitespace_and_empties(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ODOO_MCP_DISABLE_TOOLS", " odoo_create , , odoo_archive_or_delete  ")
-    assert server._disabled_tools() == frozenset({"odoo_create", "odoo_archive_or_delete"})
+    assert _disabled_tool_names() == frozenset({"odoo_create", "odoo_archive_or_delete"})
 
 
 def _list_tools_via_server(srv: Any) -> list[str]:
@@ -149,3 +157,27 @@ def test_no_disable_env_allows_call(
     app = make_app()
     payload = _call(app, "odoo_help", {"instance": "dev"})
     assert payload["ok"] is True
+
+
+def test_advertised_list_is_build_tools_minus_hidden(
+    monkeypatch: pytest.MonkeyPatch,
+    make_app: Callable[..., Any],
+) -> None:
+    """``tools/list`` is exactly ``build_tools()`` minus ``hidden_tool_names``.
+
+    ``build_server`` used to compute the external-communications gate inline,
+    duplicating ``_external_comms_globally_enabled``; ``odoo_help`` rendered a
+    third, hardcoded answer. Pin the advertisement to the shared helper so the
+    two renderers stay derivable from one computation.
+    """
+    monkeypatch.setenv("ODOO_MCP_DISABLE_TOOLS", "odoo_create")
+    monkeypatch.delenv("ODOO_MCP_ENABLE_EXTERNAL_COMMS", raising=False)
+    app = make_app()
+
+    hidden = hidden_tool_names(app)
+    advertised = _list_tools_via_server(server.build_server(app))
+
+    assert advertised == [t.name for t in build_tools() if t.name not in hidden]
+    assert "odoo_create" in hidden
+    # The double gate is part of the same answer, not a separate inline check.
+    assert "odoo_send_message" in hidden

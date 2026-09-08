@@ -337,17 +337,21 @@ def test_read_group_include_domain_keeps_domain(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_help_default_under_1500_chars(tmp_path: Path) -> None:
+def test_help_default_stays_terse(tmp_path: Path) -> None:
     fake = _FakeClient()
     app = _build_app(tmp_path, fake)
     dispatcher = Dispatcher(app)
 
     payload, size = _call(dispatcher, "odoo_help", {})
     assert payload["ok"] is True
-    # 1900 chars is the practical floor: tools list (16 entries, incl.
-    # odoo_diagnose_routing since v0.22.0) + summary + 1 instance block
-    # ~= 1.8k. The verbose response on the same fixture is ~3.5k.
-    assert size < 1900, f"default help payload too large: {size} chars"
+    # The tools list is one line per tool served by ``build_tools`` (18
+    # since v0.26.0) at ~85 chars each, plus summary + 1 instance block:
+    # ~2.1k on this fixture. The previous 1900 gate was set against a
+    # catalogue that named only 14 of the 18 — the ceiling encoded the
+    # omission rather than a budget, so it moves with the fix that
+    # completes the list. Roughly one tool of headroom, as before.
+    # The verbose response on the same fixture is ~3.5k.
+    assert size < 2250, f"default help payload too large: {size} chars"
     assert "tools" in payload
     # Default mode has no cookbook.
     assert "common_patterns" not in payload
