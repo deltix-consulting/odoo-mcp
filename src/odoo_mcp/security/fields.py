@@ -21,6 +21,7 @@ in a hurry.
 
 from __future__ import annotations
 
+import difflib
 import re
 from typing import Any, Final
 
@@ -287,6 +288,49 @@ def is_default_hidden(
     return field_name in _DEFAULT_HIDDEN.get(model, frozenset())
 
 
+# How many alternatives a "did you mean" hint offers, and difflib's
+# similarity floor. Three keeps an error message an error message rather
+# than a field dump; 0.6 is difflib's own default and stays silent on
+# names that merely share a prefix.
+_SUGGESTION_LIMIT: Final[int] = 3
+_SUGGESTION_CUTOFF: Final[float] = 0.6
+
+
+def suggest_field_names(
+    name: str,
+    known_fields: frozenset[str],
+    *,
+    extra_redacted: tuple[re.Pattern[str], ...] = (),
+) -> str:
+    """Recovery hint for a rejected field *name*, as a message suffix.
+
+    Always ends with the ``odoo_describe_model`` pointer, and prepends a
+    "Did you mean" list when *known_fields* holds close matches. The
+    validators already receive the full valid set, so this costs no extra
+    round trip.
+
+    Candidates are filtered through :func:`is_always_redacted_with_extra`
+    first, and that filter is the point. ``known_fields`` comes from
+    ``restrict_fields_meta``, so it still contains always-redacted names —
+    every validator here tests membership *before* it tests the redaction
+    policy. But :func:`redact_fields_get` strips exactly those names from
+    ``odoo_describe_model``, which is documented to "never even advertise
+    the existence of always-redacted fields". Suggesting one would put
+    that disclosure back on the error path, where a caller can reach it by
+    guessing. Default-hidden fields ARE offered: ``odoo_describe_model``
+    lists them too, marked ``_sensitive``.
+    """
+    candidates = [
+        f for f in sorted(known_fields) if not is_always_redacted_with_extra(f, extra_redacted)
+    ]
+    matches = difflib.get_close_matches(name, candidates, _SUGGESTION_LIMIT, _SUGGESTION_CUTOFF)
+    if matches:
+        return (
+            f" Did you mean: {', '.join(matches)}? Use odoo_describe_model to see available fields."
+        )
+    return " Use odoo_describe_model to see available fields."
+
+
 def validate_requested_fields(
     model: str,
     requested: list[str],
@@ -321,7 +365,10 @@ def validate_requested_fields(
                 f"Dotted field {name!r} not allowed — request the relation directly."
             )
         if name not in known_fields:
-            raise FieldPolicyError(f"Field {name!r} does not exist on model {model!r}.")
+            raise FieldPolicyError(
+                f"Field {name!r} does not exist on model {model!r}."
+                + suggest_field_names(name, known_fields, extra_redacted=extra_redacted)
+            )
         if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(f"Field {name!r} is permanently redacted and cannot be read.")
         if (
@@ -359,7 +406,10 @@ def validate_write_values(
         if "." in name:
             raise FieldPolicyError(f"Dotted field {name!r} not allowed in write values.")
         if name not in known_fields:
-            raise FieldPolicyError(f"Field {name!r} does not exist on model {model!r}.")
+            raise FieldPolicyError(
+                f"Field {name!r} does not exist on model {model!r}."
+                + suggest_field_names(name, known_fields, extra_redacted=extra_redacted)
+            )
         if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(
                 f"Field {name!r} is protected and cannot be written via the MCP."
@@ -415,7 +465,10 @@ def validate_aggregate_fields(
         if "." in name:
             raise FieldPolicyError(f"Dotted aggregate field {name!r} not allowed.")
         if name not in known_fields:
-            raise FieldPolicyError(f"Aggregate field {name!r} does not exist on model {model!r}.")
+            raise FieldPolicyError(
+                f"Aggregate field {name!r} does not exist on model {model!r}."
+                + suggest_field_names(name, known_fields, extra_redacted=extra_redacted)
+            )
         if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(f"Aggregate field {name!r} is permanently redacted.")
         if (
@@ -476,7 +529,10 @@ def validate_groupby(
         if "." in name:
             raise FieldPolicyError(f"Dotted groupby field {name!r} not allowed.")
         if name not in known_fields:
-            raise FieldPolicyError(f"groupby field {name!r} does not exist on model {model!r}.")
+            raise FieldPolicyError(
+                f"groupby field {name!r} does not exist on model {model!r}."
+                + suggest_field_names(name, known_fields, extra_redacted=extra_redacted)
+            )
         if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(f"groupby field {name!r} is permanently redacted.")
         if (
@@ -547,7 +603,10 @@ def validate_order(
         if "." in name:
             raise FieldPolicyError(f"Dotted order field {name!r} not allowed.")
         if name not in known_fields:
-            raise FieldPolicyError(f"order field {name!r} does not exist on model {model!r}.")
+            raise FieldPolicyError(
+                f"order field {name!r} does not exist on model {model!r}."
+                + suggest_field_names(name, known_fields, extra_redacted=extra_redacted)
+            )
         if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(f"order field {name!r} is permanently redacted.")
         if (
