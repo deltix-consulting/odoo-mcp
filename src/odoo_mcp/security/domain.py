@@ -33,7 +33,7 @@ import re
 from typing import Any, Final
 
 from ..errors import DomainSandboxError
-from .fields import is_always_redacted_with_extra, is_default_hidden
+from .fields import is_always_redacted_with_extra, is_default_hidden, suggest_field_names
 
 _ALLOWED_OPS: Final[frozenset[str]] = frozenset(
     {
@@ -163,8 +163,8 @@ def _validate_leaf(
         )
     if field not in known_fields:
         raise DomainSandboxError(
-            f"Field {field!r} does not exist on the target model. "
-            f"Use odoo_describe_model to see available fields."
+            f"Field {field!r} does not exist on the target model."
+            + suggest_field_names(field, known_fields, extra_redacted=extra_redacted)
         )
 
     # Redaction policy on the filter field (see sandbox_domain docstring).
