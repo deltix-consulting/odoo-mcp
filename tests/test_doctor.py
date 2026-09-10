@@ -271,6 +271,80 @@ def test_credstore_get_secret_set_at_handles_unparseable(
     assert _credstore.get_secret_set_at("dev", "ODOO_MCP_DEV_API_KEY") is None
 
 
+@pytest.mark.parametrize(
+    "raw",
+    ["2026-01-15", "2026-01-15T09:00:00", "20260115"],
+)
+def test_credstore_get_secret_set_at_is_always_aware(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """A stored timestamp without an offset comes back stamped UTC.
+
+    ``set_secret`` writes an offset-carrying value, but the entries are
+    visible and editable in Keychain Access / Credential Manager, so a
+    hand-written or migrated value can be naive. It still parses — and a
+    naive datetime is a landmine for the UTC arithmetic in
+    ``doctor._check_rotation_warnings``.
+    """
+    from odoo_mcp import _credstore
+
+    def fake_get(_service: str, _username: str) -> str | None:
+        return raw
+
+    monkeypatch.setattr(_credstore.keyring, "get_password", fake_get)
+    got = _credstore.get_secret_set_at("dev", "ODOO_MCP_DEV_API_KEY")
+    assert got is not None
+    assert got.tzinfo is not None
+    assert got.utcoffset() == timedelta(0)
+    # The parsed instant is preserved, not replaced with "now".
+    assert (got.year, got.month, got.day) == (2026, 1, 15)
+
+
+def test_credstore_get_secret_set_at_preserves_explicit_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-UTC offset is respected, not overwritten with UTC."""
+    from odoo_mcp import _credstore
+
+    def fake_get(_service: str, _username: str) -> str | None:
+        return "2026-01-15T09:00:00+02:00"
+
+    monkeypatch.setattr(_credstore.keyring, "get_password", fake_get)
+    got = _credstore.get_secret_set_at("dev", "ODOO_MCP_DEV_API_KEY")
+    assert got is not None
+    assert got.utcoffset() == timedelta(hours=2)
+
+
+def test_rotation_warning_survives_naive_stored_timestamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A naive stored timestamp must not take the whole doctor report down.
+
+    Drives the REAL ``_credstore.get_secret_set_at`` (only ``keyring`` is
+    faked) — the other rotation tests stub that helper out, which is why a
+    naive value could reach ``(now - set_at).days`` unnoticed. The check is
+    documented best-effort and runs immediately before ``_emit``, so an
+    exception here discards every diagnostic the run already computed.
+    """
+    from odoo_mcp import _credstore
+    from odoo_mcp.config import load_config
+
+    def fake_get(service: str, _username: str) -> str | None:
+        if service.endswith("/_meta"):
+            return "2026-01-15T09:00:00"  # naive: parses, carries no offset
+        return "secret"
+
+    monkeypatch.setattr(_credstore.keyring, "get_password", fake_get)
+    cfg = load_config(_write_min_config(tmp_path, rotation_days=1))
+
+    report = doctor._Report()
+    doctor._check_rotation_warnings(report, cfg)
+
+    rendered = " ".join(str(item) for item in report.to_dict().get("warnings", []))
+    assert "rotation" in rendered.lower()
+
+
 # -----------------------------------------------------------------------------
 # F3 — config schema accepts rotation_warning_days
 # -----------------------------------------------------------------------------
