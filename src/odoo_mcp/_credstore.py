@@ -1,8 +1,8 @@
 """Cross-platform credential storage.
 
 Thin wrapper over :mod:`keyring`. All odoo-mcp Keychain / Credential Manager /
-libsecret access goes through these three functions so the rest of the codebase
-never has to think about platform branches.
+libsecret access goes through this module so the rest of the codebase never has
+to think about platform branches.
 
 Service-name convention::
 
@@ -82,6 +82,17 @@ def get_secret_set_at(instance: str, service: str) -> datetime | None:
     Returns ``None`` when no timestamp has been recorded (older keys
     set before v0.13.1 won't have one) or when the stored value can't
     be parsed.
+
+    The returned datetime is always timezone-aware. :func:`set_secret`
+    writes ``datetime.now(UTC).isoformat()``, which carries a ``+00:00``
+    offset — but the entries live in Keychain Access / Credential Manager /
+    Seahorse where they are visible and editable, and a hand-written or
+    migrated value such as ``2026-01-15`` parses cleanly into a *naive*
+    datetime. Callers do UTC arithmetic on this value, and mixing naive
+    and aware datetimes raises ``TypeError``. Since the stored value is
+    UTC by this module's own convention, a naive parse is stamped with
+    ``UTC`` rather than discarded — the timestamp is real and the
+    rotation warning it drives is worth keeping.
     """
     raw: str | None
     try:
@@ -91,9 +102,12 @@ def get_secret_set_at(instance: str, service: str) -> datetime | None:
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw)
+        parsed = datetime.fromisoformat(raw)
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def delete_secret(instance: str, service: str) -> None:
