@@ -94,6 +94,15 @@ class OdooMcpError(Exception):
 
     code: ClassVar[str] = "odoo_mcp_error"
 
+    # True when the failure was raised AFTER the request reached Odoo on a
+    # non-idempotent call, so the server may have committed the write (and
+    # sent any email) before the error came back. The dispatcher surfaces
+    # it as ``outcome: "unknown"`` so the agent verifies instead of
+    # retrying; the transport already refuses to re-send such a call
+    # (see ``client._ConnectionRecyclingMixin``), and this is the half
+    # that tells the *caller* not to either.
+    outcome_unknown: bool = False
+
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self._message = message
@@ -242,18 +251,40 @@ class LimitExceededError(OdooMcpError):
     code = "limit_exceeded"
 
 
+OUTCOME_UNKNOWN_HINT: Final[str] = (
+    "The request reached Odoo before this error, so the write may already "
+    "have been committed (a create may have made the record; a message may "
+    "have been posted and its email sent). Do NOT retry blindly: read the "
+    "record or its chatter back first, and only re-issue the call if the "
+    "change is missing."
+)
+
+
 class OdooTransportError(OdooMcpError):
     """Something went wrong talking to Odoo (network, TLS, timeout, HTTP error).
 
     Wraps the underlying cause with the cause's string also scrubbed. Callers
     should prefer ``error.user_message`` over ``str(error.__cause__)``.
+
+    ``outcome_unknown=True`` marks a failure that arrived after a
+    non-idempotent request was fully sent — a socket timeout waiting for
+    the reply, a proxy 504, a truncated response. Odoo may have committed
+    the write before the connection died; the hint tells the caller to
+    verify rather than retry.
     """
 
     code = "odoo_transport"
 
+    def __init__(self, message: str, *, outcome_unknown: bool = False) -> None:
+        super().__init__(message)
+        self.outcome_unknown = outcome_unknown
+
     @property
     def hint(self) -> str:
-        return "Check that the Odoo URL is reachable. Run 'odoo-mcp doctor' to diagnose."
+        base = "Check that the Odoo URL is reachable. Run 'odoo-mcp doctor' to diagnose."
+        if self.outcome_unknown:
+            return f"{OUTCOME_UNKNOWN_HINT} {base}"
+        return base
 
 
 class OdooAuthError(OdooMcpError):
@@ -271,11 +302,25 @@ class OdooRemoteError(OdooMcpError):
 
     code = "odoo_remote"
 
-    def __init__(self, message: str, *, server_text: bool = False) -> None:
+    def __init__(
+        self, message: str, *, server_text: bool = False, outcome_unknown: bool = False
+    ) -> None:
         """``server_text=True`` marks the message as containing Odoo's own
-        fault string, which must be withheld from the audit log."""
+        fault string, which must be withheld from the audit log.
+
+        ``outcome_unknown=True`` marks a fault Odoo raised *after* the
+        transaction committed — in practice the marshalling failure on
+        the response (``cannot marshal ...``), which runs after the
+        cursor's commit and after the post-commit email hooks. Every
+        other fault (validation, access, constraint) rolls the
+        transaction back and is safe to retry once corrected."""
         super().__init__(message)
         self._server_text = server_text
+        self.outcome_unknown = outcome_unknown
+
+    @property
+    def hint(self) -> str | None:
+        return OUTCOME_UNKNOWN_HINT if self.outcome_unknown else None
 
     @property
     def audit_message(self) -> str:

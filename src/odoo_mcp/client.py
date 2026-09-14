@@ -32,6 +32,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from typing import Any, Final
 from urllib.parse import urlparse
+from xml.parsers import expat
 
 from .config import InstanceConfig
 from .credentials import Credentials
@@ -71,6 +72,36 @@ _RETRY_SAFE_METHODS: Final[frozenset[str]] = frozenset(
         "search_read",
     }
 )
+
+
+# Failures that can only arrive AFTER the request was sent and that are not
+# ``OSError`` subclasses: an HTTP error status from a proxy in front of Odoo
+# (``ProtocolError``), a reply cut off mid-body (``IncompleteRead`` and its
+# ``HTTPException`` siblings), and a body that is not XML-RPC at all
+# (``ResponseError`` / ``ExpatError`` — typically a proxy's HTML error page
+# served with a 200). ``_execute`` maps them to ``OdooTransportError`` like
+# the socket-level failures they are.
+_RESPONSE_ERRORS: Final[tuple[type[Exception], ...]] = (
+    xmlrpc.client.ProtocolError,
+    xmlrpc.client.ResponseError,
+    http.client.HTTPException,
+    expat.ExpatError,
+)
+
+# Substring of the fault Odoo raises when the *response* cannot be
+# serialised — ``TypeError("cannot marshal <class ...> objects")`` and
+# ``"cannot marshal None unless allow_none is enabled"`` from the stdlib
+# marshaller. Odoo's RPC controller commits the cursor (and runs the
+# post-commit email hooks) before it calls ``dumps`` on the result, so this
+# is the one fault that arrives after the write is durable. Trigger in the
+# wild: a custom ``message_post`` / ``write`` override that returns a
+# recordset or forgets to ``return`` at all.
+_POST_COMMIT_FAULT_MARKER: Final[str] = "cannot marshal"
+
+
+def _is_post_commit_fault(fault_string: str) -> bool:
+    """Whether an Odoo fault was raised while marshalling the response."""
+    return _POST_COMMIT_FAULT_MARKER in fault_string
 
 
 class _TimeoutHTTPConnection(http.client.HTTPConnection):
@@ -154,11 +185,39 @@ class _ConnectionRecyclingMixin:
     the calls that actually benefit from it and re-sending them is free.
     Suppression is per-thread because a transport is shared by every caller
     of one :class:`OdooClient`.
+
+    Refusing the re-send is only half of "reported honestly": the agent on
+    the other side of the MCP is the next retry loop, and it re-issues a
+    timed-out ``create`` just as readily as the stdlib would. So the mixin
+    also records, per thread, whether the request body was *fully sent*
+    before the failure (:attr:`request_was_sent`). ``_execute`` uses that
+    to distinguish "connection refused, nothing happened" from "Odoo read
+    the whole request and never answered" — only the second can have
+    committed, and only the second is reported with ``outcome_unknown``.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._retry_state = threading.local()
+
+    @property
+    def request_was_sent(self) -> bool:
+        """Whether the most recent request on this thread was fully sent.
+
+        ``True`` from the moment ``send_content`` returns until the next
+        ``request`` starts. A failure raised while this is ``True`` came
+        back *after* Odoo had the complete request, so a non-idempotent
+        call may have been committed.
+        """
+        return bool(getattr(self._retry_state, "sent", False))
+
+    def send_content(self, connection: Any, request_body: Any) -> None:
+        # ``Transport.send_content`` ends with ``connection.endheaders(body)``,
+        # which is the call that puts the whole request on the wire. If it
+        # raises (EPIPE mid-body, TLS reset) the flag stays False: Odoo never
+        # saw a complete request and cannot have acted on it.
+        super().send_content(connection, request_body)  # type: ignore[misc]
+        self._retry_state.sent = True
 
     @contextlib.contextmanager
     def suppress_retry(self) -> Iterator[None]:
@@ -181,6 +240,7 @@ class _ConnectionRecyclingMixin:
         request_body: Any,
         verbose: Any = False,
     ) -> Any:
+        self._retry_state.sent = False
         try:
             if getattr(self._retry_state, "suppressed", False):
                 return self.single_request(host, handler, request_body, verbose)  # type: ignore[attr-defined]
@@ -847,10 +907,16 @@ class OdooClient:
         # silent "note" that actually triggers an email blast.
         kwargs["subtype_xmlid"] = "mail.mt_comment" if message_type == "comment" else "mail.mt_note"
         result = self._execute(model, "message_post", [[record_id]], kwargs)
-        if not isinstance(result, int):
+        if not isinstance(result, int) or isinstance(result, bool):
+            # Odoo returned normally, so the message IS posted and any email
+            # has gone out — only the id is unreadable (a custom override
+            # that drops ``@api.returns`` hands back ``False``, a list, ...).
+            # Flag the outcome so the caller does not post it again.
             raise OdooRemoteError(
                 f"message_post on {model!r}({record_id}) returned unexpected "
-                f"type {type(result).__name__}"
+                f"type {type(result).__name__}. Odoo returned normally, so "
+                f"the message was posted; only its id could not be read.",
+                outcome_unknown=True,
             )
         return result
 
@@ -903,10 +969,10 @@ class OdooClient:
         merged_kwargs = dict(kwargs)
         merged_kwargs["context"] = dict(_FROZEN_CONTEXT)
         creds = self._get_credentials()
+        idempotent = method in _RETRY_SAFE_METHODS
+        transport = self._object_transport
         retry_guard: contextlib.AbstractContextManager[None] = (
-            contextlib.nullcontext()
-            if method in _RETRY_SAFE_METHODS
-            else self._object_transport.suppress_retry()
+            contextlib.nullcontext() if idempotent else transport.suppress_retry()
         )
         try:
             with retry_guard:
@@ -923,17 +989,33 @@ class OdooClient:
             raise OdooRemoteError(
                 f"Odoo fault on {model}.{method}: {exc.faultString}",
                 server_text=True,
+                outcome_unknown=not idempotent and _is_post_commit_fault(exc.faultString),
             ) from exc
         except TimeoutError as exc:
             raise OdooTransportError(
                 f"Timeout calling {model}.{method} on {self._instance.name!r} "
-                f"after {self._instance.timeout_seconds}s"
+                f"after {self._instance.timeout_seconds}s",
+                outcome_unknown=not idempotent and transport.request_was_sent,
             ) from exc
         except ssl.SSLError as exc:
             raise OdooTransportError(
-                f"TLS error calling {model}.{method} on {self._instance.name!r}: {exc}"
+                f"TLS error calling {model}.{method} on {self._instance.name!r}: {exc}",
+                outcome_unknown=not idempotent and transport.request_was_sent,
             ) from exc
         except OSError as exc:
             raise OdooTransportError(
-                f"Network error calling {model}.{method} on {self._instance.name!r}: {exc}"
+                f"Network error calling {model}.{method} on {self._instance.name!r}: {exc}",
+                outcome_unknown=not idempotent and transport.request_was_sent,
+            ) from exc
+        except _RESPONSE_ERRORS as exc:
+            # The request went out and what came back was not an XML-RPC
+            # reply: a proxy 502/504 page (``ProtocolError``), a truncated
+            # body (``IncompleteRead``), an HTML error page with a 200
+            # (``ExpatError``). None of these is an ``OSError``, so they used
+            # to escape as ``internal_error`` — and the 504 is the single
+            # most common way a reverse proxy hides a write Odoo finished.
+            raise OdooTransportError(
+                f"Bad response calling {model}.{method} on {self._instance.name!r}: "
+                f"{type(exc).__name__}: {exc}",
+                outcome_unknown=not idempotent and transport.request_was_sent,
             ) from exc
