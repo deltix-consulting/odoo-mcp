@@ -10,6 +10,36 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A write that fails after the request reached Odoo now says the
+  change may already be committed.** The transport already refused to
+  re-send a `create` / `write` / `unlink` / `message_post` / workflow
+  action after a dropped connection (the server may have committed it
+  before dying), but the error handed back to the agent read
+  "Timeout ... Check that the Odoo URL is reachable" — an invitation to
+  re-issue the call, which the agent is the next loop to do. A
+  `message_post` that committed and sent its email, then failed to
+  marshal the reply (`cannot marshal ...`, the shape of a custom override
+  that drops `@api.returns` or forgets to `return`), was reported the
+  same way; re-sending it emails the customer twice. Now
+  `OdooClient._execute` marks such failures `outcome_unknown` — a
+  non-idempotent call whose request body was fully sent before a
+  socket-level failure, or whose fault is the post-commit marshalling
+  one — and the tool response carries `outcome: "unknown"` plus a hint
+  to read the record (or its chatter) back before retrying. The audit
+  row records the same so an operator triaging "did that create go
+  through?" sees it. A connection refused before the body went out, a
+  validation fault (rolled back), and every read stay unflagged.
+- **Proxy 5xx pages, truncated replies and non-XML bodies on an RPC
+  call are now `odoo_transport` errors, not `internal_error`.**
+  `xmlrpc.client.ProtocolError` (a 502/504 from the reverse proxy in
+  front of Odoo), `http.client.IncompleteRead` and an HTML error page
+  served with a 200 (`ExpatError`) are not `OSError` subclasses and
+  escaped `_execute` unmapped. The 504 is the most common way a proxy
+  hides a write Odoo finished, so these carry the same
+  `outcome_unknown` marking as a timeout.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

@@ -251,6 +251,11 @@ class Dispatcher:
             # drop it. Only include hints that add new information.
             if exc.hint and exc.hint not in exc.user_message:
                 payload["hint"] = exc.hint
+            # A write that failed after Odoo had the whole request may have
+            # been committed anyway. Say so in a machine-readable field so a
+            # client can refuse to auto-retry, not only in the prose hint.
+            if exc.outcome_unknown:
+                payload["outcome"] = "unknown"
             return [_text(payload)]
         except Exception as exc:  # noqa: BLE001 — last-resort safety net
             wrapped = OdooMcpError(f"Unhandled error in {name}: {type(exc).__name__}: {exc}")
@@ -2140,6 +2145,10 @@ class Dispatcher:
         # audit_message, not user_message: Odoo-supplied fault text can quote
         # record values, and this log is retained for 30 days.
         raw: dict[str, Any] = {"error": error.audit_message[:500]}
+        if error.outcome_unknown:
+            # The operator triaging "did that create go through?" needs the
+            # audit row to say the write may have landed, not just "failed".
+            raw["outcome"] = "unknown"
         if isinstance(arguments, dict):
             raw["args"] = _args_shape(arguments)
         try:
@@ -2661,6 +2670,10 @@ _HELP_GOTCHAS: list[str] = [
     "confirmation_token from a prior dry run to commit.",
     "To remove records, use odoo_archive_or_delete. Always offer archive "
     "(reversible: active=False) before permanent delete (unlink).",
+    "A failed write that carries outcome='unknown' reached Odoo before the "
+    "error (timeout, proxy 504, reply that could not be parsed) and may "
+    "already be committed — a create may exist, a message may be sent. Read "
+    "the record back before re-issuing the call; never retry it blindly.",
 ]
 
 
