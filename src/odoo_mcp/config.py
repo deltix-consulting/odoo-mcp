@@ -522,9 +522,10 @@ def _parse_attachment_source_paths(raw: Any, instance_name: str) -> tuple[str, .
         # (deploy order may create them after the MCP starts) but
         # silently swallowing that hides the most common config typo
         # ("/var/run/odoo-mco" instead of "/var/run/odoo-mcp") until
-        # the first source_path call fails confusingly. A WARN at load
-        # surfaces it in the same logs the operator is already
-        # reading post-startup.
+        # the first source_path call fails confusingly. The WARN below
+        # is only visible when ODOO_MCP_LOG_LEVEL is set (logging is
+        # off by default); ``odoo-mcp doctor`` repeats the check as the
+        # always-on surface (``doctor._check_attachment_source_paths``).
         if not os.path.isdir(resolved_entry):
             logger.warning(
                 "attachment_source_paths entry %r for instance %r does not "

@@ -10,7 +10,9 @@ Specifically checks:
 1. Config file exists, is a regular file, and has ``chmod 600``.
 2. Config TOML parses and conforms to the schema.
 3. Audit log directory is writable.
-4. For each instance:
+4. Every configured ``attachment_source_paths`` entry exists (warning only —
+   the loader deliberately tolerates directories mounted after startup).
+5. For each instance:
    a. Credential env vars are present.
    b. TLS connects and the remote cert is valid (unless ``allow_self_signed``).
    c. Odoo ``authenticate`` succeeds.
@@ -161,6 +163,18 @@ def run_doctor(config_path: Path | None = None, *, as_json: bool = False) -> int
     else:
         report.add("Audit log writable", True, str(cfg.audit_log_path))
 
+    # --- Attachment source-path allowlist --------------------------------
+    # The config loader tolerates a non-existent entry (deploy order may
+    # create the directory after the MCP starts) and only emits a
+    # ``logger.warning``. Logging is OFF by default (NullHandler unless
+    # ODOO_MCP_LOG_LEVEL is set), so in the shipped configuration that
+    # warning reaches nobody and a typo'd path surfaces only as a confusing
+    # containment refusal on the first source_path call. Doctor is the
+    # always-on surface, so repeat the check here. Runs before the
+    # per-instance network checks so it still shows when credentials or
+    # the Odoo host are broken.
+    _check_attachment_source_paths(report, cfg)
+
     # --- Per-instance checks ---------------------------------------------
     for name, inst_cfg in cfg.instances.items():
         section = f"[{name}]"
@@ -238,6 +252,31 @@ def _emit(report: _Report, *, as_json: bool) -> None:
         print(_json.dumps(report.to_dict(), separators=(",", ":")))
     else:
         report.print()
+
+
+def _check_attachment_source_paths(report: _Report, cfg: AppConfig) -> None:
+    """Warn for every ``attachment_source_paths`` entry that is not a directory.
+
+    Entries are already ``realpath``-resolved by the config loader, so this
+    is a plain ``isdir`` per entry. A warning, not a failure: the loader's
+    contract is that the directory may legitimately appear later, and the
+    runtime containment check in ``odoo_create_attachment`` is what actually
+    refuses reads. The point here is to name the typo before the first
+    source_path call fails with a containment error the operator cannot
+    connect back to the TOML.
+    """
+    import os as _os
+
+    for name, inst_cfg in cfg.instances.items():
+        for entry in inst_cfg.attachment_source_paths:
+            if _os.path.isdir(entry):
+                continue
+            report.add_warning(
+                f"[{name}] attachment_source_paths",
+                f"{entry!r} does not exist or is not a directory. source_path "
+                f"calls into it will be refused until it exists. If this is a "
+                f"typo, fix the [instances.{name}] TOML section.",
+            )
 
 
 def _check_rotation_warnings(report: _Report, cfg: AppConfig) -> None:

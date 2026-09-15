@@ -387,3 +387,143 @@ def test_doctor_main_unknown_arg_returns_2(
     assert rc == 2
     err = capsys.readouterr().err
     assert "Unknown" in err or "Usage" in err
+
+
+# -----------------------------------------------------------------------------
+# attachment_source_paths — doctor is the always-on surface for a typo'd entry
+# -----------------------------------------------------------------------------
+
+
+def _write_attachment_config(tmp_path: Path, source_dir: Path) -> Path:
+    """Minimal config with one instance carrying an attachment allowlist."""
+    cfg = tmp_path / "config.toml"
+    audit_log = tmp_path / "audit.jsonl"
+    cfg.write_text(
+        "[defaults]\n"
+        f'audit_log = "{audit_log}"\n'
+        'fields_cache_path = ""\n'
+        "\n"
+        "[instances.dev]\n"
+        'url = "http://example.invalid"\n'
+        'database = "db"\n'
+        'credentials_env_prefix = "ODOO_MCP_DEV"\n'
+        "production = false\n"
+        f'attachment_source_paths = ["{source_dir}"]\n'
+    )
+    os.chmod(cfg, 0o600)
+    return cfg
+
+
+def _no_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the per-instance credential check fail so doctor never dials out."""
+    _stub_loader(monkeypatch)
+    _stub_set_at(monkeypatch, None)
+    monkeypatch.delenv("ODOO_MCP_DEV_USERNAME", raising=False)
+    monkeypatch.delenv("ODOO_MCP_DEV_API_KEY", raising=False)
+
+
+def test_doctor_warns_when_attachment_source_path_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The typo must show in doctor's own report, with logging OFF.
+
+    The config loader's ``logger.warning`` is the only other disclosure and
+    it goes to a NullHandler unless ODOO_MCP_LOG_LEVEL is set — so this test
+    configures logging exactly as the shipped default does and asserts on
+    doctor's stdout, which the logger never writes to.
+    """
+    from odoo_mcp.logging_setup import configure_logging
+
+    monkeypatch.delenv("ODOO_MCP_LOG_LEVEL", raising=False)
+    configure_logging()
+    missing = tmp_path / "odoo-mco"  # the CHANGELOG's own example typo
+    cfg = _write_attachment_config(tmp_path, missing)
+    _no_credentials(monkeypatch)
+    doctor.run_doctor(cfg)
+    out = capsys.readouterr().out
+    assert "[dev] attachment_source_paths" in out
+    assert str(missing) in out
+    assert "does not exist" in out
+    assert "fix the [instances.dev]" in out
+
+
+def test_doctor_attachment_warning_is_informational_and_in_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A missing directory is a warning row, not a failed step.
+
+    The loader's contract is that the directory may be mounted after the
+    MCP starts, so doctor must not turn that into a red step — it lands in
+    ``warnings``, where ``--json`` consumers already look for the
+    rotation / admin signals.
+    """
+    import json
+
+    missing = tmp_path / "not-mounted-yet"
+    cfg = _write_attachment_config(tmp_path, missing)
+    _no_credentials(monkeypatch)
+    doctor.run_doctor(cfg, as_json=True)
+    payload = json.loads(capsys.readouterr().out.strip())
+    names = [w["name"] for w in payload["warnings"]]
+    assert "[dev] attachment_source_paths" in names
+    assert all(s["name"] != "[dev] attachment_source_paths" for s in payload["steps"])
+    row = next(w for w in payload["warnings"] if w["name"] == "[dev] attachment_source_paths")
+    assert str(missing) in row["detail"]
+
+
+def test_doctor_attachment_warning_fires_before_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A typo'd allowlist must be reported even when the instance cannot auth.
+
+    The per-instance loop ``continue``s on a credentials failure; the
+    allowlist check is config-only and must not be behind that gate.
+    """
+    missing = tmp_path / "odoo-mco"
+    cfg = _write_attachment_config(tmp_path, missing)
+    _no_credentials(monkeypatch)
+    doctor.run_doctor(cfg)
+    out = capsys.readouterr().out
+    assert "✗ [dev] credentials" in out
+    assert "[dev] attachment_source_paths" in out
+
+
+def test_doctor_silent_when_attachment_source_path_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Guard against over-reaching: a real directory produces no row.
+
+    Passes before and after the fix — it pins that the new check only
+    fires on the missing case.
+    """
+    present = tmp_path / "drop"
+    present.mkdir()
+    cfg = _write_attachment_config(tmp_path, present)
+    _no_credentials(monkeypatch)
+    doctor.run_doctor(cfg)
+    out = capsys.readouterr().out
+    assert "attachment_source_paths" not in out
+
+
+def test_doctor_attachment_warning_names_a_file_not_a_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An entry that exists but is a regular file is as unusable as a missing one."""
+    as_file = tmp_path / "drop"
+    as_file.write_text("not a directory")
+    cfg = _write_attachment_config(tmp_path, as_file)
+    _no_credentials(monkeypatch)
+    doctor.run_doctor(cfg)
+    out = capsys.readouterr().out
+    assert "[dev] attachment_source_paths" in out
+    assert "is not a directory" in out
