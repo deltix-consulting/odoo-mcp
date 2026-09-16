@@ -387,3 +387,232 @@ def test_doctor_main_unknown_arg_returns_2(
     assert rc == 2
     err = capsys.readouterr().err
     assert "Unknown" in err or "Usage" in err
+
+
+# -----------------------------------------------------------------------------
+# Strict-mode allowed_models smoke test — every entry, deterministic order
+# -----------------------------------------------------------------------------
+#
+# ``InstanceConfig.allowed_models`` is a ``frozenset[str]``. Doctor used to
+# probe ``next(iter(...))`` — one arbitrary member, and a different one on
+# every run because ``str`` hashing is salted per process. A strict list with
+# one typo'd model therefore made doctor red on the run that happened to draw
+# the typo and green otherwise. These tests drive the per-instance branch with
+# a fake client (every earlier test in this file stops at the credentials
+# step, so the smoke test had never been executed by the suite).
+
+
+def _write_strict_config(tmp_path: Path, allowed_models: list[str]) -> Path:
+    cfg = tmp_path / "config.toml"
+    audit_log = tmp_path / "audit.jsonl"
+    models = ", ".join(f'"{m}"' for m in allowed_models)
+    cfg.write_text(
+        "[defaults]\n"
+        f'audit_log = "{audit_log}"\n'
+        'fields_cache_path = ""\n'
+        "\n"
+        "[instances.dev]\n"
+        'url = "http://example.invalid"\n'
+        'database = "db"\n'
+        'credentials_env_prefix = "ODOO_MCP_DEV"\n'
+        "production = false\n"
+        f"allowed_models = [{models}]\n"
+    )
+    os.chmod(cfg, 0o600)
+    return cfg
+
+
+class _FakeDoctorClient:
+    """Stands in for ``OdooClient`` inside ``run_doctor``.
+
+    ``rejects`` is the set of model names whose ``fields_get`` raises the
+    fault Odoo returns for an unknown model; ``transport_error`` makes every
+    probe raise a transport failure instead. ``probed`` records call order.
+    """
+
+    probed: list[str] = []
+    rejects: frozenset[str] = frozenset()
+    transport_error: bool = False
+    uid = 7
+    is_admin = False
+    admin_reason = ""
+
+    def __init__(self, _inst: object, _creds: object) -> None:
+        pass
+
+    def authenticate(self) -> None:
+        pass
+
+    def fields_get(self, model: str) -> dict[str, dict[str, str]]:
+        from odoo_mcp.errors import OdooRemoteError, OdooTransportError
+
+        type(self).probed.append(model)
+        if self.transport_error:
+            raise OdooTransportError(f"Timeout calling {model}.fields_get on 'dev' after 30s")
+        if model in self.rejects:
+            raise OdooRemoteError(
+                f"Odoo fault on {model}.fields_get: Traceback (most recent call last):\n"
+                f'  File "/odoo/odoo/api.py", line 1, in call_kw\n'
+                f"KeyError: '{model}'",
+                server_text=True,
+            )
+        return {"id": {"type": "integer"}, "name": {"type": "char"}}
+
+
+def _drive_doctor(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: Path,
+    *,
+    rejects: frozenset[str] = frozenset(),
+    transport_error: bool = False,
+    as_json: bool = False,
+) -> tuple[int, list[str]]:
+    """Run doctor to completion against the fake client; return (rc, probed)."""
+    _stub_loader(monkeypatch)
+    _stub_set_at(monkeypatch, datetime.now(UTC))
+    monkeypatch.setattr(doctor, "_print_update_check", lambda: None)
+    monkeypatch.setenv("ODOO_MCP_DEV_USERNAME", "bot")
+    monkeypatch.setenv("ODOO_MCP_DEV_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(_FakeDoctorClient, "probed", [])
+    monkeypatch.setattr(_FakeDoctorClient, "rejects", rejects)
+    monkeypatch.setattr(_FakeDoctorClient, "transport_error", transport_error)
+    monkeypatch.setattr(doctor, "OdooClient", _FakeDoctorClient)
+    rc = doctor.run_doctor(cfg, as_json=as_json)
+    return rc, list(_FakeDoctorClient.probed)
+
+
+def test_doctor_strict_mode_probes_every_allowed_model_in_sorted_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    models = ["sale.order", "res.partner", "crm.lead", "account.move"]
+    cfg = _write_strict_config(tmp_path, models)
+    rc, probed = _drive_doctor(monkeypatch, cfg)
+    out = capsys.readouterr().out
+    assert rc == 0
+    # Every listed model, once each, in a run-independent order.
+    assert probed == sorted(models)
+    assert "✓ [dev] fields_get(allowed_models) — 4 models verified, 8 fields" in out
+
+
+def test_doctor_strict_mode_reports_a_typo_wherever_it_sits_in_the_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    models = ["res.partner", "sale.order", "crm.lead", "account.move", "crm.laed"]
+    cfg = _write_strict_config(tmp_path, models)
+    rc, probed = _drive_doctor(monkeypatch, cfg, rejects=frozenset({"crm.laed"}))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "crm.laed" in probed
+    # Stable step name (not fields_get(<whichever model was drawn>)), the
+    # offending entry named, and the actionable half: which TOML to fix.
+    assert "✗ [dev] fields_get(allowed_models)" in out
+    assert "1 of 5 listed model(s) rejected by Odoo: crm.laed" in out
+    assert "fix allowed_models in [instances.dev]" in out
+    # Only the trailing line of Odoo's traceback, never the whole thing.
+    assert "Odoo said: KeyError: 'crm.laed'" in out
+    assert "Traceback" not in out
+    # The models that ARE fine were still probed — the check does not stop
+    # at the first rejection, so an operator sees every typo in one run.
+    assert set(probed) == set(models)
+
+
+def test_doctor_strict_mode_lists_every_rejected_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = _write_strict_config(tmp_path, ["res.partner", "sale.ordr", "crm.laed"])
+    rc, _ = _drive_doctor(monkeypatch, cfg, rejects=frozenset({"sale.ordr", "crm.laed"}))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "2 of 3 listed model(s) rejected by Odoo: crm.laed, sale.ordr" in out
+
+
+def test_doctor_strict_mode_warns_on_entries_the_mcp_itself_refuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # ``ir.config_parameter`` is on MODEL_DENYLIST: listing it grants nothing
+    # because check_model refuses it before the allowlist is consulted.
+    # ``res partner`` fails the name-shape check the same way.
+    cfg = _write_strict_config(tmp_path, ["res.partner", "ir.config_parameter", "res partner"])
+    rc, probed = _drive_doctor(monkeypatch, cfg)
+    out = capsys.readouterr().out
+    # Inert entries are a hygiene warning, not a failure: the instance still
+    # serves res.partner.
+    assert rc == 0
+    assert "✓ [dev] fields_get(allowed_models) — 1 models verified" in out
+    assert "! [dev] allowed_models — 2 of 3 listed model(s) can never be reached" in out
+    assert "ir.config_parameter, res partner" in out
+    assert "Remove them from [instances.dev] allowed_models" in out
+    # Inert entries are never sent to Odoo: a fields_get on a denylisted
+    # model would succeed there and make "verified" a lie.
+    assert probed == ["res.partner"]
+
+
+def test_doctor_strict_mode_with_only_inert_entries_is_red(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = _write_strict_config(tmp_path, ["ir.config_parameter", "ir.rule"])
+    rc, probed = _drive_doctor(monkeypatch, cfg)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert probed == []
+    assert "✗ [dev] fields_get(allowed_models) — no reachable model" in out
+
+
+def test_doctor_strict_mode_transport_error_fails_fast(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = _write_strict_config(tmp_path, ["res.partner", "sale.order", "crm.lead"])
+    rc, probed = _drive_doctor(monkeypatch, cfg, transport_error=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    # A timeout tells us nothing model-specific; the remaining probes would
+    # fail the same way, so the step fails on the first one with its message.
+    assert probed == ["crm.lead"]
+    assert "✗ [dev] fields_get(allowed_models) — crm.lead: Timeout calling" in out
+
+
+def test_doctor_open_mode_still_probes_res_partner_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Guards the fix against over-reaching: open mode has no hand-typed list
+    # to verify, so the pre-existing single probe and its step name stay.
+    cfg = _write_strict_config(tmp_path, ["*"])
+    rc, probed = _drive_doctor(monkeypatch, cfg)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert probed == ["res.partner"]
+    assert "✓ [dev] fields_get(res.partner) — 2 fields" in out
+
+
+def test_doctor_json_step_name_is_stable_in_strict_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+
+    # ``--json`` is documented "for CI / dashboards"; a step whose name
+    # depended on which model was drawn could not be tracked across runs.
+    cfg = _write_strict_config(tmp_path, ["sale.order", "res.partner", "crm.laed"])
+    rc, _ = _drive_doctor(monkeypatch, cfg, rejects=frozenset({"crm.laed"}), as_json=True)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert rc == 1
+    names = [s["name"] for s in payload["steps"]]
+    assert "[dev] fields_get(allowed_models)" in names
+    step = next(s for s in payload["steps"] if s["name"] == "[dev] fields_get(allowed_models)")
+    assert step["ok"] is False
+    assert "crm.laed" in step["detail"]
