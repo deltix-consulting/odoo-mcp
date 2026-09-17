@@ -10,6 +10,37 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The setup wizard could not rewrite a config that uses a per-instance
+  redaction policy — and destroyed credentials on the way out.**
+  `_generate_toml` serialised bool / int / str / list and raised
+  `ValueError: Unsupported TOML type: <class 'dict'>` on anything else, but
+  two documented instance keys are TOML sub-tables: `sensitive_fields` (the
+  per-instance field-redaction policy) and `smart_fields_overrides`.
+  `load_config` accepts both; the wizard could not write either back. Since
+  `setup --add`, `setup --remove` and `acknowledge-admin` all work by
+  reloading the whole file, editing one entry and regenerating it, every one
+  of them failed outright on such a config — including when the sub-table
+  belonged to a *different* instance than the one being edited, so removing a
+  throwaway dev instance was blocked by the production instance's policy.
+
+  `setup --remove` was the damaging case: it deleted the API key and username
+  from the OS credential store **before** the config rewrite, so the run left
+  the instance still listed in `config.toml` with its secrets gone. An Odoo
+  API key cannot be read back out of Odoo, so this was unrecoverable — the
+  user had to generate a new key. The removal now writes the config first
+  (atomic, and a failure leaves the original untouched) and only then clears
+  the credential store, so a failed removal leaves a working instance rather
+  than a broken one.
+
+  `_toml_value` is now total over every type `tomllib` can produce (a dict
+  renders as an inline table), `_generate_toml` emits nested dicts as real
+  `[instances.NAME.sensitive_fields]` sub-tables after their parent's scalar
+  keys — emitting them earlier would silently reparent the remaining scalars
+  on the next read — and dotted keys such as `"res.partner"` are quoted so a
+  model name stays one key instead of becoming two nested tables.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
