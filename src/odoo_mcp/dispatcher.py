@@ -1253,6 +1253,15 @@ class Dispatcher:
                 "message_type": str(message_type),
                 "record_id": record_id,
                 "partner_count": len(partner_ids),
+                # Same body_length the dry-run row records. Nothing else in
+                # the row carries it: ``_args_shape`` reduces ``body`` to a
+                # ``{present, type}`` dict, which ``_sanitize_details`` then
+                # drops as a non-leaf, so only the bare name survives in
+                # ``args.keys``. Without this the committed row — the one
+                # where a real email went out — says less about what was sent
+                # than the row for the send that didn't happen.
+                # ``odoo_log_note`` has always recorded it on both rows.
+                "body_length": len(body),
                 "message_id": message_id,
             },
             args,
@@ -1545,6 +1554,10 @@ class Dispatcher:
                 "res_id": res_id,
                 "filename": filename,
                 "size_bytes": size_bytes,
+                # Recorded on the dry-run row already. It decides how Odoo
+                # serves the file back, so the committed row is the one that
+                # actually needs it.
+                "mimetype": mimetype,
                 "attachment_id": attachment_id,
             },
             args,
