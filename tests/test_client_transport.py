@@ -187,6 +187,24 @@ def test_suppress_retry_still_drops_the_cached_connection(
     assert transport._connection[1] is None
 
 
+def test_retry_safe_methods_includes_the_saas19_fallbacks() -> None:
+    """The saas-19.x replacements are reads like the methods they replace.
+
+    ``OdooClient.read_group`` / ``diagnose_access`` fall back from
+    ``read_group`` / ``check_access_rights`` to ``formatted_read_group`` /
+    ``has_access`` once a server reports the legacy method missing. Both
+    pairs must sit in the same retry class, or an Odoo Online tenant
+    silently loses the dropped-keep-alive retry the moment the fallback
+    kicks in.
+    """
+    for legacy, replacement in (
+        ("read_group", "formatted_read_group"),
+        ("check_access_rights", "has_access"),
+    ):
+        assert legacy in _RETRY_SAFE_METHODS
+        assert replacement in _RETRY_SAFE_METHODS
+
+
 def test_retry_safe_methods_excludes_every_write_primitive() -> None:
     """Fail-closed: writes and workflow methods must never be retryable."""
     for method in ("create", "write", "unlink", "message_post"):

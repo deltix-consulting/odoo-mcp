@@ -10,6 +10,33 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_read_group` works again on Odoo Online / Odoo.sh (saas-19.x).**
+  Odoo deprecated the public `read_group` ORM method in 19.0 and removed
+  it outright on the `saas-19.1`+ branches, where the call now comes back
+  as `The method '<model>.read_group' does not exist` — so the tool was a
+  hard error on every SaaS-hosted Odoo 19 database. `OdooClient.read_group`
+  still calls `read_group` first (nothing changes for Odoo 16 through
+  19.0) and falls back to its documented replacement,
+  `formatted_read_group`, the first time a server reports the legacy
+  method missing. The resolved method is remembered per client, so the
+  probe costs one round trip per process, not one per call. The
+  replacement's result is translated back into the legacy shape —
+  aggregate keys, `<first_groupby>_count`, `__domain`, `__context` —
+  mirroring the compatibility layer Odoo 19.0 ships inside `read_group`
+  itself, so the tool's response contract is unchanged on every
+  supported version.
+
+- **`odoo_diagnose_access` stops reporting "no rights" on saas-19.x.**
+  `check_access_rights` was removed on the same branches, and the handler
+  catches a failed rights probe per operation and records `False` — so
+  instead of erroring, the tool quietly claimed the user had no read,
+  write, create or unlink permission on every model it was asked about,
+  which is exactly the answer it exists to get right. Same probe-once
+  fallback, onto `has_access` (Odoo 18+, the RPC-callable replacement;
+  `check_access` is `@api.private` and unreachable over RPC).
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
