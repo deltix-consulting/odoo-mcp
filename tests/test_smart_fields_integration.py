@@ -156,6 +156,10 @@ def test_search_read_smart_default_omits_fields(tmp_path: Path) -> None:
     # Audit fields excluded.
     assert "create_uid" not in used
     assert "create_date" not in used
+    # fields_available reports the model's full field count (9 in the
+    # fake meta) so the caller can see the curated list is a subset.
+    assert payload["fields_available"] == 9
+    assert len(used) < payload["fields_available"]
 
 
 def test_search_read_explicit_fields_disables_smart_path(tmp_path: Path) -> None:
@@ -168,6 +172,8 @@ def test_search_read_explicit_fields_disables_smart_path(tmp_path: Path) -> None
     )
     assert payload["ok"] is True
     assert "smart_fields_used" not in payload
+    # No smart selection ran, so no fields_available hint either.
+    assert "fields_available" not in payload
     assert fake.last_fields_arg == ["id", "name"]
 
 
@@ -246,3 +252,5 @@ def test_read_smart_default_works(tmp_path: Path) -> None:
     assert "id" in used
     assert "name" in used
     assert "vat" not in used
+    # odoo_read carries the same fields_available hint as odoo_search_read.
+    assert payload["fields_available"] == 9
