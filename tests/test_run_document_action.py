@@ -214,6 +214,119 @@ def test_dev_commit_runs_the_method(tmp_path: Path) -> None:
     assert fake.action_calls == [("purchase.order", "button_confirm", [977])]
 
 
+# ---------------------------------------------------------------------------
+# states_after: never trust the method's return value, re-read the record
+# ---------------------------------------------------------------------------
+#
+# ``committed`` is inferred from the shape of Odoo's return value, not
+# from the database. Odoo workflow methods return ``True`` (or ``None``)
+# whether or not the transition happened, so the commit envelope re-reads
+# ``id`` + ``state`` and reports it as ``states_after``.
+
+
+class _TransitioningFakeClient(_FakeClient):
+    """Applies a state transition when the action runs, like Odoo would."""
+
+    def __init__(self, *, new_state: str) -> None:
+        super().__init__(action_return=True)
+        self._new_state = new_state
+
+    def call_document_action(self, model: str, method: str, record_ids: list[int]) -> Any:
+        result = super().call_document_action(model, method, record_ids)
+        for rid in record_ids:
+            self._states[rid] = self._new_state
+        return result
+
+
+def test_commit_reports_states_after_the_action(tmp_path: Path) -> None:
+    app, _ = _build(tmp_path, production=False)
+    fake = _TransitioningFakeClient(new_state="purchase")
+    fake._states = {977: "draft", 978: "draft"}
+    app.instances["dev"].client = fake  # type: ignore[assignment]
+    payload = _call(
+        Dispatcher(app),
+        {
+            "instance": "dev",
+            "model": "purchase.order",
+            "record_ids": [977, 978],
+            "action": "confirm",
+            "dry_run": False,
+        },
+    )
+    assert payload["committed"] is True
+    assert payload["states_after"] == [
+        {"id": 977, "state": "purchase"},
+        {"id": 978, "state": "purchase"},
+    ]
+
+
+def test_commit_states_after_exposes_a_silent_no_op(tmp_path: Path) -> None:
+    """The defining contract: a truthy return with an unchanged state.
+
+    The fake returns ``True`` from ``button_confirm`` but leaves the
+    record in ``draft`` — exactly what an Odoo method that no-ops (or
+    swallows its own guard) looks like over RPC. ``committed`` still
+    says true because that is all the return value supports; the
+    unchanged ``states_after`` is the evidence that contradicts it.
+    """
+    app, fake = _build(tmp_path, production=False)
+    fake._states = {977: "draft"}
+    payload = _call(
+        Dispatcher(app),
+        {
+            "instance": "dev",
+            "model": "purchase.order",
+            "record_ids": [977],
+            "action": "confirm",
+            "dry_run": False,
+        },
+    )
+    assert payload["committed"] is True
+    assert payload["states_after"] == [{"id": 977, "state": "draft"}]
+
+
+def test_commit_omits_states_after_when_model_has_no_state_field(tmp_path: Path) -> None:
+    """Omitted, not ``[]`` — an empty list would read as "records gone"."""
+    app, fake = _build(tmp_path, production=False)
+    fake.fields_get = lambda model, use_cache=True: {"id": {"type": "integer"}}  # type: ignore[assignment,method-assign]
+    payload = _call(
+        Dispatcher(app),
+        {
+            "instance": "dev",
+            "model": "purchase.order",
+            "record_ids": [977],
+            "action": "confirm",
+            "dry_run": False,
+        },
+    )
+    assert payload["committed"] is True
+    assert "states_after" not in payload
+
+
+def test_needs_manual_completion_still_reports_states_after(tmp_path: Path) -> None:
+    """The wizard path is where the readback matters most.
+
+    Odoo returned a wizard descriptor, so nothing happened yet. The
+    unchanged state next to ``needs_manual_completion`` tells the agent
+    the record really is untouched rather than in some half state.
+    """
+    app, fake = _build(tmp_path, production=False, action_return={"type": "ir.actions.act_window"})
+    fake._states = {5: "assigned"}
+    payload = _call(
+        Dispatcher(app),
+        {
+            "instance": "dev",
+            "model": "stock.picking",
+            "record_ids": [5],
+            "action": "validate",
+            "dry_run": False,
+        },
+    )
+    assert payload["committed"] is False
+    assert payload["needs_manual_completion"] is True
+    assert payload["states_after"] == [{"id": 5, "state": "assigned"}]
+
+
 def test_unmapped_pair_refused_via_tool(tmp_path: Path) -> None:
     app, fake = _build(tmp_path)
     payload = _call(

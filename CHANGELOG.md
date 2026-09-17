@@ -10,6 +10,48 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`odoo_run_document_action` re-reads the records after a commit and
+  reports `states_after`.** Until now the commit envelope's `committed`
+  flag was inferred purely from the *shape* of Odoo's return value — a
+  dict means "here is a follow-up wizard", anything else means "done".
+  That is not evidence the state transition happened. Odoo workflow
+  methods routinely return `True` (or `None`, which marshals to a void
+  success) whether or not the record moved, and the v0.25.0
+  wizard-completion path adds a second RPC whose effect is equally
+  unverified. An agent reading `committed: true` had nothing to check
+  it against and would move on to the next step of a flow that had not
+  actually advanced.
+
+  The commit path now does the same cheap `id` + `state` read the
+  dry-run preview already pays for, after the action (and after any
+  wizard completion), and returns it as
+  `states_after: [{"id": .., "state": ..}, ...]`. An unchanged state
+  next to `committed: true` is the signal that the action silently did
+  nothing. On the `needs_manual_completion` path it confirms the record
+  really is untouched rather than in some half state.
+
+  No new tool, no new config, no change to the prod-guard pipeline: one
+  extra bounded read per commit, reusing `_peek_states` (id + state
+  only, so no redaction pass is needed, and a read failure or a model
+  without a `state` field degrades to omitting the key rather than
+  losing the commit result). Omitted rather than `[]` — an empty list
+  would read as "the records are gone". The before-state stays where it
+  already was, in the dry-run preview's `current_states`.
+
+  Surfaced by two independent competitors converging on the same
+  mechanism in the same window: `Soyouse/odoo-mcp`'s "post-write
+  readback / sighted MCP" ("Odoo business methods often return `null`
+  while silently creating invoices … never trust a method's return
+  value; always re-read"), and `unstaticlabs/odoo-mcp` #89, whose
+  lifecycle tools report `state_before` / `state_after`.
+
+  4 new tests: state transition reported, a truthy return with an
+  unchanged state (the defining contract), key omitted when the model
+  has no `state` field, and the wizard/`needs_manual_completion` path
+  still reporting the readback. 784 tests total (was 780).
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
