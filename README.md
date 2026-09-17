@@ -189,10 +189,20 @@ Call `odoo_write` for the first time after unlocking prod:
   "model": "crm.lead",
   "id_count": 1,
   "would_update_fields": ["stage_id"],
+  "would_set_values": {"stage_id": 4},
+  "current_values": [{"id": 42, "stage_id": [2, "Qualified"]}],
   "confirmation_token": "conf_XXXXXXXXXXXXXXXXXXXX",
   "note": "This was a dry run. To commit, call odoo_write again with dry_run=false and confirmation_token set to the token above."
 }
 ```
+
+`current_values` is what the commit would **overwrite** — `odoo_write`
+replaces a field, it never appends — read back from at most the first 5
+target records (`current_values_truncated: true` marks the rest) and run
+through the normal field-redaction pass, so a default-hidden field stays
+hidden here too. It is omitted entirely, rather than returned empty, if
+the read-back fails. To *add* to a record's history instead of replacing
+a field, use `odoo_log_note` — that is what the chatter is for.
 
 Same call with `dry_run: false, confirmation_token: "conf_..."`:
 
