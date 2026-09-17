@@ -10,6 +10,42 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_read_group` and `odoo_lookup` now report `has_more`.** Both
+  tools truncate their result set, and neither said so. Only
+  `odoo_search_read` did.
+
+  `odoo_read_group` is the worse of the two. Its `limit` defaults to the
+  instance **hard cap** (`max_records_hard_cap`, 500) — not to a
+  caller-supplied argument — so nothing in the request hints that a
+  ceiling was applied, and Odoo's `read_group` returns no total. A
+  revenue-by-customer aggregation on an instance with more than 500
+  customers came back as 500 groups and `count: 500`, with no signal
+  that groups were dropped. The failure mode of a truncated
+  *aggregation* is a wrong figure, not a short list: an agent that sums
+  the groups reports a total that is silently short. The tool's own
+  description tells callers to use it "for dashboards and summaries
+  instead of fetching records to count / sum them yourself" — so the
+  tool most likely to be turned into a business number was the one
+  carrying the least information about its own completeness.
+
+  `odoo_read_group` now returns `has_more` plus `next_offset` (its
+  schema already takes `offset`, so the signal is directly actionable).
+  `odoo_lookup` returns `has_more` only — it takes no `offset`, so the
+  remedy there is a narrower `query` or a higher `limit`. On `lookup`
+  the hazard is a different one: ten of three hundred `name ilike`
+  matches used to be indistinguishable from ten matches, and this is
+  the tool whose whole job is resolving a name to a single id.
+
+  Both use the same free heuristic `odoo_search_read` has used since
+  v0.9 — a full page means there *may* be more, no extra round trip —
+  and both anchor `next_offset` on the rows actually received rather
+  than on the requested limit, so a module that over-delivers cannot
+  cause the next page to skip rows. 8 new tests in
+  `tests/test_read_pagination_signals.py`; all 8 fail with only the
+  dispatcher wiring reverted.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

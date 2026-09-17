@@ -569,12 +569,19 @@ class Dispatcher:
             },
             args,
         )
-        return {
+        result: dict[str, Any] = {
             "instance": ctx.instance,
             "model": model,
             "results": redacted,
             "count": len(redacted),
         }
+        # A full page means the query was ambiguous — there are matches the
+        # caller never saw. This tool exists to resolve a name to an id, so a
+        # truncated result set is exactly when picking "the first hit" is
+        # wrong. No ``next_offset``: ``odoo_lookup`` takes no ``offset``, so
+        # the remedy is a narrower ``query`` or a higher ``limit``.
+        result["has_more"] = len(redacted) >= effective_limit
+        return result
 
     def _search_read(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_search_read", args, Operation.SEARCH_READ)
@@ -762,7 +769,27 @@ class Dispatcher:
             },
             args,
         )
-        return {"instance": ctx.instance, "model": model, "groups": rows, "count": len(rows)}
+        result: dict[str, Any] = {
+            "instance": ctx.instance,
+            "model": model,
+            "groups": rows,
+            "count": len(rows),
+        }
+        # Same free heuristic as ``_search_read``: a full page means there may
+        # be more. It matters more here than there. ``limit`` defaults to the
+        # instance hard cap (500) rather than to a visible caller argument, and
+        # the tool's whole purpose is to hand back a *summary* — a caller that
+        # sums the returned groups to get a total gets a silently short number
+        # with nothing in the response to say so. ``offset`` is already part of
+        # this tool's schema, so ``next_offset`` is directly actionable.
+        if len(rows) >= limit:
+            result["has_more"] = True
+            # Anchor on the rows actually received, not the requested limit —
+            # if Odoo over-delivers, ``offset + limit`` would skip groups.
+            result["next_offset"] = offset + len(rows)
+        else:
+            result["has_more"] = False
+        return result
 
     def _read(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_read", args, Operation.READ)
