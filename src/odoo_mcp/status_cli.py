@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from . import __version__
-from .audit_cli import _format_detail, _load_all_entries
+from .audit_cli import _format_detail, _load_entries
 from .errors import OdooMcpError
 from .server import OdooMcpApp, build_app
 
@@ -63,7 +63,7 @@ def _render(app: OdooMcpApp) -> str:
     # hours rather than reading the entire 30-day rotation history.
     # Per-instance "last call" lines may show "no activity" instead of
     # "Xd ago" for instances idle longer than 24h — acceptable trade.
-    all_entries = _load_all_entries(since_minutes=24 * 60)
+    all_entries, audit_issues = _load_entries(since_minutes=24 * 60)
     last_by_instance: dict[str, dict[str, Any]] = {}
     for e in all_entries:
         inst = str(e.get("instance", ""))
@@ -117,9 +117,18 @@ def _render(app: OdooMcpApp) -> str:
 
     lines.append("Recent activity (last 5 audit entries)")
     lines.append("--------------------------------------")
+    # Part of the log did not open or did not parse. Say so before the
+    # rows: "no activity" and "could not read the log" look identical
+    # here otherwise, and only one of them is reassuring.
+    for issue in audit_issues:
+        lines.append(f"warning: audit log incomplete — {issue}")
     recent = all_entries[-5:]
     if not recent:
-        lines.append("(no audit entries yet)")
+        lines.append(
+            "(audit log could not be read — see warning above)"
+            if audit_issues
+            else "(no audit entries yet)"
+        )
     else:
         # Compute dynamic column widths so long values (e.g. "model_not_allowed")
         # don't break the alignment.

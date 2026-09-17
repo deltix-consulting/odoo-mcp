@@ -5,6 +5,10 @@ plus any rotated ``audit-YYYY-MM-DD.jsonl`` siblings, filters the entries
 according to the caller's flags, and prints a fixed-width table.
 
 Never prints credential values — the audit log itself is metadata-only.
+
+A read failure is never reported as "no entries": anything this module
+could not open or parse is collected into an *issues* list and surfaced
+on stderr, so an unreadable audit log cannot be mistaken for a quiet one.
 """
 
 from __future__ import annotations
@@ -19,6 +23,12 @@ from typing import Any
 
 from .config import DEFAULT_AUDIT_LOG
 
+_NO_MATCH_MESSAGE = "(no audit entries match the filters)"
+_UNREADABLE_MESSAGE = (
+    "(no audit entries could be READ — the audit log is unreadable; "
+    "see the warnings above. This is NOT the same as no activity.)"
+)
+
 _ROTATED_PATTERN = re.compile(r"audit-\d{4}-\d{2}-\d{2}\.jsonl$")
 _DATED_PATTERN = re.compile(r"audit-(\d{4}-\d{2}-\d{2})\.jsonl$")
 
@@ -31,23 +41,45 @@ def _audit_current() -> Path:
     return Path(DEFAULT_AUDIT_LOG).expanduser()
 
 
-def _read_last_lines(path: Path, n: int) -> list[str]:
+def _reason(exc: OSError) -> str:
+    """Short human reason for an OS-level read failure."""
+    return exc.strerror or str(exc) or exc.__class__.__name__
+
+
+def _note(issues: list[str] | None, message: str) -> None:
+    """Record a read problem, if the caller asked for them."""
+    if issues is not None and message not in issues:
+        issues.append(message)
+
+
+def _read_last_lines(path: Path, n: int, *, issues: list[str] | None = None) -> list[str]:
     """Return up to the last *n* non-empty lines from *path*.
 
     Small enough log that a straightforward read-all is fine; this avoids
     binary seek arithmetic and keeps the implementation trivial.
+
+    A file we cannot stat or open still yields ``[]`` — the caller has
+    nothing to show — but the reason is appended to *issues* so it can be
+    reported instead of read as "this file was empty".
     """
-    if not path.exists():
+    try:
+        if not path.exists():
+            return []
+    except OSError as exc:
+        _note(issues, f"{path.name}: unreadable ({_reason(exc)})")
         return []
     try:
         with path.open("r", encoding="utf-8") as f:
             lines = [line.rstrip("\n") for line in f if line.strip()]
-    except OSError:
+    except OSError as exc:
+        _note(issues, f"{path.name}: unreadable ({_reason(exc)})")
         return []
     return lines[-n:] if n > 0 else lines
 
 
-def _audit_files(*, since_minutes: int | None = None) -> list[Path]:
+def _audit_files(
+    *, since_minutes: int | None = None, issues: list[str] | None = None
+) -> list[Path]:
     """Return the audit log files to scan, newest-first by date.
 
     The current ``audit.jsonl`` is always included (it holds today's
@@ -60,7 +92,13 @@ def _audit_files(*, since_minutes: int | None = None) -> list[Path]:
     """
     files: list[Path] = []
     cur = _audit_current()
-    if cur.exists():
+    try:
+        current_exists = cur.exists()
+    except OSError as exc:
+        # An unreadable *parent directory* makes even the stat fail.
+        _note(issues, f"{cur.name}: unreadable ({_reason(exc)})")
+        current_exists = False
+    if current_exists:
         files.append(cur)
 
     cutoff_date = None
@@ -69,51 +107,74 @@ def _audit_files(*, since_minutes: int | None = None) -> list[Path]:
         cutoff_date = cutoff.date()
 
     try:
-        for entry in sorted(_audit_dir().iterdir()):
-            m = _DATED_PATTERN.match(entry.name)
-            if not m:
+        siblings = sorted(_audit_dir().iterdir())
+    except OSError as exc:
+        # Rotated history is invisible — say so rather than silently
+        # reporting only whatever `audit.jsonl` happened to hold.
+        _note(issues, f"{_audit_dir()}: rotated logs unreadable ({_reason(exc)})")
+        siblings = []
+    for entry in siblings:
+        m = _DATED_PATTERN.match(entry.name)
+        if not m:
+            continue
+        if cutoff_date is not None:
+            try:
+                file_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+            except ValueError:
                 continue
-            if cutoff_date is not None:
-                try:
-                    file_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
-                except ValueError:
-                    continue
-                if file_date < cutoff_date:
-                    continue
-            files.append(entry)
-    except OSError:
-        pass
+            if file_date < cutoff_date:
+                continue
+        files.append(entry)
     return files
 
 
-def _load_all_entries(*, since_minutes: int | None = None) -> list[dict[str, Any]]:
-    """Merge the current and rotated audit logs into a single list.
+def _load_entries(*, since_minutes: int | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    """Merge the current and rotated audit logs, plus anything unreadable.
 
     When ``since_minutes`` is set, rotated files older than that window
     are skipped — a real win on installs that have been running for
     weeks. Entries within the kept files are still returned in full;
     final ``--since`` filtering happens in :func:`_filter`. Entries are
-    parsed as JSON; malformed lines and open-markers are silently
-    skipped. Returns entries sorted by timestamp ascending.
+    sorted by timestamp ascending.
+
+    The second element is the list of read problems: files that could not
+    be opened, and a per-file count of lines that were present but could
+    not be used (truncated writes, corruption, hand-editing). Open-markers
+    are expected bookkeeping and are not counted. Callers **must** surface
+    this list — a row that will not parse is the most interesting row in a
+    forensic log, and a log that will not open is not a log with no
+    activity.
     """
-    files = _audit_files(since_minutes=since_minutes)
+    issues: list[str] = []
+    files = _audit_files(since_minutes=since_minutes, issues=issues)
     entries: list[dict[str, Any]] = []
     for f in files:
-        for line in _read_last_lines(f, 0):
+        skipped = 0
+        for line in _read_last_lines(f, 0, issues=issues):
             try:
                 obj = json.loads(line)
             except (json.JSONDecodeError, ValueError):
+                skipped += 1
                 continue
             if not isinstance(obj, dict):
+                skipped += 1
                 continue
             if obj.get("event") == "audit_log_open":
                 continue
             if "tool" not in obj or "ts" not in obj:
+                skipped += 1
                 continue
             entries.append(obj)
+        if skipped:
+            _note(issues, f"{f.name}: {skipped} line(s) skipped (unparseable or not an entry)")
 
     entries.sort(key=lambda e: str(e.get("ts", "")))
-    return entries
+    return entries, issues
+
+
+def _load_all_entries(*, since_minutes: int | None = None) -> list[dict[str, Any]]:
+    """Entries only — for callers that do their own issue reporting."""
+    return _load_entries(since_minutes=since_minutes)[0]
 
 
 def _parse_ts(value: str) -> datetime | None:
@@ -272,7 +333,7 @@ def _render_stats(entries: list[dict[str, Any]]) -> str:
             bucket["durations"].append(dur)
 
     if not by_tool:
-        return "(no audit entries match the filters)"
+        return _NO_MATCH_MESSAGE
 
     rows: list[tuple[str, ...]] = [("TOOL", "CALLS", "OK", "ERR", "P50ms", "P95ms", "MAXms")]
     ordered = sorted(by_tool.items(), key=lambda kv: -int(kv[1]["calls"]))
@@ -352,7 +413,19 @@ def main(argv: list[str] | None = None) -> int:
     elif ns.errors:
         since_minutes = 24 * 60
 
-    entries = _load_all_entries(since_minutes=since_minutes)
+    entries, issues = _load_entries(since_minutes=since_minutes)
+
+    # Warnings go to stderr so the `--json` stdout contract (a bare list)
+    # is untouched and stays pipeable into jq.
+    for issue in issues:
+        print(f"warning: audit log incomplete — {issue}", file=sys.stderr)
+
+    # Nothing readable at all: the command did not do its job, so it must
+    # not exit 0. A monitoring script running `audit --errors --json`
+    # would otherwise read a chmod-broken log as "no errors".
+    unreadable = bool(issues) and not entries
+    rc = 1 if unreadable else 0
+
     filtered = _filter(
         entries,
         errors_only=ns.errors,
@@ -365,9 +438,11 @@ def main(argv: list[str] | None = None) -> int:
         # percentiles by truncating the sample.
         if ns.json:
             print(json.dumps(_stats_payload(filtered), separators=(",", ":")))
+        elif unreadable:
+            print(_UNREADABLE_MESSAGE)
         else:
             print(_render_stats(filtered))
-        return 0
+        return rc
 
     # `--tail` applies last, after filters.
     if ns.tail > 0:
@@ -377,15 +452,15 @@ def main(argv: list[str] | None = None) -> int:
         if ns.json:
             print("[]")
         else:
-            print("(no audit entries match the filters)")
-        return 0
+            print(_UNREADABLE_MESSAGE if unreadable else _NO_MATCH_MESSAGE)
+        return rc
 
     if ns.json:
         print(json.dumps(filtered, separators=(",", ":")))
-        return 0
+        return rc
 
     print(_render_table(filtered))
-    return 0
+    return rc
 
 
 if __name__ == "__main__":
