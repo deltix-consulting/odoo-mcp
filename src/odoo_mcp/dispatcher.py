@@ -1581,6 +1581,35 @@ class Dispatcher:
         except OdooMcpError:
             return []
 
+    def _redact_rows(
+        self, rt: InstanceRuntime, model: str, rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Run raw Odoo rows through the standard read-path redactor.
+
+        Same policy as :meth:`_search_read` / :meth:`_read`: always-redacted
+        patterns (built-in *and* the instance's
+        ``custom_sensitive_field_patterns``) are dropped, this instance's
+        per-model ``sensitive_fields`` overrides are honoured with no opt-in
+        available, and binaries collapse to a size placeholder.
+
+        For handlers that build their own hardcoded ``search_read`` calls
+        instead of going through the caller-driven read path. An empty row
+        set short-circuits so a model the instance never touches costs no
+        ``fields_get``.
+        """
+        if not rows:
+            return rows
+        fields_meta = self._fields_meta(rt, model)
+        return redact_response(
+            model,
+            rows,
+            {n: m.get("type", "") for n, m in fields_meta.items()},
+            allow_sensitive=frozenset(),
+            include_binary=False,
+            instance_overrides=rt.config.sensitive_fields,
+            extra_redacted=rt.extra_redacted,
+        )
+
     def _run_document_action(self, args: dict[str, Any]) -> dict[str, Any]:
         """Run a document workflow action (confirm / cancel / post / validate).
 
@@ -1880,6 +1909,12 @@ class Dispatcher:
         therefore doesn't widen the data-exposure surface; it just
         makes the tool work without each operator having to remember
         to allowlist six routing tables.
+
+        The *model* allowlist is the only thing bypassed. Every row this
+        tool returns still goes through :meth:`_redact_rows`, i.e. the
+        same field policy ``odoo_search_read`` applies — so an instance's
+        ``sensitive_fields`` / ``custom_sensitive_field_patterns`` mean
+        the same thing here as they do everywhere else.
         """
         ctx = self._begin(
             "odoo_diagnose_routing",
@@ -2011,6 +2046,23 @@ class Dispatcher:
                 order="sequence asc, id asc",
             )
 
+        # --- redaction ---------------------------------------------------
+        # These rows come off hardcoded search_read calls rather than the
+        # caller-driven read path, so nothing upstream has applied the
+        # instance's field policy to them. Redaction is an OUTPUT policy:
+        # the route/rule joins above deliberately stay on the raw rows, so
+        # an operator who hides (say) `default_code` changes what the
+        # diagnosis *shows*, never which rules it finds.
+        product_out = self._redact_rows(rt, "product.product", [product])[0]
+        template_out = (
+            self._redact_rows(rt, "product.template", [template])[0]
+            if template is not None
+            else None
+        )
+        warehouse_out = self._redact_rows(rt, "stock.warehouse", [warehouse])[0]
+        routes_out = self._redact_rows(rt, "stock.route", routes)
+        rules_out = self._redact_rows(rt, "stock.rule", rules)
+
         self._audit_ok(
             ctx,
             {
@@ -2023,11 +2075,11 @@ class Dispatcher:
         )
         return {
             "instance": ctx.instance,
-            "product": product,
-            "template": template,
-            "warehouse": warehouse,
-            "candidate_routes": routes,
-            "candidate_rules": rules,
+            "product": product_out,
+            "template": template_out,
+            "warehouse": warehouse_out,
+            "candidate_routes": routes_out,
+            "candidate_rules": rules_out,
             "note": (
                 "These are the candidates Odoo evaluates at procurement "
                 "time. The winning rule depends on sequence, "

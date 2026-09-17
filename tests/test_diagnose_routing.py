@@ -41,9 +41,15 @@ class _RoutingFake:
     the six routing models and nothing else.
     """
 
-    def __init__(self, rows: dict[str, list[dict[str, Any]]]) -> None:
+    def __init__(
+        self,
+        rows: dict[str, list[dict[str, Any]]],
+        fields_meta: dict[str, dict[str, dict[str, Any]]] | None = None,
+    ) -> None:
         self._rows = rows
+        self._fields_meta = fields_meta or {}
         self.calls: list[tuple[str, list[Any]]] = []
+        self.fields_get_calls: list[str] = []
         self.is_admin: bool | None = False
         self.admin_reason: str | None = None
         self.uid = 7
@@ -53,7 +59,20 @@ class _RoutingFake:
         return None
 
     def fields_get(self, model: str, *, use_cache: bool = True) -> dict[str, dict[str, Any]]:
-        return {}
+        """Metadata derived from the canned rows unless a test overrides it.
+
+        Returning ``{}`` here (as this fake used to) is a fiction no real
+        Odoo model can produce, and it hides redaction bugs: the redactor
+        drops any field it has no type for, so an unredacted handler and a
+        correctly redacted one look identical against an empty schema.
+        """
+        self.fields_get_calls.append(model)
+        if model in self._fields_meta:
+            return self._fields_meta[model]
+        names: set[str] = set()
+        for row in self._rows.get(model, []):
+            names.update(row)
+        return {name: {"type": "char", "string": name} for name in names}
 
     def search_read(
         self,
