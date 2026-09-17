@@ -1607,6 +1607,13 @@ class Dispatcher:
         self.app.prod_guard.check_write(ctx.instance, rt.config.production)
         dry_run = self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production)
 
+        # Resolved BEFORE the dry-run branch, not just on commit: if this
+        # (model, action) auto-completes a follow-up wizard, that is a second
+        # write on a DIFFERENT model and the operator has to see it in the
+        # preview they approve. Pure dict lookup — no RPC, so the preview
+        # costs nothing extra.
+        wizard_spec = resolve_wizard_completion(model, action)
+
         if dry_run:
             states = self._peek_states(rt, model, record_ids)
             summary = f"{action} ({method}) on {len(record_ids)} {model} record(s)"
@@ -1617,7 +1624,10 @@ class Dispatcher:
                 summary=summary,
                 payload_digest=compute_payload_digest(_token_payload(ctx.op.value, args)),
             )
-            self._audit_ok(ctx, {"action": action, "id_count": len(record_ids)}, args, dry_run=True)
+            dry_details: dict[str, Any] = {"action": action, "id_count": len(record_ids)}
+            if wizard_spec is not None:
+                dry_details["wizard_model"] = wizard_spec.wizard_model
+            self._audit_ok(ctx, dry_details, args, dry_run=True)
             preview: dict[str, Any] = {
                 "preview": True,
                 "instance": ctx.instance,
@@ -1629,6 +1639,25 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_run_document_action"),
             }
+            if wizard_spec is not None:
+                # Omitted entirely when there is no wizard — same reasoning as
+                # ``states_after``: an empty/false key reads as a claim about
+                # this action rather than "not applicable".
+                preview["wizard_completion"] = {
+                    "wizard_model": wizard_spec.wizard_model,
+                    "wizard_method": wizard_spec.wizard_method,
+                    "origin_field": wizard_spec.origin_field,
+                    "records": len(record_ids),
+                    "note": (
+                        f"If Odoo answers {method!r} with a follow-up wizard, the "
+                        f"commit will ALSO create one {wizard_spec.wizard_model} "
+                        f"record per record id and call "
+                        f"{wizard_spec.wizard_method!r} on it. That model is not "
+                        f"checked against this instance's allowlist, and no second "
+                        f"confirmation token is taken — approving this token "
+                        f"approves the wizard step too."
+                    ),
+                }
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
@@ -1641,7 +1670,6 @@ class Dispatcher:
         # the wizard ourselves (see :data:`_WIZARD_COMPLETIONS`); for
         # everything else we surface the same "needs manual completion"
         # signal the agent's been seeing.
-        wizard_spec = resolve_wizard_completion(model, action)
         wizard_completion: dict[str, Any] | None = None
         if isinstance(result, dict) and wizard_spec is not None:
             wizard_completion = self._complete_returned_wizard(rt, wizard_spec, record_ids)
@@ -1701,6 +1729,13 @@ class Dispatcher:
         two Odoo RPC calls because of how Odoo's UI is wired. Adding
         a second token here would force every cancel-with-linked-
         pickings to be approved twice and break the audit chain.
+
+        That argument only holds because the dry-run preview names this
+        wizard up front (``wizard_completion`` in ``_run_document_action``):
+        the operator is approving a step they were shown, not one they
+        find out about from the commit response. Keep the two in sync —
+        anything this method starts doing that the preview does not
+        describe turns the paragraph above into a fiction.
         """
         steps: list[dict[str, Any]] = []
         for rid in record_ids:
