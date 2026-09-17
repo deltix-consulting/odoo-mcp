@@ -176,18 +176,33 @@ def load_config(path: Path | None = None) -> AppConfig:
     """
     cfg_path = (path or DEFAULT_CONFIG_PATH).expanduser()
 
-    if not cfg_path.exists():
-        raise ConfigError(f"Config file not found: {cfg_path}")
-    if not cfg_path.is_file():
-        raise ConfigError(f"Config path is not a regular file: {cfg_path}")
-
-    _check_file_permissions(cfg_path)
-
+    # Every probe below can raise OSError -- an unreadable file (mode 000),
+    # an unsearchable parent directory, a dead NFS mount, EIO. The docstring
+    # promises ConfigError for *any* problem and four call sites are written
+    # against that promise (`doctor`, `config show`, `config validate`,
+    # `cache`), so translate OSError here rather than letting it escape as a
+    # traceback. Note `Path.exists()` does not swallow EACCES: it only
+    # ignores ENOENT/ENOTDIR/EBADF/ELOOP, so an unreadable directory raises
+    # from the existence check, not from `open()`.
     try:
+        if not cfg_path.exists():
+            raise ConfigError(f"Config file not found: {cfg_path}")
+        if not cfg_path.is_file():
+            raise ConfigError(f"Config path is not a regular file: {cfg_path}")
+
+        _check_file_permissions(cfg_path)
+
         with cfg_path.open("rb") as f:
             raw = tomllib.load(f)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"Could not parse config TOML at {cfg_path}: {exc}") from exc
+    except OSError as exc:
+        detail = exc.strerror or str(exc)
+        raise ConfigError(
+            f"Cannot read config file at {cfg_path}: {detail}. "
+            f"Check that you own the file and its directory: "
+            f"ls -ld {cfg_path.parent} {cfg_path}"
+        ) from exc
 
     defaults = _parse_defaults(raw.get("defaults", {}))
     instances = _parse_instances(raw.get("instances", {}), defaults)

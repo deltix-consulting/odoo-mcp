@@ -10,6 +10,33 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An unreadable config file now raises `ConfigError` instead of a
+  `PermissionError` traceback.** `load_config` documents "Raises
+  `ConfigError` on any problem", but the probe-and-read block let
+  `OSError` escape. Two reachable cases: a config at mode `000` (which
+  the loose-permission gate *accepts* — `0o000 & 0o077 == 0`) and a
+  config inside an unsearchable directory (`Path.exists()` does not
+  swallow `EACCES`).
+
+  Four call sites are written against the documented contract and were
+  all bypassed by the raw traceback:
+
+  - `odoo-mcp doctor` printed a traceback instead of
+    `✗ Load config — ...`; with `--json` it printed **nothing** on
+    stdout, so a monitoring script polling `doctor --json | jq .ok`
+    got no verdict rather than a failed one.
+  - `odoo-mcp config show` / `config validate` lost their
+    `✗ ConfigError: ...` message and exit-1 path.
+  - `odoo-mcp cache` lost its documented fallback to the default cache
+    path — the module docstring states this CLI "must work even if the
+    user has a broken config (typo, **bad permissions**)".
+
+  The write side of the same class already had the right posture:
+  `AuditLog._open` wraps `OSError` into `AuditLogError`. Sibling of the
+  audit-reader fix in the previous release cycle.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
