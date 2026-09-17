@@ -10,6 +10,24 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Confirmation-token payload digest no longer flips on `int`/`float`
+  transport drift.** `compute_payload_digest` now collapses integral
+  floats to ints (recursively, through nested `values` / m2m command
+  tuples / id lists) before hashing. A numeric field value that a client
+  round-trips as `1.0` on the dry-run call and `1` on the commit call —
+  the common behaviour of JS/TS MCP clients and gateways, where `1` and
+  `1.0` are the same number — used to produce two different digests and
+  reject an otherwise-identical write with "different payload" (most
+  visible on round values like `unit_amount: 1.0` on
+  `account.analytic.line`). `1` and `1.0` are the same value to Odoo, so
+  this is a fingerprint-stability fix, not a weakening of the payload
+  binding: the digest still distinguishes `1` vs `2`, `1` vs `1.5`, and —
+  critically — `True` vs `1` (booleans are left untouched). 7 new tests
+  pin the collapse, the non-integral / boolean exclusions, and a full
+  preview-`1.0` → commit-`1` round trip through the token gate.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
