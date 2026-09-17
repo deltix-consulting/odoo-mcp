@@ -1053,6 +1053,11 @@ class Dispatcher:
         Claude must ask the user which path they want. Archive is reversible
         and preserves history; delete is permanent. Same prod-guard +
         dry-run + confirmation-token flow as odoo_write / odoo_create.
+
+        The dry-run preview identifies the records by id and (best-effort)
+        ``display_name``. Approving a permanent unlink on a count alone is
+        not informed consent: the ids are what the digest binds, so they
+        are exactly what the human should get to check.
         """
         mode = args.get("mode")
         if mode not in ("archive", "delete"):
@@ -1083,6 +1088,7 @@ class Dispatcher:
 
         if dry_run:
             summary = f"{mode} {len(ids)} record(s) of {model}"
+            labels = self._peek_labels(rt, model, ids)
             token = self.app.prod_guard.create_pending(
                 ctx.instance,
                 ctx.op.value,
@@ -1109,11 +1115,20 @@ class Dispatcher:
                 "instance": ctx.instance,
                 "model": model,
                 "mode": mode,
+                "ids": ids,
                 "id_count": len(ids),
                 "confirmation_token": token,
                 "reminder": reminder,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_archive_or_delete"),
             }
+            # Omitted rather than set to [] when the label read yields
+            # nothing: an empty list reads as "these records are already
+            # gone", which is a different and alarming claim. Same
+            # rationale as states_after on odoo_run_document_action.
+            if labels:
+                preview["would_affect_records"] = labels
+                if len(ids) > len(labels):
+                    preview["would_affect_records_truncated"] = True
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
@@ -1560,6 +1575,56 @@ class Dispatcher:
         }
         self._add_commits_remaining(result, ctx)
         return result
+
+    def _peek_labels(
+        self, rt: InstanceRuntime, model: str, record_ids: list[int]
+    ) -> list[dict[str, Any]]:
+        """Best-effort read of each record's ``display_name`` for a dry-run preview.
+
+        Returns ``[{"id": .., "display_name": ..}, ...]`` — the
+        :meth:`_peek_states` shape, with the label in place of the state.
+        Used by ``odoo_archive_or_delete`` so the human approving a
+        *permanent* unlink can see WHICH records the agent selected, not
+        just how many.
+
+        Unlike ``state``, a ``display_name`` can resolve to a sensitive
+        field, so the rows go through :func:`redact_response` with no
+        ``allow_sensitive`` opt-in — the same treatment ``odoo_lookup``
+        gives its own id + display_name results. A model whose label is
+        redacted therefore yields ``{"id": N}`` alone, which still
+        identifies the record without leaking its name.
+
+        Reads at most :data:`_PREVIEW_LABEL_CAP` records: this is
+        identification for a human, not an exhaustive dump, and the
+        instance cap allows up to 10 000 ids. The caller reports the true
+        total separately as ``id_count``.
+
+        Best-effort throughout: if the model has no ``display_name`` or
+        the read fails, returns an empty list rather than failing the
+        whole preview — never block an approval gate on a cosmetic read.
+        """
+        try:
+            fields_meta = self._fields_meta(rt, model)
+            if "display_name" not in fields_meta:
+                return []
+            rows = rt.client.read(model, record_ids[:_PREVIEW_LABEL_CAP], ["display_name"])
+            redacted = redact_response(
+                model,
+                rows,
+                {n: m.get("type", "") for n, m in fields_meta.items()},
+                allow_sensitive=frozenset(),
+                include_binary=False,
+                instance_overrides=rt.config.sensitive_fields,
+                extra_redacted=rt.extra_redacted,
+            )
+            return [
+                {"id": r.get("id"), "display_name": r["display_name"]}
+                if "display_name" in r
+                else {"id": r.get("id")}
+                for r in redacted
+            ]
+        except OdooMcpError:
+            return []
 
     def _peek_states(
         self, rt: InstanceRuntime, model: str, record_ids: list[int]
@@ -2289,6 +2354,13 @@ _DRY_RUN_NOTE = (
     "This was a dry run. To commit, call {tool} again with "
     "dry_run=false and confirmation_token set to the token above."
 )
+
+
+# How many records odoo_archive_or_delete labels in its dry-run preview.
+# The confirmation gate needs enough for a human to recognise what the
+# agent selected, not a dump of every row: max_records_hard_cap allows up
+# to 10 000 ids, and the true total is always reported as id_count.
+_PREVIEW_LABEL_CAP = 50
 
 
 # Hard cap on the decoded size of an attachment created via

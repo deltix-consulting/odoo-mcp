@@ -10,6 +10,39 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_archive_or_delete` dry run now identifies the records it would
+  remove.** The preview reported `id_count` alone — not even the `ids` —
+  so the human approving a *permanent* `unlink` could see how many
+  records would be destroyed but not which ones. The commit result has
+  always returned `ids`, making the approval step strictly less
+  informative than its own outcome, and every sibling already showed its
+  payload (`odoo_run_document_action` → `record_ids` + `current_states`,
+  `odoo_send_message` / `odoo_log_note` → `body_preview`).
+
+  The preview now returns `ids` (the same list the confirmation-token
+  digest binds, so it cannot be swapped between preview and commit) plus
+  `would_affect_records` — a best-effort `[{"id": .., "display_name": ..}]`
+  list from the new `_peek_labels` helper, the `_peek_states` shape with
+  the label in place of the state.
+
+  Applies to both modes; `archive` is reversible but still benefits from
+  the same identification. No new tool, config key, or pipeline change,
+  and the commit path is untouched — the extra read happens only on the
+  preview.
+
+  Details: labels go through `redact_response` with no `allow_sensitive`
+  opt-in (a `display_name` can resolve to a sensitive field, unlike
+  `state`), so an operator-marked-sensitive label yields `{"id": N}`
+  alone and still identifies the record. The read is capped at 50
+  records (`max_records_hard_cap` allows up to 10 000) with
+  `would_affect_records_truncated: true` when it bites; `id_count` always
+  reports the true total. Best-effort throughout — a model with no
+  `display_name` or a failed read omits the key rather than failing the
+  preview, and the key is omitted rather than set to `[]`, since an empty
+  list reads as "these records are already gone".
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
