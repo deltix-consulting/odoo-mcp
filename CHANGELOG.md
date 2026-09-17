@@ -10,6 +10,25 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo-mcp doctor` now reports an audit log or fields cache that is
+  group/world readable.** Both writers `chmod 600` their files
+  best-effort and, when the chmod is refused (a file owned by another
+  user after a `sudo` first run or a restored backup — still appendable
+  for the group, so "Audit log writable" stays green), log a WARNING that
+  reaches nobody in the shipped default: `logging_setup` installs a
+  `NullHandler` unless `ODOO_MCP_LOG_LEVEL` is set. The fields cache is
+  additionally chmod'd only on *creation*, so a cache that already exists
+  at `0o644` is never re-hardened and never even attempted. Two new
+  yellow rows — `Audit log mode` (current file plus rotated
+  `audit-*.jsonl` siblings) and `Fields cache mode` — name each loose
+  file with its mode and the `chmod 600` to run. Warnings, not failures,
+  matching the writers' best-effort posture; placed before the
+  per-instance loop so a credentials failure cannot hide them. The config
+  file needs no row: `load_config` already refuses a loose mode. Six new
+  tests, five of which fail on the previous `doctor.py`.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
