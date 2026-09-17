@@ -10,7 +10,9 @@ Specifically checks:
 1. Config file exists, is a regular file, and has ``chmod 600``.
 2. Config TOML parses and conforms to the schema.
 3. Audit log directory is writable.
-4. For each instance:
+4. Audit log and fields cache files are owner-only (``chmod 600``) —
+   a warning, not a failure, since both writers harden best-effort.
+5. For each instance:
    a. Credential env vars are present.
    b. TLS connects and the remote cert is valid (unless ``allow_self_signed``).
    c. Odoo ``authenticate`` succeeds.
@@ -20,13 +22,15 @@ Specifically checks:
 from __future__ import annotations
 
 import logging
+import os
+import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .audit import AuditLog
+from .audit import _ROTATED_PATTERN, AuditLog
 from .client import OdooClient
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from .credentials import load_credentials
@@ -161,6 +165,12 @@ def run_doctor(config_path: Path | None = None, *, as_json: bool = False) -> int
     else:
         report.add("Audit log writable", True, str(cfg.audit_log_path))
 
+    # --- File modes -------------------------------------------------------
+    # Config-only, so it sits BEFORE the per-instance loop: that loop
+    # ``continue``s on a credentials / auth failure and must not hide a
+    # local hardening gap behind a network one.
+    _check_owner_only_modes(report, cfg)
+
     # --- Per-instance checks ---------------------------------------------
     for name, inst_cfg in cfg.instances.items():
         section = f"[{name}]"
@@ -238,6 +248,69 @@ def _emit(report: _Report, *, as_json: bool) -> None:
         print(_json.dumps(report.to_dict(), separators=(",", ":")))
     else:
         report.print()
+
+
+def _check_owner_only_modes(report: _Report, cfg: AppConfig) -> None:
+    """Warn for any MCP-owned file that is group- or world-readable.
+
+    ``AuditLog`` and ``PersistentFieldsCache`` both ``chmod 600`` their
+    files best-effort and log a WARNING when the chmod fails (a file
+    owned by another user — a ``sudo`` first run, a restored backup — is
+    the usual cause: it stays writable for the group, so the "Audit log
+    writable" step above is green, while ``chmod`` is refused). That log
+    line reaches nobody in the default configuration: ``logging_setup``
+    installs a ``NullHandler`` unless ``ODOO_MCP_LOG_LEVEL`` is set. The
+    audit log and its rotated ``audit-*.jsonl`` siblings are re-hardened
+    on every open, so for them the gap is exactly the refused chmod; the
+    fields cache is chmod'd only on creation, so a loose existing cache
+    stays loose across every restart with no chmod attempted at all.
+    doctor is the always-on surface, so it reads the modes back here.
+
+    The config file needs no row: ``load_config`` refuses a loose mode
+    outright, so a red "Load config" step already covers it. Warning
+    rather than failure, matching the writers' best-effort posture; on
+    non-POSIX platforms ``st_mode`` does not carry these bits, so skip.
+    """
+    if os.name != "posix":
+        return
+
+    audit_candidates: list[Path] = []
+    if cfg.audit_log_path.is_file():
+        audit_candidates.append(cfg.audit_log_path)
+    try:
+        for entry in sorted(cfg.audit_log_path.parent.iterdir()):
+            if _ROTATED_PATTERN.match(entry.name) and entry.is_file():
+                audit_candidates.append(entry)
+    except OSError:
+        # Directory unreadable — "Audit log writable" has already said so.
+        pass
+    _report_loose_modes(report, "Audit log mode", audit_candidates)
+
+    if cfg.fields_cache_path is not None and cfg.fields_cache_path.is_file():
+        _report_loose_modes(report, "Fields cache mode", [cfg.fields_cache_path])
+
+
+def _report_loose_modes(report: _Report, name: str, paths: list[Path]) -> None:
+    loose: list[str] = []
+    unreadable: list[str] = []
+    for path in paths:
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError as exc:
+            unreadable.append(f"{path} ({exc.strerror or exc})")
+            continue
+        if mode & 0o077:
+            loose.append(f"{path} is {oct(mode)}")
+    if loose:
+        shown = loose[:5]
+        more = f" (+{len(loose) - 5} more)" if len(loose) > 5 else ""
+        targets = " ".join(entry.split(" is ")[0] for entry in shown)
+        report.add_warning(
+            name,
+            f"group/world readable: {'; '.join(shown)}{more}. Run: chmod 600 {targets}",
+        )
+    if unreadable:
+        report.add_warning(name, "could not stat: " + "; ".join(unreadable))
 
 
 def _check_rotation_warnings(report: _Report, cfg: AppConfig) -> None:

@@ -11,6 +11,7 @@ Covers the v0.13.1 fixes:
 from __future__ import annotations
 
 import os
+import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -387,3 +388,210 @@ def test_doctor_main_unknown_arg_returns_2(
     assert rc == 2
     err = capsys.readouterr().err
     assert "Unknown" in err or "Usage" in err
+
+
+# -----------------------------------------------------------------------------
+# File-mode rows — a chmod the writer could not apply must not stay invisible
+# -----------------------------------------------------------------------------
+
+
+def _write_config_with_cache(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Like ``_write_min_config`` but with the fields cache enabled.
+
+    Returns ``(config_path, audit_log_path, fields_cache_path)``.
+    """
+    cfg = tmp_path / "config.toml"
+    audit_log = tmp_path / "audit.jsonl"
+    cache = tmp_path / "fields_cache.sqlite"
+    cfg.write_text(
+        "[defaults]\n"
+        f'audit_log = "{audit_log}"\n'
+        f'fields_cache_path = "{cache}"\n'
+        "\n"
+        "[instances.dev]\n"
+        'url = "http://example.invalid"\n'
+        'database = "db"\n'
+        'credentials_env_prefix = "ODOO_MCP_DEV"\n'
+        "production = false\n"
+    )
+    os.chmod(cfg, 0o600)
+    return cfg, audit_log, cache
+
+
+def _run_doctor_json(cfg: Path, capsys: pytest.CaptureFixture[str]) -> dict[str, object]:
+    import json
+
+    doctor.run_doctor(cfg, as_json=True)
+    return json.loads(capsys.readouterr().out.strip())
+
+
+def _warnings_named(payload: dict[str, object], name: str) -> list[str]:
+    warnings = payload["warnings"]
+    assert isinstance(warnings, list)
+    return [w["detail"] for w in warnings if w["name"] == name]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="st_mode bits are POSIX-only")
+def test_doctor_warns_when_audit_log_chmod_was_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``AuditLog`` swallows a refused ``chmod`` behind a logger nobody
+    reads by default, and the file stays writable so "Audit log writable"
+    is green. doctor must read the mode back and say so."""
+    from odoo_mcp import audit
+
+    cfg, audit_log, _cache = _write_config_with_cache(tmp_path)
+    audit_log.write_text("")
+    os.chmod(audit_log, 0o644)
+
+    def refuse_chmod(path: object, mode: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(audit.os, "chmod", refuse_chmod)
+    _stub_loader(monkeypatch)
+    _stub_set_at(monkeypatch, None)
+    monkeypatch.delenv("ODOO_MCP_DEV_USERNAME", raising=False)
+    monkeypatch.delenv("ODOO_MCP_DEV_API_KEY", raising=False)
+
+    payload = _run_doctor_json(cfg, capsys)
+
+    steps = {s["name"]: s["ok"] for s in payload["steps"]}  # type: ignore[union-attr]
+    assert steps["Audit log writable"] is True  # the writer's own check is green
+    details = _warnings_named(payload, "Audit log mode")
+    assert len(details) == 1
+    assert str(audit_log) in details[0]
+    assert "0o644" in details[0]
+    assert f"chmod 600 {audit_log}" in details[0]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="st_mode bits are POSIX-only")
+def test_doctor_no_mode_warning_when_files_are_owner_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Passes before and after the fix: a healthy install gets no row."""
+    cfg, audit_log, cache = _write_config_with_cache(tmp_path)
+    cache.write_bytes(b"")
+    os.chmod(cache, 0o600)
+    _stub_loader(monkeypatch)
+    _stub_set_at(monkeypatch, None)
+    monkeypatch.delenv("ODOO_MCP_DEV_USERNAME", raising=False)
+    monkeypatch.delenv("ODOO_MCP_DEV_API_KEY", raising=False)
+
+    payload = _run_doctor_json(cfg, capsys)
+
+    # AuditLog re-hardens the current file on open, so it is 0o600 here.
+    assert stat.S_IMODE(audit_log.stat().st_mode) == 0o600
+    assert _warnings_named(payload, "Audit log mode") == []
+    assert _warnings_named(payload, "Fields cache mode") == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="st_mode bits are POSIX-only")
+def test_doctor_warns_on_loose_rotated_audit_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Rotated ``audit-YYYY-MM-DD.jsonl`` files get the same best-effort
+    re-harden on open as the current file. With chmod refused and the
+    current file already 0o600, the rotated one is the only loose file
+    and must be the one named."""
+    from odoo_mcp import audit
+
+    cfg, audit_log, _cache = _write_config_with_cache(tmp_path)
+    audit_log.write_text("")
+    os.chmod(audit_log, 0o600)
+    rotated = tmp_path / "audit-2026-09-01.jsonl"
+    rotated.write_text("")
+    os.chmod(rotated, 0o640)
+
+    def refuse_chmod(path: object, mode: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(audit.os, "chmod", refuse_chmod)
+    _stub_loader(monkeypatch)
+    _stub_set_at(monkeypatch, None)
+    monkeypatch.delenv("ODOO_MCP_DEV_USERNAME", raising=False)
+    monkeypatch.delenv("ODOO_MCP_DEV_API_KEY", raising=False)
+
+    payload = _run_doctor_json(cfg, capsys)
+
+    details = _warnings_named(payload, "Audit log mode")
+    assert len(details) == 1
+    assert str(rotated) in details[0]
+    assert str(audit_log) not in details[0]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="st_mode bits are POSIX-only")
+def test_doctor_warns_on_loose_existing_fields_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``PersistentFieldsCache`` only chmods the file it CREATES; a cache
+    that already exists at 0o644 stays that way across every restart."""
+    cfg, _audit_log, cache = _write_config_with_cache(tmp_path)
+    cache.write_bytes(b"")
+    os.chmod(cache, 0o644)
+    _stub_loader(monkeypatch)
+    _stub_set_at(monkeypatch, None)
+    monkeypatch.delenv("ODOO_MCP_DEV_USERNAME", raising=False)
+    monkeypatch.delenv("ODOO_MCP_DEV_API_KEY", raising=False)
+
+    payload = _run_doctor_json(cfg, capsys)
+
+    details = _warnings_named(payload, "Fields cache mode")
+    assert len(details) == 1
+    assert str(cache) in details[0]
+    assert f"chmod 600 {cache}" in details[0]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="st_mode bits are POSIX-only")
+def test_doctor_mode_rows_are_warnings_not_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A loose mode matches the writers' best-effort posture: yellow, and
+    it must not flip the exit code on its own."""
+    cfg, _audit_log, cache = _write_config_with_cache(tmp_path)
+    cache.write_bytes(b"")
+    os.chmod(cache, 0o644)
+    _stub_loader(monkeypatch)
+    _stub_set_at(monkeypatch, None)
+    monkeypatch.delenv("ODOO_MCP_DEV_USERNAME", raising=False)
+    monkeypatch.delenv("ODOO_MCP_DEV_API_KEY", raising=False)
+
+    payload = _run_doctor_json(cfg, capsys)
+
+    step_names = {s["name"] for s in payload["steps"]}  # type: ignore[union-attr]
+    assert "Fields cache mode" not in step_names
+    assert _warnings_named(payload, "Fields cache mode")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="st_mode bits are POSIX-only")
+def test_doctor_mode_check_runs_before_the_instance_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The per-instance loop ``continue``s on missing credentials. A
+    config-only check must not sit behind that gate — the tests above
+    all run with credentials removed, so this pins the ordering that
+    makes them meaningful."""
+    cfg, _audit_log, cache = _write_config_with_cache(tmp_path)
+    cache.write_bytes(b"")
+    os.chmod(cache, 0o644)
+    _stub_loader(monkeypatch)
+    _stub_set_at(monkeypatch, None)
+    monkeypatch.delenv("ODOO_MCP_DEV_USERNAME", raising=False)
+    monkeypatch.delenv("ODOO_MCP_DEV_API_KEY", raising=False)
+
+    payload = _run_doctor_json(cfg, capsys)
+
+    steps = {s["name"]: s["ok"] for s in payload["steps"]}  # type: ignore[union-attr]
+    assert steps["[dev] credentials"] is False
+    assert _warnings_named(payload, "Fields cache mode")
