@@ -10,6 +10,40 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A search filter the server cannot parse is now refused instead of
+  silently searching the whole model.** `odoo_search_read`,
+  `odoo_search_count` and `odoo_read_group` read their filter as
+  `args.get("domain") or []`. The `or` also swallowed every *falsy*
+  non-list — `""`, `{}`, `0`, `False` — so those never reached the
+  domain sandbox that exists to reject them. They reached Odoo as `[]`,
+  which matches **every record in the model**: the caller asked to
+  narrow the search, the server quietly widened it to everything, and
+  the response looked like a perfectly ordinary successful result.
+
+  Measured on 0.26.0, all three tools: `domain=""` → `[]` sent to Odoo.
+  A *truthy* malformed domain (`"[('name','=','x')]"`,
+  `{"conditions": [...]}`) was always refused correctly — only the
+  falsy spellings slipped past, which is what made this easy to miss.
+
+  Domains are now defaulted only when the argument is **absent or
+  `None`**; anything else present is handed to the sandbox, which
+  decides. Omitting `domain`, or passing `None` or `[]`, still means
+  "no filter" exactly as documented — that path is unchanged.
+
+  The refusal also names the remedy now ("To match every record, pass
+  `[]` or omit the argument"), so an agent that sent `""` meaning
+  "no filter" is not left at a dead end.
+
+  This is a *fail-open* bug rather than a crash, so nothing surfaced it:
+  the widened search returns records, respects the limit clamp, and is
+  redacted normally. Of the twelve places the dispatcher rewrites a
+  falsy caller argument, these three were the only ones where the
+  rewrite **widened** the operation — the other nine (`verbose`,
+  `allow_sensitive_fields`, `include_binary`, `include_domain`,
+  `partner_ids`) all narrow, and so fail closed.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

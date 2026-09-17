@@ -590,7 +590,7 @@ class Dispatcher:
             rt, model, fields_meta, known, args, allow_sensitive
         )
         domain = sandbox_domain(
-            args.get("domain") or [],
+            _domain_arg(args),
             known,
             model=model,
             allow_sensitive=allow_sensitive,
@@ -669,7 +669,7 @@ class Dispatcher:
         # matters most here.
         allow_sensitive = frozenset(args.get("allow_sensitive_fields") or [])
         domain = sandbox_domain(
-            args.get("domain") or [],
+            _domain_arg(args),
             known,
             model=ctx.model,
             allow_sensitive=allow_sensitive,
@@ -714,7 +714,7 @@ class Dispatcher:
             extra_redacted=rt.extra_redacted,
         )
         domain = sandbox_domain(
-            args.get("domain") or [],
+            _domain_arg(args),
             known,
             model=model,
             allow_sensitive=allow_sensitive,
@@ -2721,6 +2721,24 @@ def _optional_str(args: dict[str, Any], key: str) -> str | None:
     if not isinstance(value, str):
         raise OdooMcpError(f"{key} must be a string")
     return value
+
+
+def _domain_arg(args: dict[str, Any]) -> Any:
+    """Return the caller's ``domain``, defaulting ONLY when it is absent/None.
+
+    The value is returned unvalidated — :func:`sandbox_domain` is the one
+    place that decides what a domain may contain, and it refuses anything
+    that is not a list.
+
+    The subtlety this exists for: ``args.get("domain") or []`` also swallows
+    every *falsy* non-list (``""``, ``{}``, ``0``, ``False``). A domain the
+    server cannot understand would then reach Odoo as ``[]``, which matches
+    **every record in the model** — the search silently widens instead of
+    being refused. Omitting the argument (or passing ``[]``) is the documented
+    way to ask for no filter; anything else present must go to the sandbox.
+    """
+    domain = args.get("domain")
+    return [] if domain is None else domain
 
 
 def _require_int_or_default(
