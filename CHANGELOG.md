@@ -10,6 +10,58 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_create` / `odoo_write` no longer report success for a write
+  Odoo silently discards.** `validate_write_values` checked that a
+  field exists and is not redacted, but never that it can receive a
+  value — and the `fields_get` metadata needed to tell (`readonly`,
+  `store`) was already fetched and cached, then thrown away by
+  `frozenset(self._fields_meta(...).keys())`.
+
+  Odoo's `write()` does not police this. For a field that is computed
+  with no `inverse`, `fields_get` reports `readonly=True` — Odoo sets
+  it itself (`attrs['readonly'] = attrs.get('readonly', not
+  attrs.get('inverse'))`, `odoo/fields.py` on ≤18.0,
+  `odoo/orm/fields.py` on 19.0+). When such a field is also
+  `store=False` the value goes nowhere: `write()` calls
+  `field.write(self, value)`, which only touches the cache;
+  `determine_inverses` stays empty; and the SQL path asserts
+  `field.store and field.column_type`. `write()` still returns `True`,
+  so the agent reported `committed: true` for a no-op.
+
+  Two calibrated responses, rather than one blanket refusal:
+
+  - **`readonly` and NOT `store`** → refused, naming the field and
+    pointing at the fields it is computed from. There is no legitimate
+    write here; it can only ever be a silent no-op.
+  - **`readonly` and `store`** → committed, but reported back under
+    `readonly_fields_written` + `readonly_fields_note`. The value does
+    reach the column, but a stored *computed* field is recomputed from
+    its dependencies the moment one changes. Not refused, because the
+    same flag also covers `id` / `create_date` / `write_uid` and
+    explicitly-readonly columns, where the write is unusual but is the
+    caller's business — Odoo's own ACLs stay the authority.
+
+  Fails open by construction: a field missing from the metadata, or one
+  whose `fields_get` carries no `store` key, is never refused, so a
+  trimmed or unusual `fields_get` cannot manufacture a false refusal.
+  Callers that pass no `fields_meta` keep the previous behaviour.
+
+  The warning is attached to the dry-run preview *and* the commit
+  result — on a non-production instance `dry_run` defaults off, so a
+  preview-only warning would be unreachable on exactly the instances
+  people experiment on.
+
+  The same refusal covers nested x2many command values
+  (`order_line=[(0, 0, {...})]`): v0.27.0's relational-write gate
+  already fetches the related model's `fields_get`, so it now passes
+  that metadata through as well.
+
+  Costs no extra round trip: the metadata was already in hand. 17 new
+  tests in `tests/test_computed_field_writes.py`, plus a new
+  `odoo_help` gotcha.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
