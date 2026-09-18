@@ -26,6 +26,18 @@ from typing import Any, Final
 
 from ..errors import FieldPolicyError
 
+# Appended to every "field does not exist" refusal. Field names are checked
+# against a cached ``fields_get`` snapshot (in-process L1, which never
+# expires, plus a 24h on-disk L2), so "does not exist" is only true *as of
+# that snapshot* — a Studio field or a module installed since then is real
+# in Odoo and unknown here. Without this clause the refusal reads as a fact
+# about live Odoo, and the standing advice ("call odoo_describe_model")
+# sends the caller straight back to the same stale snapshot.
+UNKNOWN_FIELD_HINT: Final[str] = (
+    " If it was added to Odoo recently, the cached schema may be stale — "
+    "re-run odoo_describe_model with refresh=true."
+)
+
 # Regex for fields that are NEVER returned. Note: anchored with fullmatch so
 # an incidental "key" in the middle of a word (e.g. "keynote") doesn't trip.
 _ALWAYS_REDACTED_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
@@ -321,7 +333,9 @@ def validate_requested_fields(
                 f"Dotted field {name!r} not allowed — request the relation directly."
             )
         if name not in known_fields:
-            raise FieldPolicyError(f"Field {name!r} does not exist on model {model!r}.")
+            raise FieldPolicyError(
+                f"Field {name!r} does not exist on model {model!r}." + UNKNOWN_FIELD_HINT
+            )
         if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(f"Field {name!r} is permanently redacted and cannot be read.")
         if (
@@ -359,7 +373,9 @@ def validate_write_values(
         if "." in name:
             raise FieldPolicyError(f"Dotted field {name!r} not allowed in write values.")
         if name not in known_fields:
-            raise FieldPolicyError(f"Field {name!r} does not exist on model {model!r}.")
+            raise FieldPolicyError(
+                f"Field {name!r} does not exist on model {model!r}." + UNKNOWN_FIELD_HINT
+            )
         if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(
                 f"Field {name!r} is protected and cannot be written via the MCP."
@@ -415,7 +431,9 @@ def validate_aggregate_fields(
         if "." in name:
             raise FieldPolicyError(f"Dotted aggregate field {name!r} not allowed.")
         if name not in known_fields:
-            raise FieldPolicyError(f"Aggregate field {name!r} does not exist on model {model!r}.")
+            raise FieldPolicyError(
+                f"Aggregate field {name!r} does not exist on model {model!r}." + UNKNOWN_FIELD_HINT
+            )
         if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(f"Aggregate field {name!r} is permanently redacted.")
         if (
@@ -476,7 +494,9 @@ def validate_groupby(
         if "." in name:
             raise FieldPolicyError(f"Dotted groupby field {name!r} not allowed.")
         if name not in known_fields:
-            raise FieldPolicyError(f"groupby field {name!r} does not exist on model {model!r}.")
+            raise FieldPolicyError(
+                f"groupby field {name!r} does not exist on model {model!r}." + UNKNOWN_FIELD_HINT
+            )
         if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(f"groupby field {name!r} is permanently redacted.")
         if (
@@ -547,7 +567,9 @@ def validate_order(
         if "." in name:
             raise FieldPolicyError(f"Dotted order field {name!r} not allowed.")
         if name not in known_fields:
-            raise FieldPolicyError(f"order field {name!r} does not exist on model {model!r}.")
+            raise FieldPolicyError(
+                f"order field {name!r} does not exist on model {model!r}." + UNKNOWN_FIELD_HINT
+            )
         if is_always_redacted_with_extra(name, extra_redacted):
             raise FieldPolicyError(f"order field {name!r} is permanently redacted.")
         if (

@@ -10,6 +10,54 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_describe_model` can now answer from Odoo instead of only
+  from a snapshot, via `refresh=true`.** Field metadata is cached at
+  two levels — an in-process L1 dict with *no* expiry, and the on-disk
+  L2 with a 24h TTL — and every field-name check in the server keys
+  off that snapshot: explicit `fields`, domain leaves, `groupby`,
+  aggregates, and write values. There was no way, from inside a
+  session, to make the server look again.
+
+  So a field added to Odoo after the snapshot — a Studio field, a
+  freshly installed module, a customisation the consultant made in the
+  other browser tab, which is precisely the deployment this server is
+  built for — was not merely missing from `odoo_describe_model`.
+  Reading it was refused with *"Field 'x_studio_loyalty_tier' does not
+  exist on model 'res.partner'."*: an unqualified claim about live
+  Odoo that was false. An agent has no reason to doubt it, and the
+  refusal's own remediation — *"Use odoo_describe_model to see
+  available fields"* — sent it straight back to the same stale
+  snapshot, which confirmed the false answer. The only real fix was
+  out of band: quit the client and run `odoo-mcp cache --clear` in a
+  shell.
+
+  `OdooClient.fields_get` has taken a `use_cache` parameter since the
+  L2 cache landed. Nothing in the server has ever passed it `False` —
+  the escape hatch was built and never wired up. Fix: wire it.
+  `odoo_describe_model(refresh=true)` re-reads from Odoo through
+  `_fields_meta`, the same choke point every other tool uses, so the
+  per-model read whitelist still applies. Because `fields_get` writes
+  a live result back to both cache layers, one refreshed call
+  repoints every later tool in the session — and every future process
+  — at the new schema; that is why only the one discovery tool needs
+  the flag.
+
+  Disclosure, so that a stale answer stops reading as an authoritative
+  one: `schema_refreshed` is now on every `odoo_describe_model`
+  response with both values (never omitted — an unqualified schema is
+  the thing that misled), the audit `details` record `refresh` so an
+  operator can see the extra round trip that was spent, and the six
+  *"field does not exist"* refusals (fields, domain, aggregate,
+  groupby, write values, and v0.27.0's `order`) now name `refresh=true`
+  as the next thing to try.
+
+  Read-only and additive. No change to the allowlist, the redaction
+  policy, the prod-guard pipeline, or to which fields any caller may
+  read — `refresh` only decides whether the schema being enforced is
+  current.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
