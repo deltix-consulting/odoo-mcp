@@ -337,7 +337,7 @@ def test_read_group_include_domain_keeps_domain(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_help_default_under_1500_chars(tmp_path: Path) -> None:
+def test_help_default_stays_compact(tmp_path: Path) -> None:
     fake = _FakeClient()
     app = _build_app(tmp_path, fake)
     dispatcher = Dispatcher(app)
