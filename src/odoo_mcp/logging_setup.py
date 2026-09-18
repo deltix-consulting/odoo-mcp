@@ -11,9 +11,15 @@ The design is intentionally minimal:
   library log call is silently discarded — we never want log noise leaking
   into the stdio channel that carries MCP protocol traffic.
 * **Opt in via env var.** Set ``ODOO_MCP_LOG_LEVEL=DEBUG`` (or ``INFO``,
-  ``WARNING``, ``ERROR``) and a :class:`logging.StreamHandler` pointing at
-  :data:`sys.stderr` is installed with a compact ``time level module message``
-  format. No external deps — stdlib :mod:`logging` only.
+  ``WARNING``, ``ERROR``, ``CRITICAL``) and a :class:`logging.StreamHandler`
+  pointing at :data:`sys.stderr` is installed with a compact ``time level
+  module message`` format. No external deps — stdlib :mod:`logging` only.
+* **A typo is not OFF.** Setting the variable at all is the opt-in; an
+  unrecognised value (``DEBGU``, ``TRACE``, ``VERBOSE``) installs the stderr
+  handler at ``WARNING`` and prints one line naming the bad value. The
+  operator reached for this variable because something is already broken —
+  answering a typo with silence is the one outcome that helps nobody. Only
+  an unset variable or an explicit ``OFF`` stays silent.
 * **Credential-safe.** A filter routes every formatted record through
   :func:`odoo_mcp.errors.redact` so registered secrets never appear in log
   output, even if a third-party library echoes one back.
@@ -42,8 +48,15 @@ _VALID_LEVELS: Final[dict[str, int]] = {
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
     "WARNING": logging.WARNING,
+    "WARN": logging.WARNING,  # stdlib alias; the spelling most other tools use
     "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
 }
+_OFF: Final[str] = "OFF"
+# Level used when the variable is set to something we do not recognise. The
+# most conservative level that still shows the failures the operator is
+# almost certainly looking for.
+_FALLBACK_LEVEL: Final[int] = logging.WARNING
 
 
 class _RedactFilter(logging.Filter):
@@ -81,13 +94,18 @@ def configure_logging() -> None:
     # Don't bubble up to the root logger — we manage our own output surface.
     logger.propagate = False
 
-    raw = os.environ.get(_ENV_VAR, "OFF").strip().upper()
-    level = _VALID_LEVELS.get(raw)
-    if level is None:
-        # OFF or any unrecognised value: install a NullHandler and silence.
+    raw = os.environ.get(_ENV_VAR, _OFF).strip().upper()
+    if raw in ("", _OFF):
+        # Unset or explicitly OFF: install a NullHandler and silence.
         logger.addHandler(logging.NullHandler())
         logger.setLevel(logging.CRITICAL + 1)
         return
+
+    unrecognised = raw not in _VALID_LEVELS
+    # The variable IS set, so the operator wants output. Silencing a typo
+    # would read a broken value as a clean OFF — fall back to WARNING and
+    # say so on the surface they just switched on.
+    level = _FALLBACK_LEVEL if unrecognised else _VALID_LEVELS[raw]
 
     handler = logging.StreamHandler(stream=sys.stderr)
     handler.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
@@ -95,3 +113,12 @@ def configure_logging() -> None:
     handler.setLevel(level)
     logger.addHandler(handler)
     logger.setLevel(level)
+
+    if unrecognised:
+        logger.warning(
+            "%s=%r is not a recognised level (expected one of %s, or OFF); "
+            "logging at WARNING instead.",
+            _ENV_VAR,
+            raw,
+            "/".join(k for k in _VALID_LEVELS if k != "WARN"),
+        )

@@ -10,6 +10,25 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A typo in `ODOO_MCP_LOG_LEVEL` no longer silences logging.**
+  `configure_logging` treated every value it did not recognise exactly
+  like `OFF`: `NullHandler`, nothing on stderr, no diagnostic. The
+  variable exists for one situation — the server is dead inside Claude
+  Desktop / Cowork and the operator needs a trail — so the operator
+  who typed `DEBGU`, `TRACE`, `VERBOSE`, or the stdlib-legal `WARN` /
+  `CRITICAL` got the one outcome that helps nobody: the same silence as
+  not having set it, with nothing to say why. `WARN` and `CRITICAL` are
+  now accepted (`logging` itself accepts both). Any other set value
+  installs the stderr handler at `WARNING` — the conservative level
+  that still shows failures — and prints one line naming the bad value
+  and the accepted set. Unset and an explicit `OFF` (or an empty value,
+  which is how a launcher clears a variable) stay silent, so the
+  off-by-default posture and the stdio channel are untouched: stderr
+  was always the only surface this module writes to. Seven new tests
+  in `tests/test_logging.py`; five fail on the previous code.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
