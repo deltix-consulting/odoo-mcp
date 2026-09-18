@@ -10,6 +10,47 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_enable_prod_writes` now says when it reset a live commit
+  budget instead of granting a new one.** Calling it while a window
+  is already active *renews in place*: `ProdGuard.unlock` resets
+  `expires_at` and `commits_remaining` to full while preserving the
+  window identity. The response and the audit row were byte-identical
+  either way — same `writes_unlocked: true`, same
+  `commits_remaining: 10`, same `{"event": "WRITE_UNLOCK"}` — so
+  nothing anywhere recorded that a budget had been discarded
+  mid-window, or how much of it was left.
+
+  The burst budget is the only hard ceiling on how many production
+  commits a single unlock can authorise; every other prod-guard layer
+  (dry-run default, confirmation token, payload digest) gates writes
+  one at a time and says nothing about how many. And renewing is the
+  documented happy path — the burst-limit error tells the agent in so
+  many words to "call `odoo_enable_prod_writes` again to renew the
+  budget", noting that tokens already held stay valid. So an agent
+  looping *10 commits → renew → 10 commits* is following the
+  instructions it was given, and produced an audit trail an operator
+  could not distinguish from an operator opening three separate
+  sessions over the afternoon. Reconstructing how many commits one
+  unlock actually authorised meant joining unlock rows against write
+  rows by timestamp and inferring window boundaries — from a log whose
+  whole point is that a reviewer should not have to.
+
+  Fix: snapshot `prod_guard.commits_remaining(instance)` before
+  unlocking, and report it as `renewed` + `commits_remaining_before`
+  on both the response and the audit `details`. On a first unlock
+  these are `false` / `null` — emitted explicitly, so an operator can
+  tell "nothing was renewed" from "this row predates the fix". On a
+  renewal the note also names the budget that was discarded, since the
+  note is what a human reads in the client transcript. An *expired*
+  window still reports `renewed: false`: it is gone, `unlock` gives it
+  a fresh identity, and stale tokens cannot be replayed against it.
+
+  Disclosure only — read through the existing public
+  `commits_remaining` helper. No change to `ProdGuard`, to the unlock
+  TTL or budget, to any tool schema, or to which calls are allowed.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
