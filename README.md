@@ -260,7 +260,7 @@ Configuration lives at `~/.odoo-mcp/config.toml` (chmod 600 — the server refus
 - **Sensitive fields.** Two tiers: regex-matched fields (passwords, tokens, api_keys, salary/payroll/bonus, secrets, credentials) are always redacted and unwritable. Per-model default-hidden fields (e.g. `res.partner.vat`, `hr.employee.ssnid`) require per-call `allow_sensitive_fields=[...]`. Extend with `custom_sensitive_field_patterns` per instance.
 - **Audit log.** One JSONL line per call to `~/.odoo-mcp/audit.jsonl`. Daily rotation, 30-day retention. No values, no domains, no record content. Server fails closed if the log becomes unwritable. Inspect with `odoo-mcp audit`.
 - **Caching.** L1 in-memory + L2 persistent SQLite (`~/.odoo-mcp/fields-cache.db`, 24h TTL) for `fields_get` only — never record values. Disable L2 with `fields_cache_path = ""`. Drop stale entries with `odoo-mcp cache --clear`.
-- **Debug logging.** Export `ODOO_MCP_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR` to stream to stderr. Credentials are scrubbed.
+- **Debug logging.** Export `ODOO_MCP_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR|CRITICAL` to stream to stderr. Credentials are scrubbed. Any other value logs at `WARNING` and says so — only unset or `OFF` is silent.
 - **Runtime scoping env vars** (all optional, all read at call time):
 
   | Var | Effect |

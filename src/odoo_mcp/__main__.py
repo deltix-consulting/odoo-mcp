@@ -37,7 +37,7 @@ import sys
 
 def main() -> int:
     # Configure stderr logging before any other import that might log.
-    # Off by default; opt in with ODOO_MCP_LOG_LEVEL=DEBUG/INFO/WARNING/ERROR.
+    # Off by default; opt in with ODOO_MCP_LOG_LEVEL=DEBUG/INFO/WARNING/ERROR/CRITICAL.
     from .logging_setup import configure_logging
 
     configure_logging()

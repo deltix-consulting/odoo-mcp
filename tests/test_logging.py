@@ -110,3 +110,102 @@ def test_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # Exactly one line of output (not two).
     assert buf.getvalue().count("once") == 1
+
+
+# -- a typo in ODOO_MCP_LOG_LEVEL is an opt-in with a bad value, not OFF -------
+
+
+def test_unrecognised_level_still_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator set the variable because something is already broken;
+    a typo must not turn that into the one silent outcome."""
+    monkeypatch.setenv("ODOO_MCP_LOG_LEVEL", "DEBGU")
+    buf = _capture_stderr(monkeypatch)
+    configure_logging()
+
+    logging.getLogger("odoo_mcp.client").error("server died")
+
+    assert "server died" in buf.getvalue()
+
+
+def test_unrecognised_level_names_the_bad_value_and_the_valid_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ODOO_MCP_LOG_LEVEL", "trace")
+    buf = _capture_stderr(monkeypatch)
+    configure_logging()
+
+    output = buf.getvalue()
+    assert "ODOO_MCP_LOG_LEVEL='TRACE'" in output
+    for name in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "OFF"):
+        assert name in output
+    assert "logging at WARNING instead" in output
+
+
+def test_unrecognised_level_falls_back_to_warning_not_debug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Conservative fallback: failures show, chatter does not."""
+    monkeypatch.setenv("ODOO_MCP_LOG_LEVEL", "VERBOSE")
+    buf = _capture_stderr(monkeypatch)
+    configure_logging()
+
+    log = logging.getLogger("odoo_mcp.dispatcher")
+    log.debug("hidden")
+    log.info("also hidden")
+    log.warning("visible")
+
+    output = buf.getvalue()
+    assert "hidden" not in output
+    assert "visible" in output
+
+
+def test_recognised_level_emits_no_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ODOO_MCP_LOG_LEVEL", "ERROR")
+    buf = _capture_stderr(monkeypatch)
+    configure_logging()
+
+    assert buf.getvalue() == ""
+
+
+def test_warn_alias_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``WARN`` is the spelling most other tools (and ``logging`` itself)
+    accept; it used to be treated as a typo and therefore as OFF."""
+    monkeypatch.setenv("ODOO_MCP_LOG_LEVEL", "WARN")
+    buf = _capture_stderr(monkeypatch)
+    configure_logging()
+
+    log = logging.getLogger("odoo_mcp.client")
+    log.info("hidden")
+    log.error("visible")
+
+    output = buf.getvalue()
+    assert "not a recognised level" not in output
+    assert "hidden" not in output
+    assert "visible" in output
+
+
+def test_critical_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ODOO_MCP_LOG_LEVEL", "CRITICAL")
+    buf = _capture_stderr(monkeypatch)
+    configure_logging()
+
+    log = logging.getLogger("odoo_mcp.client")
+    log.error("hidden")
+    log.critical("visible")
+
+    output = buf.getvalue()
+    assert "not a recognised level" not in output
+    assert "hidden" not in output
+    assert "visible" in output
+
+
+def test_empty_value_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ODOO_MCP_LOG_LEVEL=`` (set but empty) is how a launcher clears a
+    variable; it must not be read as a typo."""
+    monkeypatch.setenv("ODOO_MCP_LOG_LEVEL", "")
+    buf = _capture_stderr(monkeypatch)
+    configure_logging()
+
+    logging.getLogger("odoo_mcp.client").error("should not appear")
+
+    assert buf.getvalue() == ""
