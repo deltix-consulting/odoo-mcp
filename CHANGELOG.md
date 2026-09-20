@@ -10,6 +10,27 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A bad `smart_fields_overrides` entry was refused as if the caller had
+  asked for it.** When the caller omits `fields` and the operator's
+  `[instances.NAME.smart_fields_overrides.MODEL]` list names a field that
+  does not exist (typo, or a name an Odoo upgrade renamed) or is
+  sensitive, every default `odoo_search_read` / `odoo_read` on that model
+  was refused with the plain field-policy text — `Field 'emial' does not
+  exist on model 'res.partner'.` — naming a field the caller never
+  requested and nothing that pointed at the config key that supplied it.
+  For a sensitive entry the refusal went further and told the caller to
+  pass `allow_sensitive_fields=['vat']`; an obedient caller then read VAT
+  on a call where nobody asked for it, which is exactly what the v0.15.0
+  note promised overrides could not do. The refusal is now a
+  `SmartFieldsOverrideError` (still `error_code: field_policy`) whose
+  message names the config key and says the field came from config, not
+  the request, and whose hint steers the caller to an explicit
+  `fields=[...]` list (which bypasses the override) and to tell the user
+  the entry needs fixing — never to unlock. The audit record carries the
+  same attribution. An explicit `fields=` typo keeps the plain message.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

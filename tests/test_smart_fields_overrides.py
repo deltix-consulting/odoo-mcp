@@ -244,3 +244,126 @@ def test_other_models_use_smart_default_when_only_one_override(tmp_path: Path) -
     used = payload["smart_fields_used"]
     assert "name" in used
     assert "email" in used
+
+
+# ---------------------------------------------------------------------------
+# A bad override entry is the operator's mistake, not the caller's.
+#
+# The caller omitted ``fields``; the refused field came from
+# ``[instances.NAME.smart_fields_overrides.MODEL]``. A plain FieldPolicyError
+# reads as if the caller asked for it — and for a sensitive entry it tells the
+# caller to unlock via ``allow_sensitive_fields``, turning a plain read into a
+# sensitive one nobody requested. The refusal must name the config key and
+# point at the bypass that needs no unlock (an explicit ``fields=`` list).
+# ---------------------------------------------------------------------------
+
+_OVERRIDE_KEY = "[instances.dev.smart_fields_overrides.res.partner]"
+
+
+def test_override_typo_names_the_config_key_not_the_caller(tmp_path: Path) -> None:
+    fields_meta = {"id": {"type": "integer"}, "name": {"type": "char"}}
+    fake = _FakeClient(fields_meta)
+    cfg = _instance_with_override({"res.partner": ("id", "name", "emial")})
+    payload = _call(
+        Dispatcher(_build(tmp_path, fake, cfg)), {"instance": "dev", "model": "res.partner"}
+    )
+    assert payload["ok"] is False
+    # Still a field-policy refusal — clients keying on the code see no change.
+    assert payload["error_code"] == "field_policy"
+    assert _OVERRIDE_KEY in payload["error"]
+    assert "not your request" in payload["error"]
+    # The underlying reason is preserved verbatim.
+    assert "Field 'emial' does not exist on model 'res.partner'." in payload["error"]
+    # The hint names the bypass that needs no unlock and no guessing.
+    assert "fields=[...]" in payload["hint"]
+    assert "smart_fields_overrides" in payload["hint"]
+    # Nothing was sent to Odoo.
+    assert fake.last_fields is None
+
+
+def test_override_sensitive_field_is_attributed_and_not_an_unlock_invitation(
+    tmp_path: Path,
+) -> None:
+    """The v0.15.0 promise: overrides cannot leak VAT / passwords / etc.
+
+    On pristine main the refusal told the caller to pass
+    ``allow_sensitive_fields=['vat']`` — and an obedient caller then reads
+    VAT on a call where nobody asked for it. The refusal must say the
+    field came from config and the hint must steer away from unlocking.
+    """
+    fields_meta = {"id": {"type": "integer"}, "name": {"type": "char"}, "vat": {"type": "char"}}
+    fake = _FakeClient(fields_meta)
+    cfg = _instance_with_override({"res.partner": ("id", "name", "vat")})
+    payload = _call(
+        Dispatcher(_build(tmp_path, fake, cfg)), {"instance": "dev", "model": "res.partner"}
+    )
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert _OVERRIDE_KEY in payload["error"]
+    assert "'vat'" in payload["error"]
+    assert payload["hint"].startswith("Do not unlock")
+    assert "fields=[...]" in payload["hint"]
+    assert fake.last_fields is None
+
+
+def test_override_error_reaches_odoo_read_too(tmp_path: Path) -> None:
+    """Both consumers of ``_resolve_read_fields`` refuse the same way."""
+    fields_meta = {"id": {"type": "integer"}, "name": {"type": "char"}}
+    fake = _FakeClient(fields_meta)
+    cfg = _instance_with_override({"res.partner": ("id", "emial")})
+    contents = asyncio.run(
+        Dispatcher(_build(tmp_path, fake, cfg)).call(
+            "odoo_read", {"instance": "dev", "model": "res.partner", "ids": [1]}
+        )
+    )
+    payload = json.loads(contents[0].text)
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert _OVERRIDE_KEY in payload["error"]
+    assert "fields=[...]" in payload["hint"]
+
+
+def test_override_error_is_recorded_in_the_audit_log_with_attribution(tmp_path: Path) -> None:
+    """The operator reads the audit log, not the tool response — it must
+    carry the config key so the entry is actionable there too."""
+    fields_meta = {"id": {"type": "integer"}, "name": {"type": "char"}}
+    fake = _FakeClient(fields_meta)
+    cfg = _instance_with_override({"res.partner": ("id", "emial")})
+    app = _build(tmp_path, fake, cfg)
+    _call(Dispatcher(app), {"instance": "dev", "model": "res.partner"})
+    lines = [json.loads(ln) for ln in app.config.audit_log_path.read_text().splitlines() if ln]
+    failures = [ev for ev in lines if ev.get("result") == "field_policy"]
+    assert failures, lines
+    assert failures[-1]["tool"] == "odoo_search_read"
+    assert _OVERRIDE_KEY in failures[-1]["details"]["error"]
+
+
+def test_override_error_is_a_field_policy_error() -> None:
+    from odoo_mcp.errors import FieldPolicyError, SmartFieldsOverrideError
+
+    inner = FieldPolicyError("Field 'x' does not exist on model 'm'.")
+    exc = SmartFieldsOverrideError("dev", "m", inner)
+    assert isinstance(exc, FieldPolicyError)
+    assert exc.code == "field_policy"
+    assert exc.instance_name == "dev" and exc.model == "m"
+    assert "[instances.dev.smart_fields_overrides.m]" in exc.user_message
+    assert inner.user_message in exc.user_message
+    assert exc.hint and "fields=[...]" in exc.hint
+
+
+def test_explicit_fields_typo_is_not_attributed_to_config(tmp_path: Path) -> None:
+    """Guard (passes before and after the fix): when the CALLER names the bad
+    field, the refusal stays the plain one — even with an override configured
+    for the same model. Attribution is only for fields the caller never named."""
+    fields_meta = {"id": {"type": "integer"}, "name": {"type": "char"}}
+    fake = _FakeClient(fields_meta)
+    cfg = _instance_with_override({"res.partner": ("id", "name")})
+    payload = _call(
+        Dispatcher(_build(tmp_path, fake, cfg)),
+        {"instance": "dev", "model": "res.partner", "fields": ["id", "emial"]},
+    )
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert payload["error"] == "Field 'emial' does not exist on model 'res.partner'."
+    assert "smart_fields_overrides" not in payload["error"]
+    assert "hint" not in payload
