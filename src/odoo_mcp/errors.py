@@ -236,6 +236,41 @@ class FieldPolicyError(OdooMcpError):
     code = "field_policy"
 
 
+class SmartFieldsOverrideError(FieldPolicyError):
+    """A ``smart_fields_overrides`` entry failed the field policy.
+
+    Raised when the caller omitted ``fields`` and the operator's
+    ``[instances.NAME.smart_fields_overrides.MODEL]`` list — not anything
+    the caller asked for — names a field that does not exist, is
+    permanently redacted, or is sensitive. The plain
+    :class:`FieldPolicyError` text reads as if the caller requested the
+    field and, for a sensitive one, invites it to unlock via
+    ``allow_sensitive_fields`` — which turns a plain read into a
+    sensitive one the user never asked for. This subclass keeps the
+    ``field_policy`` code (it *is* one) but names the config key that
+    supplied the field and points the caller at the bypass that needs no
+    unlock: an explicit ``fields=[...]`` list.
+    """
+
+    def __init__(self, instance_name: str, model: str, cause: FieldPolicyError) -> None:
+        self.instance_name = instance_name
+        self.model = model
+        # Same key shape config.py uses in its own load-time refusals.
+        super().__init__(
+            f"[instances.{instance_name}.smart_fields_overrides.{model}] "
+            f"(operator config, not your request) supplied a field this call "
+            f"cannot read by default: {cause.user_message}"
+        )
+
+    @property
+    def hint(self) -> str:
+        return (
+            "Do not unlock or guess: pass an explicit fields=[...] list "
+            "(it bypasses the override) and tell the user to fix that "
+            "smart_fields_overrides entry in ~/.odoo-mcp/config.toml."
+        )
+
+
 class LimitExceededError(OdooMcpError):
     """A cap or rate limit was exceeded."""
 

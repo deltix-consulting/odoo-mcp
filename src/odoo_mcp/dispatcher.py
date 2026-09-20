@@ -49,6 +49,7 @@ from .errors import (
     OdooMcpError,
     OperationNotAllowedError,
     ProdGuardError,
+    SmartFieldsOverrideError,
 )
 from .security.allowlist import (
     ALLOWLIST_WILDCARD,
@@ -351,8 +352,10 @@ class Dispatcher:
         2. Caller omitted ``fields`` AND the instance has a
            ``smart_fields_overrides[model]`` override — use the
            configured list, validated through the normal redaction
-           policy so a typo or sensitive field surfaces clearly.
-           ``smart=True``.
+           policy. A typo or sensitive field is refused as a
+           :class:`SmartFieldsOverrideError`, which names the config
+           key that supplied it — the caller did not ask for the field
+           and must not be told to unlock it. ``smart=True``.
         3. Caller omitted ``fields`` and there's no override — fall
            back to :func:`select_smart_fields` heuristic.
            ``smart=True``.
@@ -377,17 +380,22 @@ class Dispatcher:
             )
         configured = rt.config.smart_fields_overrides.get(model)
         if configured is not None:
-            return (
-                validate_requested_fields(
+            try:
+                fields = validate_requested_fields(
                     model,
                     list(configured),
                     known,
                     allow_sensitive=allow_sensitive,
                     instance_overrides=overrides,
                     extra_redacted=rt.extra_redacted,
-                ),
-                True,
-            )
+                )
+            except FieldPolicyError as exc:
+                # The caller never named these fields — the operator's config
+                # did. Say so, or the refusal reads as the caller's mistake
+                # and (for a sensitive entry) tells it to unlock a field it
+                # never needed.
+                raise SmartFieldsOverrideError(rt.config.name, model, exc) from exc
+            return fields, True
         return (
             select_smart_fields(
                 model,
