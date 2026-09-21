@@ -10,6 +10,22 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI: the `dependency-audit` job audited the runner, not the project.**
+  `pip-audit` was run against the whole `setup-python` environment, so
+  the set it checked was the project's closure *plus* the runner's own
+  `setuptools` *plus* pip-audit's own dependency tree (`requests`,
+  `urllib3`, ...). The runner's setuptools 79.0.1 trips PYSEC-2026-3447,
+  and the job has been red on every pull request because of a package
+  that is neither in `pyproject.toml` nor in `uv.lock` nor shipped to
+  anyone — the exact way a real advisory on a real dependency gets
+  waved through. The job now freezes the resolved closure
+  (`pip freeze --exclude-editable`, which omits pip / setuptools /
+  wheel) and audits that list from an isolated `pipx run pip-audit`
+  with `--no-deps --disable-pip`, so a red result means one of
+  odoo-mcp's dependencies is affected and nothing else.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

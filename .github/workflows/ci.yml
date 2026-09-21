@@ -75,15 +75,24 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install pip-audit
-        run: pip install "pip-audit==2.7.3"
+      - name: Install the runtime closure
+        # Resolved from the pyproject constraints, not uv.lock — the same
+        # way ``uv tool install`` (install.sh step 8) resolves what users
+        # actually get.
+        run: pip install -e .
 
       - name: Audit runtime dependencies
-        # ``--skip-editable`` drops the editable install of odoo-mcp
-        # itself (the project isn't on PyPI). ``--strict`` is left
-        # off so the resulting "skipped" warning doesn't fatally
-        # red-light the audit — pip-audit still exits non-zero on
-        # real vulnerabilities.
+        # Audit exactly the project's resolved closure, nothing else.
+        # ``pip freeze`` omits pip / setuptools / wheel and
+        # ``--exclude-editable`` drops odoo-mcp itself (not on PyPI);
+        # pip-audit runs from pipx's isolated venv so its own
+        # dependency tree (requests, urllib3, ...) is not in the set;
+        # ``--no-deps --disable-pip`` audits the pinned lines as-is
+        # with no second resolution. Before this the job audited the
+        # whole ``setup-python`` environment — the runner's own
+        # setuptools (PYSEC-2026-3447) and pip-audit's dependencies
+        # included — and had been red on every PR for that reason,
+        # which is how a real advisory gets ignored.
         #
         # Ignored advisories (revisit each on every CI cleanup pass):
         #
@@ -98,8 +107,11 @@ jobs:
         # ignore the next time pip-audit reports a fix version, or
         # when ``mcp`` drops the pyjwt dependency.
         run: |
-          pip install -e .
-          pip-audit \
-            --skip-editable \
+          pip freeze --exclude-editable > "$RUNNER_TEMP/runtime-closure.txt"
+          test -s "$RUNNER_TEMP/runtime-closure.txt"
+          pipx run pip-audit==2.7.3 \
+            --requirement "$RUNNER_TEMP/runtime-closure.txt" \
+            --no-deps \
+            --disable-pip \
             --progress-spinner off \
             --ignore-vuln PYSEC-2025-183
