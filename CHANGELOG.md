@@ -10,6 +10,33 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A production commit Odoo rejected still cost a unit of the burst
+  budget.** `consume_pending` decrements `commits_remaining` before the
+  RPC — deliberately, so a commit whose outcome is unknown (timeout after
+  the request was sent) stays counted — but nothing gave the unit back
+  when Odoo answered with a fault, i.e. when its RPC layer had already
+  rolled the transaction back and nothing was written. Every validation,
+  access or constraint error on a `dry_run=false` call therefore burned
+  one of the `max_commits_per_unlock` units that the v0.19.1 preview note
+  ("Only a successful commit decrements the burst budget"), the
+  burst-limit refusal ("only successful commits do") and README ("caps
+  real commits per unlock") all say it cannot cost. On a tight window
+  (`max_commits_per_unlock = 5`) a handful of rejected values exhausted
+  the unlock, and the refusal then told the agent "the configured number
+  of commits have already been performed" — none had. The first RPC after
+  a token is consumed now runs through `Dispatcher._commit_rpc`: a
+  genuine XML-RPC fault (`OdooRemoteError.rolled_back`) refunds the unit
+  (`ProdGuard.refund_commit`, capped at the window's configured budget),
+  the error payload carries the unchanged `commits_remaining` plus a note
+  saying the token was still spent, and the audit failure row records
+  `commit_budget: refunded`. The charge is kept for everything that may
+  have landed: transport failures, the post-commit `cannot marshal` fault,
+  "returned unexpected type" errors after a successful call, and faults
+  in a handler's follow-up RPCs (wizard completion) — only the primary
+  write is refundable.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

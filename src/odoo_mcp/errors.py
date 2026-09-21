@@ -17,6 +17,7 @@ inside an exception message.
 from __future__ import annotations
 
 import re
+import xmlrpc.client
 from collections import OrderedDict
 from typing import ClassVar, Final
 
@@ -266,6 +267,14 @@ class OdooAuthError(OdooMcpError):
         return "Check your API key and username. Run 'odoo-mcp doctor' to diagnose."
 
 
+# Substring of the fault Odoo raises when the *response* cannot be
+# serialised (``TypeError("cannot marshal <class ...> objects")`` and
+# ``"cannot marshal None unless allow_none is enabled"`` from the stdlib
+# marshaller). It is the one fault that arrives after the write is durable;
+# see :attr:`OdooRemoteError.rolled_back`.
+_POST_COMMIT_FAULT_MARKER: Final[str] = "cannot marshal"
+
+
 class OdooRemoteError(OdooMcpError):
     """Odoo returned a fault (validation error, access rights, etc.)."""
 
@@ -295,3 +304,28 @@ class OdooRemoteError(OdooMcpError):
             "Odoo returned a fault; server text withheld from the audit log "
             "because it can quote record values. See the tool response for detail."
         )
+
+    # Set by the dispatcher when the per-unlock burst budget charged for
+    # this commit was given back (see ``Dispatcher._commit_rpc``), so the
+    # error payload and the audit failure row can say so.
+    budget_refunded: bool = False
+
+    @property
+    def rolled_back(self) -> bool:
+        """Whether Odoo certainly rejected the call before writing anything.
+
+        True only for a genuine XML-RPC fault (``__cause__`` is the
+        :class:`xmlrpc.client.Fault` the client re-raised): Odoo's RPC
+        controller runs every call inside a cursor that is rolled back when
+        the method raises, so a validation / access / constraint fault means
+        no change was committed. Two ``OdooRemoteError`` shapes are excluded
+        because the write may have landed: the "returned unexpected type"
+        errors the client raises after a call that *succeeded*, and the one
+        fault Odoo raises after the commit — the marshalling failure on the
+        response (``cannot marshal ...``), which runs after the cursor's
+        commit and the post-commit hooks.
+        """
+        cause = self.__cause__
+        if not isinstance(cause, xmlrpc.client.Fault):
+            return False
+        return _POST_COMMIT_FAULT_MARKER not in str(cause.faultString)
