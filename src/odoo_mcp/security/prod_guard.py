@@ -111,6 +111,11 @@ class _UnlockState:
     # keeps that tight posture even under continuous activity, instead
     # of getting silently promoted to the module default.
     ttl_seconds: int
+    # Budget this window was created (or renewed) with. ``refund_commit``
+    # reads it back as the ceiling: a refund can restore a unit that
+    # ``consume_pending`` charged, never mint one the operator did not
+    # configure.
+    max_commits: int
 
 
 @dataclass(slots=True)
@@ -198,12 +203,14 @@ class ProdGuard:
                 state.expires_at = expiry
                 state.commits_remaining = max_commits
                 state.ttl_seconds = ttl_seconds
+                state.max_commits = max_commits
             else:
                 self._unlocked[instance] = _UnlockState(
                     expires_at=expiry,
                     commits_remaining=max_commits,
                     unlocked_at=current,
                     ttl_seconds=ttl_seconds,
+                    max_commits=max_commits,
                 )
         return expiry
 
@@ -226,6 +233,33 @@ class ProdGuard:
             state = self._unlocked.get(instance)
             if state is None or state.expires_at < current:
                 return None
+            return state.commits_remaining
+
+    def refund_commit(self, instance: str, *, now: float | None = None) -> int | None:
+        """Give back the unit :meth:`consume_pending` charged for a commit Odoo rejected.
+
+        ``consume_pending`` decrements the burst counter BEFORE the RPC so a
+        commit whose outcome is unknown (a timeout after the request was
+        sent) stays counted — the fail-closed direction. When Odoo instead
+        answers with a fault, its RPC layer has already rolled the
+        transaction back: nothing was written, and the documented contract
+        ("only a successful commit decrements the burst budget") says that
+        attempt must not cost a unit. The dispatcher calls this in exactly
+        that case; see ``Dispatcher._commit_rpc``.
+
+        Returns the restored budget, or ``None`` when there is nothing to
+        refund: the window expired between the charge and the refund, or it
+        was renewed in place since (``unlock`` already reset the counter,
+        and a refund on top would exceed the operator's ``max_commits``).
+        """
+        current = now if now is not None else time.monotonic()
+        with self._lock:
+            state = self._unlocked.get(instance)
+            if state is None or state.expires_at < current:
+                return None
+            if state.commits_remaining >= state.max_commits:
+                return None
+            state.commits_remaining += 1
             return state.commits_remaining
 
     def touch(self, instance: str, *, now: float | None = None) -> None:
@@ -401,7 +435,10 @@ class ProdGuard:
                         "Confirmation token was issued under a different unlock "
                         "window — re-do the dry run under the current unlock."
                     )
-            # Decrement the burst counter BEFORE the actual commit. The
+            # Decrement the burst counter BEFORE the actual commit, so a
+            # commit whose outcome is never learned stays counted; the
+            # dispatcher refunds the unit through ``refund_commit`` in the
+            # one case where the rejection is certain (an Odoo fault). The
             # dispatcher's check_write enforces that an unlock exists for
             # production calls, so when an unlock state is present we honor
             # its budget. If there is no unlock state (e.g. unit-level use of

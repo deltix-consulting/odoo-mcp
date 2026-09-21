@@ -33,7 +33,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import Any, Final, TypeVar
 
 from mcp.types import TextContent
 
@@ -47,6 +47,7 @@ from .errors import (
     InstanceNotFoundError,
     ModelNotAllowedError,
     OdooMcpError,
+    OdooRemoteError,
     OperationNotAllowedError,
     ProdGuardError,
 )
@@ -81,6 +82,8 @@ from .security.prod_guard import ProdGuard, compute_payload_digest
 from .security.smart_fields import select_smart_fields
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 def _latency_budget_ms() -> int | None:
@@ -251,6 +254,20 @@ class Dispatcher:
             # drop it. Only include hints that add new information.
             if exc.hint and exc.hint not in exc.user_message:
                 payload["hint"] = exc.hint
+            # A rejected production commit gave its budget unit back (see
+            # _commit_rpc). Say so on the error itself: the agent's model
+            # of the budget is otherwise refuted by the next preview's
+            # counter, which is exactly the v0.19.1 "counts dry-runs too"
+            # incident with a different wrong prior.
+            if isinstance(exc, OdooRemoteError) and exc.budget_refunded:
+                remaining = (
+                    self.app.prod_guard.commits_remaining(instance)
+                    if isinstance(instance, str)
+                    else None
+                )
+                if remaining is not None:
+                    payload["commits_remaining"] = remaining
+                    payload["commits_remaining_note"] = _REFUNDED_BUDGET_NOTE
             return [_text(payload)]
         except Exception as exc:  # noqa: BLE001 — last-resort safety net
             wrapped = OdooMcpError(f"Unhandled error in {name}: {type(exc).__name__}: {exc}")
@@ -982,7 +999,7 @@ class Dispatcher:
             return preview
 
         self._consume_token_on_prod(ctx, args)
-        new_id = rt.client.create(model, validated)
+        new_id = self._commit_rpc(ctx, lambda: rt.client.create(model, validated))
         self._audit_ok(ctx, {"field_count": n, "new_id": new_id}, args)
         result: dict[str, Any] = {
             "instance": ctx.instance,
@@ -1036,7 +1053,7 @@ class Dispatcher:
             return preview
 
         self._consume_token_on_prod(ctx, args)
-        ok = rt.client.write(model, ids, validated)
+        ok = self._commit_rpc(ctx, lambda: rt.client.write(model, ids, validated))
         self._audit_ok(ctx, {"id_count": len(ids), "field_count": n}, args)
         result: dict[str, Any] = {
             "instance": ctx.instance,
@@ -1119,9 +1136,9 @@ class Dispatcher:
 
         self._consume_token_on_prod(ctx, args)
         if mode == "archive":
-            ok = rt.client.write(model, ids, {"active": False})
+            ok = self._commit_rpc(ctx, lambda: rt.client.write(model, ids, {"active": False}))
         else:
-            ok = rt.client.unlink(model, ids)
+            ok = self._commit_rpc(ctx, lambda: rt.client.unlink(model, ids))
         self._audit_ok(ctx, {"mode": mode, "id_count": len(ids)}, args)
         result: dict[str, Any] = {
             "instance": ctx.instance,
@@ -1239,13 +1256,16 @@ class Dispatcher:
             return preview_result
 
         self._consume_token_on_prod(ctx, args)
-        message_id = rt.client.message_post(
-            model,
-            record_id,
-            body,
-            subject=subject,
-            partner_ids=partner_ids,
-            message_type=str(message_type),
+        message_id = self._commit_rpc(
+            ctx,
+            lambda: rt.client.message_post(
+                model,
+                record_id,
+                body,
+                subject=subject,
+                partner_ids=partner_ids,
+                message_type=str(message_type),
+            ),
         )
         self._audit_ok(
             ctx,
@@ -1335,13 +1355,16 @@ class Dispatcher:
             return preview
 
         self._consume_token_on_prod(ctx, args)
-        message_id = rt.client.message_post(
-            model,
-            record_id,
-            body,
-            subject=None,
-            partner_ids=[],
-            message_type="notification",
+        message_id = self._commit_rpc(
+            ctx,
+            lambda: rt.client.message_post(
+                model,
+                record_id,
+                body,
+                subject=None,
+                partner_ids=[],
+                message_type="notification",
+            ),
         )
         self._audit_ok(
             ctx,
@@ -1538,7 +1561,9 @@ class Dispatcher:
         # for ``ir.attachment``) and writes directly through the
         # XML-RPC client. The bounded inputs and the prod-guard
         # pipeline above are the security envelope.
-        attachment_id = rt.client.create("ir.attachment", attachment_values)
+        attachment_id = self._commit_rpc(
+            ctx, lambda: rt.client.create("ir.attachment", attachment_values)
+        )
         self._audit_ok(
             ctx,
             {
@@ -1633,7 +1658,9 @@ class Dispatcher:
             return preview
 
         self._consume_token_on_prod(ctx, args)
-        result = rt.client.call_document_action(model, method, record_ids)
+        result = self._commit_rpc(
+            ctx, lambda: rt.client.call_document_action(model, method, record_ids)
+        )
         # Some Odoo methods (notably stock.picking.button_validate and
         # sale.order.action_cancel when there are linked pickings)
         # return a dict describing a follow-up wizard instead of
@@ -1789,6 +1816,33 @@ class Dispatcher:
             ctx.model,
             payload_digest=digest,
         )
+
+    def _commit_rpc(self, ctx: _Ctx, rpc: Callable[[], _T]) -> _T:
+        """Run the one RPC a consumed confirmation token pays for.
+
+        ``consume_pending`` charges the burst budget BEFORE the RPC, so a
+        commit whose outcome is unknown (timeout after the request was
+        sent, a fault raised after Odoo's commit) stays counted — the
+        fail-closed direction. When Odoo rejects the call outright
+        (validation, access, constraint) its RPC layer has already rolled
+        the transaction back and nothing was written; the documented
+        contract is that only a successful commit decrements the budget,
+        so the unit is given back and the error is marked so ``call`` and
+        the audit row can say so. Only the FIRST RPC after the token is
+        consumed goes through here: a handler's follow-up calls (wizard
+        completion, state read-back) run after the primary change is
+        durable, and a failure there must keep the charge.
+        """
+        try:
+            return rpc()
+        except OdooRemoteError as exc:
+            if (
+                ctx.rt.config.production
+                and exc.rolled_back
+                and self.app.prod_guard.refund_commit(ctx.instance) is not None
+            ):
+                exc.budget_refunded = True
+            raise
 
     def _diagnose_access(self, args: dict[str, Any]) -> dict[str, Any]:
         """Report access state for the authenticated user on one model.
@@ -2142,6 +2196,10 @@ class Dispatcher:
         raw: dict[str, Any] = {"error": error.audit_message[:500]}
         if isinstance(arguments, dict):
             raw["args"] = _args_shape(arguments)
+        if isinstance(error, OdooRemoteError) and error.budget_refunded:
+            # An operator reconciling the burst budget against this log
+            # must be able to tell a rejected commit from a counted one.
+            raw["commit_budget"] = "refunded"
         try:
             self.app.audit.log(
                 AuditEvent(
@@ -2288,6 +2346,18 @@ def _strip_extra_fields(
 _DRY_RUN_NOTE = (
     "This was a dry run. To commit, call {tool} again with "
     "dry_run=false and confirmation_token set to the token above."
+)
+
+# Stamped on the error payload of a production commit Odoo rejected, next
+# to the restored ``commits_remaining``. Same voice as the dry-run note so
+# the agent reads one consistent story: only a successful commit costs a
+# unit. The confirmation token is still spent — fix the values, dry-run
+# again, then commit with the fresh token.
+_REFUNDED_BUDGET_NOTE = (
+    "Odoo rejected this commit before anything was written, so the burst "
+    "budget was not charged; commits_remaining is unchanged. The "
+    "confirmation token was consumed — correct the values, re-run the dry "
+    "run, and commit with the new token."
 )
 
 
