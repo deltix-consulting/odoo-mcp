@@ -10,6 +10,27 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A production dry run no longer extends the unlock window.** Every
+  surface says a *commit* slides the window — the
+  `odoo_enable_prod_writes` response ("sliding window: every commit
+  extends it"), the prod-guard module docstring ("each successful write
+  extends it"), the v0.27.0 note on `unlock_ttl_seconds`. The code slid
+  it in `check_write`, which runs on every write-tool call, dry runs
+  included — and on prod the mandatory first call of any write *is* a
+  dry run. So "unlocked for N minutes of inactivity" was false: an agent
+  (or a user browsing previews) kept prod unlocked indefinitely without
+  a single commit, with no human in the loop, and the "keep the window
+  alive in a loop" hole that charging a rate-limit token on re-unlock
+  closed for `odoo_enable_prod_writes` was open one tool over. Now the
+  slide happens in `consume_pending`, once a confirmation token has been
+  accepted and a commit unit charged; `check_write` only checks. Dry
+  runs, refused tokens and locked calls leave `expires_at` where it was.
+  Per-window TTL preservation is unchanged. Five tests (one end to end
+  through `odoo_log_note` on a monkeypatched clock); four fail on the
+  previous code.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

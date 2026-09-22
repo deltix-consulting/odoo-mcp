@@ -29,11 +29,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from odoo_mcp.audit import AuditLog
 from odoo_mcp.client import OdooClient
 from odoo_mcp.config import AppConfig, Defaults, InstanceConfig
 from odoo_mcp.credentials import Credentials
 from odoo_mcp.dispatcher import Dispatcher, InstanceRuntime, OdooMcpApp
+from odoo_mcp.security import prod_guard
 from odoo_mcp.security.allowlist import ALLOWLIST_WILDCARD, Operation, is_read, is_write
 from odoo_mcp.security.limits import RateLimiter
 from odoo_mcp.security.prod_guard import ProdGuard
@@ -373,4 +376,32 @@ def test_token_rejects_body_swap(tmp_path: Path) -> None:
     )
     assert swapped["ok"] is False
     assert "different payload" in swapped["error"]
+    assert fake.message_post_calls == []
+
+
+def test_prod_dry_runs_do_not_keep_the_unlock_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through the dispatcher: a dry run on prod passes the
+    write gate but must not slide the unlock window. Unlock at t=0 with
+    the default 15-minute TTL, dry-run at t=14min, and the window still
+    ends at t=15min — the next call is refused as locked."""
+    clock = {"now": 0.0}
+    monkeypatch.setattr(prod_guard.time, "monotonic", lambda: clock["now"])
+
+    fake = _LogNoteFake()
+    app = _build(tmp_path, fake, production=True)
+    app.prod_guard.unlock("prod", production=True)
+    disp = Dispatcher(app)
+    args = {"instance": "prod", "model": "sale.order", "record_id": 11, "body": "hi"}
+
+    clock["now"] = 14 * 60
+    preview = _call(disp, {**args, "dry_run": True})
+    assert preview["ok"] is not False
+    assert "confirmation_token" in preview
+
+    clock["now"] = 15 * 60 + 1
+    refused = _call(disp, {**args, "dry_run": True})
+    assert refused["ok"] is False
+    assert "blocked" in refused["error"]
     assert fake.message_post_calls == []

@@ -10,7 +10,9 @@ Rules (all independently enforced — a bug in one layer won't defeat the rest):
 2. **Unlock is explicit, time-limited, and audited.**
    :meth:`ProdGuard.unlock` must be called (via the ``odoo_enable_prod_writes``
    meta-tool) to allow writes. The unlock auto-expires after 15 minutes of
-   inactivity — each successful write extends it.
+   inactivity — each confirmed commit extends it (a burned confirmation
+   token, see :meth:`ProdGuard.consume_pending`); dry runs and refused
+   calls do not.
 
 3. **Dry-run default on prod.** Even once unlocked, the first call to a
    write tool must pass ``dry_run`` explicitly. If the caller omits it, the
@@ -229,7 +231,17 @@ class ProdGuard:
             return state.commits_remaining
 
     def touch(self, instance: str, *, now: float | None = None) -> None:
-        """Extend the unlock window on activity (sliding window).
+        """Extend the unlock window (sliding window).
+
+        The production path calls this from :meth:`consume_pending`, once
+        a confirmation token has been accepted and a commit unit charged —
+        i.e. on a confirmed commit, which is what every surface (the
+        unlock response, the module docstring, the changelog) says extends
+        the window. It is deliberately NOT called from :meth:`check_write`:
+        that gate runs on every write-tool call, dry runs included, and on
+        prod the mandatory first call of any write IS a dry run — sliding
+        there let an agent keep prod unlocked indefinitely without ever
+        committing, and made "N minutes of inactivity" false.
 
         Uses the TTL that was configured when ``unlock`` was called for
         this instance, so a tenant with a tight 60-second TTL keeps
@@ -258,7 +270,8 @@ class ProdGuard:
                 f"then retry the write as a dry run (dry_run=True) to preview, "
                 f"and only then as a real commit."
             )
-        self.touch(instance, now=now)
+        # No ``touch`` here — see its docstring. Passing this gate is not
+        # the activity that extends the window; a confirmed commit is.
 
     def effective_dry_run(self, requested: bool | None, production: bool) -> bool:
         """Resolve the effective ``dry_run`` flag.
@@ -421,3 +434,7 @@ class ProdGuard:
                         "retry this commit afterwards."
                     )
                 state.commits_remaining -= 1
+                # A confirmed commit is the activity that slides the
+                # inactivity window (same effect as ``touch``; done inline
+                # because the lock is already held).
+                state.expires_at = current + state.ttl_seconds

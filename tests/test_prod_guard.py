@@ -89,6 +89,60 @@ def test_touch_extends_unlock_window() -> None:
     assert guard.is_unlocked("prod", now=20 * 60)
 
 
+# --- what slides the window --------------------------------------------------
+#
+# Every surface says a COMMIT extends the unlock ("sliding window: every
+# commit extends it" in the odoo_enable_prod_writes response; "each
+# successful write extends it" in the module docstring; the v0.27.0
+# changelog). Until this was pinned, ``check_write`` slid it instead — on
+# every write-tool call, dry runs included — so on prod, where the
+# mandatory first call of any write is a dry run, an agent could keep the
+# window alive indefinitely without ever committing.
+
+
+def test_check_write_does_not_extend_the_unlock_window() -> None:
+    """Passing the write gate (which every dry run does) is not the
+    activity that slides the window."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    guard.check_write("prod", production=True, now=14 * 60)
+    assert not guard.is_unlocked("prod", now=15 * 60 + 1)
+
+
+def test_confirmed_commit_extends_the_unlock_window() -> None:
+    """A burned confirmation token — the commit the agent was authorised
+    for — is what extends the window."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    token = guard.create_pending("prod", "write", "res.partner", "summary", now=10 * 60)
+    guard.consume_pending(token, "prod", "write", "res.partner", now=14 * 60)
+    # Window now runs to 14min + 15min.
+    assert guard.is_unlocked("prod", now=28 * 60)
+    assert not guard.is_unlocked("prod", now=29 * 60 + 1)
+
+
+def test_refused_commit_does_not_extend_the_unlock_window() -> None:
+    """A commit the guard refuses (unknown token here) leaves the window
+    where it was — passes before and after the fix; it guards the fix
+    from sliding on the refusal path."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0)
+    with pytest.raises(ProdGuardError):
+        guard.consume_pending("nope", "prod", "write", "res.partner", now=14 * 60)
+    assert not guard.is_unlocked("prod", now=15 * 60 + 1)
+
+
+def test_commit_slide_uses_the_ttl_the_window_was_created_with() -> None:
+    """The commit-path slide must honour the per-window TTL exactly as
+    ``touch`` does — a 60-second tenant stays a 60-second tenant."""
+    guard = ProdGuard()
+    guard.unlock("prod", production=True, now=0.0, ttl_seconds=60)
+    token = guard.create_pending("prod", "write", "res.partner", "summary", now=10.0)
+    guard.consume_pending(token, "prod", "write", "res.partner", now=30.0)
+    assert guard.is_unlocked("prod", now=89.0)
+    assert not guard.is_unlocked("prod", now=91.0)
+
+
 # --- burst limit -------------------------------------------------------------
 
 
