@@ -10,6 +10,37 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_diagnose_routing` asked Odoo for two `stock.warehouse` fields
+  that exist on no Odoo release, so every call failed.** The warehouse
+  read named `sale_route_id` and `purchase_route_id`; neither is a field
+  on `stock.warehouse` in Odoo 17.0, 18.0, 19.0 or saas-19.x (nor in
+  the repo's own generated Odoo reference). Odoo's `search_read` raises
+  `ValueError("Invalid field ...")` for one unknown name and returns no
+  rows, so since v0.21.0 the tool died on its third read with an
+  `odoo_remote` error — the tests never noticed because the fake
+  returned canned rows whatever was requested. The same class hit two
+  more names on real databases: `stock.rule.group_propagation_option`
+  was removed in Odoo 19.0, and `stock.route.sale_selectable` only
+  exists once `sale_stock` is installed.
+
+  Now: the curated per-model field lists live in one place
+  (`_ROUTING_FIELDS`), the warehouse block reads the real fields
+  (`route_ids`, `delivery_route_id`, `reception_route_id`, `buy_pull_id`)
+  and the warehouse's `route_ids` + `delivery_route_id` join the
+  candidate-route set (they are the fallback Odoo's
+  `stock.rule._search_rule` consults, which is what `sale_route_id` was
+  reaching for). Every list is intersected with the instance's
+  `fields_get` before it is sent, so an Odoo-19 database or a missing
+  addon costs a column, not the diagnosis; whatever was skipped is
+  reported under a new `fields_unavailable` key. An intersection that
+  comes back empty is refused rather than sent, because
+  `search_read(fields=[])` means *every* field to Odoo. A test now pins
+  every curated name against `_odoo_reference.py` (with `_inherits`
+  delegation folded in for `product.product`), and the test fake's
+  `fields_get` answers from that reference instead of `{}`.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
