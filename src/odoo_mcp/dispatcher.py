@@ -154,6 +154,75 @@ _RELATIONAL_TYPES: Final[frozenset[str]] = frozenset({"many2one", "one2many", "m
 # a sign of an abusive payload, so we bound it.
 _MAX_RELATIONAL_WRITE_DEPTH: Final[int] = 4
 
+# Curated field list per routing-configuration model that
+# ``odoo_diagnose_routing`` reads. These names are a CONTRACT against the
+# deployed schema: Odoo's ``search_read`` raises ``ValueError("Invalid field
+# ...")`` for a name the model does not have — it never returns partial
+# rows — so one name that an Odoo release dropped or an uninstalled addon
+# never added fails the whole diagnosis. The handler therefore intersects
+# each list with ``fields_get`` before reading (see
+# ``Dispatcher._routing_fields``) and reports what it had to skip.
+#
+# Optional-addon / version-bound names, kept on purpose because the
+# intersection makes them safe: ``sale_selectable`` (sale_stock),
+# ``buy_pull_id`` (purchase_stock), ``group_propagation_option`` (stock.rule
+# on Odoo <= 18; removed in 19.0).
+#
+# ``tests/test_diagnose_routing.py`` pins every name here against the
+# repo's own generated Odoo reference (``_odoo_reference.py``), so a name
+# that exists on no Odoo cannot ship again.
+_ROUTING_FIELDS: Final[dict[str, tuple[str, ...]]] = {
+    "product.product": (
+        "id",
+        "name",
+        "default_code",
+        "product_tmpl_id",
+        "route_ids",
+        "categ_id",
+    ),
+    "product.template": ("id", "name", "route_ids", "categ_id"),
+    "stock.warehouse": (
+        "id",
+        "name",
+        "code",
+        "delivery_steps",
+        "reception_steps",
+        "route_ids",
+        "delivery_route_id",
+        "reception_route_id",
+        "mto_pull_id",
+        "buy_pull_id",
+        "lot_stock_id",
+        "view_location_id",
+    ),
+    "stock.route": (
+        "id",
+        "name",
+        "sequence",
+        "active",
+        "product_selectable",
+        "product_categ_selectable",
+        "warehouse_selectable",
+        "sale_selectable",
+        "warehouse_ids",
+    ),
+    "stock.rule": (
+        "id",
+        "name",
+        "sequence",
+        "active",
+        "route_id",
+        "action",
+        "location_src_id",
+        "location_dest_id",
+        "picking_type_id",
+        "procure_method",
+        "group_propagation_option",
+        "auto",
+        "warehouse_id",
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # Shared application state
@@ -1853,6 +1922,40 @@ class Dispatcher:
             **rights,
         }
 
+    def _routing_fields(
+        self,
+        rt: InstanceRuntime,
+        model: str,
+        skipped: dict[str, list[str]],
+    ) -> list[str]:
+        """The subset of ``_ROUTING_FIELDS[model]`` this instance's schema has.
+
+        Odoo raises on a ``search_read`` naming a field the model lacks, so
+        a curated list can only be sent after it is checked against
+        ``fields_get``. Names the instance does not have are recorded in
+        ``skipped[model]`` (only when non-empty) so the caller can see why a
+        column is missing — e.g. ``group_propagation_option`` on Odoo 19,
+        or ``sale_selectable`` when ``sale_stock`` is not installed.
+
+        Fails closed: an empty intersection is refused rather than sent,
+        because ``search_read(fields=[])`` means *every* field to Odoo.
+        """
+        wanted = _ROUTING_FIELDS[model]
+        fields_meta = self._fields_meta(rt, model)
+        present = [f for f in wanted if f in fields_meta]
+        missing = [f for f in wanted if f not in fields_meta]
+        if not present:
+            raise OdooMcpError(
+                f"odoo_diagnose_routing: fields_get for model '{model}' on instance "
+                f"'{rt.config.name}' has none of the fields this tool reads "
+                f"({', '.join(wanted)}). The model may not be installed on this "
+                f"Odoo, or the fields cache may be stale — run "
+                f"`odoo-mcp cache --clear --instance {rt.config.name}` and retry."
+            )
+        if missing:
+            skipped[model] = missing
+        return present
+
     def _diagnose_routing(self, args: dict[str, Any]) -> dict[str, Any]:
         """Report Odoo's procurement routing config for (product, warehouse).
 
@@ -1880,6 +1983,14 @@ class Dispatcher:
         therefore doesn't widen the data-exposure surface; it just
         makes the tool work without each operator having to remember
         to allowlist six routing tables.
+
+        Schema-checked field lists. Each model's curated field list
+        (``_ROUTING_FIELDS``) is intersected with the instance's
+        ``fields_get`` before it is sent, because Odoo refuses a
+        ``search_read`` naming a field the model lacks — and the lists
+        span an optional addon (``sale_stock``, ``purchase_stock``) and
+        a field Odoo 19 removed. Whatever was skipped comes back under
+        ``fields_unavailable``.
         """
         ctx = self._begin(
             "odoo_diagnose_routing",
@@ -1890,12 +2001,15 @@ class Dispatcher:
         product_id = _require_int(args, "product_id")
         warehouse_id = _require_int(args, "warehouse_id")
         rt = ctx.rt
+        # Curated names this instance's schema turned out not to have —
+        # reported back so a missing column is explained, not guessed at.
+        fields_unavailable: dict[str, list[str]] = {}
 
         # --- product + template + categ-derived routes -----------------
         product_rows = rt.client.search_read(
             "product.product",
             [("id", "=", product_id)],
-            ["id", "name", "default_code", "product_tmpl_id", "route_ids", "categ_id"],
+            self._routing_fields(rt, "product.product", fields_unavailable),
             limit=1,
             offset=0,
             order=None,
@@ -1911,7 +2025,7 @@ class Dispatcher:
             tmpl_rows = rt.client.search_read(
                 "product.template",
                 [("id", "=", tmpl_id)],
-                ["id", "name", "route_ids", "categ_id"],
+                self._routing_fields(rt, "product.template", fields_unavailable),
                 limit=1,
                 offset=0,
                 order=None,
@@ -1922,18 +2036,7 @@ class Dispatcher:
         wh_rows = rt.client.search_read(
             "stock.warehouse",
             [("id", "=", warehouse_id)],
-            [
-                "id",
-                "name",
-                "code",
-                "delivery_steps",
-                "reception_steps",
-                "sale_route_id",
-                "purchase_route_id",
-                "mto_pull_id",
-                "lot_stock_id",
-                "view_location_id",
-            ],
+            self._routing_fields(rt, "stock.warehouse", fields_unavailable),
             limit=1,
             offset=0,
             order=None,
@@ -1951,30 +2054,29 @@ class Dispatcher:
             for ref in template.get("route_ids") or []:
                 if isinstance(ref, int):
                     candidate_route_ids.add(ref)
-        # ``sale_route_id`` is a stock.route — include its id in the
-        # candidate route set. ``mto_pull_id`` is a stock.rule (MTO
-        # chain helper), not a route, so we surface it on the warehouse
-        # block above but do not add it here.
-        wh_sale_ref = warehouse.get("sale_route_id")
-        if isinstance(wh_sale_ref, list) and wh_sale_ref:
-            candidate_route_ids.add(wh_sale_ref[0])
+        # The warehouse's own routes (``route_ids`` — the warehouse-
+        # selectable ones assigned to it) are the fallback Odoo's
+        # ``stock.rule._search_rule`` consults when neither the procurement
+        # nor the product carries a route, so they are candidates too.
+        # ``delivery_route_id`` is normally among them; add it explicitly
+        # so a warehouse whose delivery route was unassigned still shows
+        # the route its deliveries are configured to take. ``mto_pull_id``
+        # / ``buy_pull_id`` are stock.rule records (chain helpers), not
+        # routes, so they are surfaced on the warehouse block above but
+        # not added here.
+        for ref in warehouse.get("route_ids") or []:
+            if isinstance(ref, int):
+                candidate_route_ids.add(ref)
+        wh_delivery_ref = warehouse.get("delivery_route_id")
+        if isinstance(wh_delivery_ref, list) and wh_delivery_ref:
+            candidate_route_ids.add(wh_delivery_ref[0])
 
         routes: list[dict[str, Any]] = []
         if candidate_route_ids:
             routes = rt.client.search_read(
                 "stock.route",
                 [("id", "in", list(candidate_route_ids))],
-                [
-                    "id",
-                    "name",
-                    "sequence",
-                    "active",
-                    "product_selectable",
-                    "product_categ_selectable",
-                    "warehouse_selectable",
-                    "sale_selectable",
-                    "warehouse_ids",
-                ],
+                self._routing_fields(rt, "stock.route", fields_unavailable),
                 limit=50,
                 offset=0,
                 order="sequence asc, id asc",
@@ -1991,21 +2093,7 @@ class Dispatcher:
                     ("warehouse_id", "=", warehouse_id),
                     ("warehouse_id", "=", False),
                 ],
-                [
-                    "id",
-                    "name",
-                    "sequence",
-                    "active",
-                    "route_id",
-                    "action",
-                    "location_src_id",
-                    "location_dest_id",
-                    "picking_type_id",
-                    "procure_method",
-                    "group_propagation_option",
-                    "auto",
-                    "warehouse_id",
-                ],
+                self._routing_fields(rt, "stock.rule", fields_unavailable),
                 limit=200,
                 offset=0,
                 order="sequence asc, id asc",
@@ -2028,6 +2116,7 @@ class Dispatcher:
             "warehouse": warehouse,
             "candidate_routes": routes,
             "candidate_rules": rules,
+            "fields_unavailable": fields_unavailable,
             "note": (
                 "These are the candidates Odoo evaluates at procurement "
                 "time. The winning rule depends on sequence, "

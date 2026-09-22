@@ -14,6 +14,11 @@ These tests pin the contract:
 - Honest failure when the product or warehouse id doesn't exist
 - Inverse coverage: the tool MUST NOT predict the winning rule (a
   prediction would drift on every Odoo release)
+- Every field the tool asks Odoo for exists on the model — checked
+  against the repo's own generated Odoo reference AND against the
+  instance's ``fields_get`` at call time, because Odoo's ``search_read``
+  raises on one unknown name and returns nothing (v0.21.0 shipped two
+  ``stock.warehouse`` fields no Odoo has, so the tool never worked)
 """
 
 from __future__ import annotations
@@ -23,27 +28,55 @@ import json
 from pathlib import Path
 from typing import Any
 
+from odoo_mcp._odoo_reference import ODOO_STANDARD_FIELDS
 from odoo_mcp.audit import AuditLog
 from odoo_mcp.client import OdooClient
 from odoo_mcp.config import AppConfig, Defaults, InstanceConfig
 from odoo_mcp.credentials import Credentials
-from odoo_mcp.dispatcher import Dispatcher, InstanceRuntime, OdooMcpApp
+from odoo_mcp.dispatcher import _ROUTING_FIELDS, Dispatcher, InstanceRuntime, OdooMcpApp
 from odoo_mcp.security.allowlist import Operation, is_read, is_write
 from odoo_mcp.security.limits import RateLimiter
 from odoo_mcp.security.prod_guard import ProdGuard
 from odoo_mcp.tools import build_tools
 
+# ``_odoo_reference.py`` is a static walk of the Odoo source, so it does not
+# see ``_inherits`` delegation: ``product.product`` answers ``fields_get``
+# with its own fields PLUS every ``product.template`` field (``name``,
+# ``route_ids``, ``categ_id`` ...). Fold that in so the fake's schema is
+# what a live ``fields_get`` reports.
+_DELEGATED: dict[str, tuple[str, ...]] = {"product.product": ("product.template",)}
+
+
+def _reference_schema(model: str) -> frozenset[str]:
+    names = set(ODOO_STANDARD_FIELDS.get(model, frozenset()))
+    for parent in _DELEGATED.get(model, ()):
+        names |= ODOO_STANDARD_FIELDS.get(parent, frozenset())
+    return frozenset(names)
+
 
 class _RoutingFake:
     """search_read mock that returns canned rows per model.
 
-    Records every call so a test can assert the tool touched exactly
-    the six routing models and nothing else.
+    Records every call (model, domain, fields) so a test can assert the
+    tool touched exactly the six routing models and nothing else — and
+    never asked for a field the schema does not have.
+
+    ``fields_get`` answers from the repo's own generated Odoo 18.0
+    reference by default, so the fake's schema is the real one rather
+    than a mirror of whatever the handler happens to request. A test
+    can hand in ``schema`` to narrow a model (an Odoo 19 database, an
+    addon that is not installed) or empty it out.
     """
 
-    def __init__(self, rows: dict[str, list[dict[str, Any]]]) -> None:
+    def __init__(
+        self,
+        rows: dict[str, list[dict[str, Any]]],
+        *,
+        schema: dict[str, frozenset[str]] | None = None,
+    ) -> None:
         self._rows = rows
-        self.calls: list[tuple[str, list[Any]]] = []
+        self._schema = schema or {}
+        self.calls: list[tuple[str, list[Any], list[str]]] = []
         self.is_admin: bool | None = False
         self.admin_reason: str | None = None
         self.uid = 7
@@ -53,7 +86,8 @@ class _RoutingFake:
         return None
 
     def fields_get(self, model: str, *, use_cache: bool = True) -> dict[str, dict[str, Any]]:
-        return {}
+        names = self._schema.get(model, _reference_schema(model))
+        return {n: {"type": "char", "string": n} for n in names}
 
     def search_read(
         self,
@@ -64,7 +98,7 @@ class _RoutingFake:
         offset: int,
         order: str | None,
     ) -> list[dict[str, Any]]:
-        self.calls.append((model, domain))
+        self.calls.append((model, domain, list(fields)))
         return list(self._rows.get(model, []))
 
 
@@ -166,9 +200,11 @@ _WAREHOUSE_ROW = {
     "code": "TRL",
     "delivery_steps": "ship_only",
     "reception_steps": "one_step",
-    "sale_route_id": [9, "TRAILERS: Deliver in 1 step"],
-    "purchase_route_id": [11, "Buy"],
+    "route_ids": [9],  # the warehouse-selectable routes assigned to it
+    "delivery_route_id": [9, "TRAILERS: Deliver in 1 step"],
+    "reception_route_id": [10, "TRAILERS: Receive in 1 step"],
     "mto_pull_id": False,
+    "buy_pull_id": [31, "TRAILERS: Buy"],
     "lot_stock_id": [101, "TRAILERS/Stock"],
     "view_location_id": [100, "TRAILERS"],
 }
@@ -310,7 +346,7 @@ def test_diagnose_routing_only_touches_six_models(tmp_path: Path) -> None:
     app = _build(tmp_path, fake)
     dispatcher = Dispatcher(app)
     _call(dispatcher, {"instance": "dev", "product_id": 8, "warehouse_id": 2})
-    models_touched = {model for (model, _domain) in fake.calls}
+    models_touched = {model for (model, _domain, _fields) in fake.calls}
     assert models_touched.issubset(
         {
             "product.product",
@@ -377,3 +413,117 @@ def test_diagnose_routing_unknown_warehouse(tmp_path: Path) -> None:
     payload = _call(dispatcher, {"instance": "dev", "product_id": 8, "warehouse_id": 999})
     assert payload["ok"] is False
     assert "stock.warehouse id=999" in payload["error"]
+
+
+# ---------------------------------------------------------------------------
+# Field lists are a contract against the deployed schema
+# ---------------------------------------------------------------------------
+#
+# Odoo's ``search_read`` raises ``ValueError("Invalid field ...")`` for a
+# name the model does not have; it never returns partial rows. v0.21.0
+# shipped ``sale_route_id`` / ``purchase_route_id`` on ``stock.warehouse``
+# — fields that exist on no Odoo release — so every call died on the
+# warehouse read. The fake above returned canned rows whatever was asked
+# for, which is why nothing caught it.
+
+
+def _routing_rows() -> dict[str, list[dict[str, Any]]]:
+    return {
+        "product.product": [_PRODUCT_ROW],
+        "product.template": [_TEMPLATE_ROW],
+        "stock.warehouse": [_WAREHOUSE_ROW],
+        "stock.route": _ROUTES,
+        "stock.rule": [_RULES_LAAD, _RULES_TR_LAAD],
+    }
+
+
+def test_routing_field_lists_exist_in_the_odoo_reference() -> None:
+    """Every curated name must be a field the repo's own generated Odoo
+    reference knows for that model. This is the guard that would have
+    caught ``sale_route_id`` before it shipped: the reference is a real
+    ``fields_get`` dump, not a hand-written fixture."""
+    for model, names in _ROUTING_FIELDS.items():
+        assert model in ODOO_STANDARD_FIELDS, f"{model}: not an Odoo standard model"
+        known = _reference_schema(model)
+        unknown = [n for n in names if n not in known]
+        assert not unknown, f"{model}: not in the Odoo reference: {unknown}"
+
+
+def test_diagnose_routing_never_requests_a_field_the_schema_lacks(tmp_path: Path) -> None:
+    """At call time every ``search_read`` field list must be a subset of
+    what ``fields_get`` reported for that model — the request that
+    reaches Odoo, not just the constant."""
+    fake = _RoutingFake(_routing_rows())
+    app = _build(tmp_path, fake)
+    _call(Dispatcher(app), {"instance": "dev", "product_id": 8, "warehouse_id": 2})
+    assert len(fake.calls) == 5
+    for model, _domain, fields in fake.calls:
+        assert fields, f"{model}: an empty field list means EVERY field to Odoo"
+        schema = set(fake.fields_get(model))
+        assert set(fields) <= schema, f"{model}: requested {set(fields) - schema}"
+
+
+def test_diagnose_routing_uses_the_warehouse_routes_as_candidates(tmp_path: Path) -> None:
+    """The warehouse contributes its ``route_ids`` (and ``delivery_route_id``)
+    to the candidate set — the real fields behind what v0.21.0 tried to
+    read as ``sale_route_id``. Route 9 is only reachable via the
+    warehouse here; route 5 only via the product."""
+    rows = _routing_rows()
+    rows["product.product"] = [{**_PRODUCT_ROW, "route_ids": [5]}]
+    rows["stock.warehouse"] = [
+        {**_WAREHOUSE_ROW, "route_ids": [], "delivery_route_id": [9, "Deliver in 1 step"]}
+    ]
+    fake = _RoutingFake(rows)
+    app = _build(tmp_path, fake)
+    out = _call(Dispatcher(app), {"instance": "dev", "product_id": 8, "warehouse_id": 2})
+    route_call = next(c for c in fake.calls if c[0] == "stock.route")
+    ((_field, _op, ids),) = route_call[1]
+    assert set(ids) == {5, 9}
+    assert out["fields_unavailable"] == {}
+
+
+def test_diagnose_routing_skips_fields_this_odoo_does_not_have(tmp_path: Path) -> None:
+    """An Odoo 19 database has no ``stock.rule.group_propagation_option``;
+    a database without ``sale_stock`` has no ``stock.route.sale_selectable``
+    and no ``stock.warehouse.buy_pull_id`` without ``purchase_stock``. The
+    tool must still answer — asking for the missing names would make Odoo
+    refuse the whole read — and say what it left out."""
+    schema = {
+        "stock.rule": _reference_schema("stock.rule") - {"group_propagation_option"},
+        "stock.route": _reference_schema("stock.route") - {"sale_selectable"},
+        "stock.warehouse": _reference_schema("stock.warehouse") - {"buy_pull_id"},
+    }
+    fake = _RoutingFake(_routing_rows(), schema=schema)
+    app = _build(tmp_path, fake)
+    out = _call(Dispatcher(app), {"instance": "dev", "product_id": 8, "warehouse_id": 2})
+
+    assert out["ok"] is not False
+    assert {r["id"] for r in out["candidate_routes"]} == {5, 9}
+    requested = {model: set(fields) for model, _domain, fields in fake.calls}
+    assert "group_propagation_option" not in requested["stock.rule"]
+    assert "sale_selectable" not in requested["stock.route"]
+    assert "buy_pull_id" not in requested["stock.warehouse"]
+    # Everything else on the curated list was still asked for.
+    assert "procure_method" in requested["stock.rule"]
+    assert "warehouse_selectable" in requested["stock.route"]
+    assert "delivery_route_id" in requested["stock.warehouse"]
+    assert out["fields_unavailable"] == {
+        "stock.warehouse": ["buy_pull_id"],
+        "stock.route": ["sale_selectable"],
+        "stock.rule": ["group_propagation_option"],
+    }
+
+
+def test_diagnose_routing_refuses_rather_than_reading_every_field(tmp_path: Path) -> None:
+    """If ``fields_get`` has none of the curated names (model not installed,
+    stale cache) the tool must refuse, never send an empty field list —
+    ``search_read(fields=[])`` means *all* fields to Odoo, which on a
+    business model would be a silent widening."""
+    fake = _RoutingFake(_routing_rows(), schema={"stock.warehouse": frozenset()})
+    app = _build(tmp_path, fake)
+    payload = _call(Dispatcher(app), {"instance": "dev", "product_id": 8, "warehouse_id": 2})
+    assert payload["ok"] is False
+    assert "stock.warehouse" in payload["error"]
+    assert "odoo-mcp cache --clear" in payload["error"]
+    assert all(fields for _model, _domain, fields in fake.calls)
+    assert not any(model == "stock.warehouse" for model, _d, _f in fake.calls)
