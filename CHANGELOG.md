@@ -10,6 +10,51 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **``odoo_send_message`` and ``odoo_log_note`` now ship
+  ``body_is_html=True`` to Odoo so HTML in ``body`` is rendered, not
+  escaped.** Both tool schemas promise "HTML is accepted"; Odoo's
+  ``mail.thread.message_post`` treats a plain ``str`` body as
+  untrusted text and HTML-escapes it (a ``markupsafe.Markup`` wrapper
+  opts out — but RPC transports cannot ship ``Markup``). Without the
+  opt-out, an MCP caller posting ``"<p>Hi</p>"`` would land in the
+  chatter as literal ``&lt;p&gt;Hi&lt;/p&gt;`` and the outbound email
+  would show HTML source instead of formatted output. Odoo exposes
+  ``body_is_html`` exactly for this case ("to be used only for RPC
+  calls" per its docstring). The MCP is always RPC, so
+  ``OdooClient.message_post`` sets it unconditionally for both
+  ``comment`` (email-eligible) and ``notification`` (log note) paths.
+
+  Surfaced by the daily competitive audit
+  (``audit/2026-05-26-message-body-html-escape``): the same bug — same
+  fix shape — landed in ``pantalytics/odoo-mcp-pro`` as
+  "fix(post_message): set body_is_html=True so HTML body isn't escaped"
+  (PR #33, 2026-05-05), discovered there on a production smoke test
+  to a Gmail recipient — and again as their PR #148 (2026-09-16),
+  after a second code path without the flag put literal ``<p>`` /
+  ``<li>`` tags into a real customer's inbox.
+
+  3 new unit tests (``tests/test_client_message_post.py``) pin the
+  wire-level kwargs directly — the existing dispatcher tests in
+  ``test_send_message.py`` use a fake ``message_post`` and could not
+  catch a regression at the client/RPC boundary.
+
+- **A ``body`` whose markup is entirely HTML-escaped is now refused by
+  ``odoo_send_message`` and ``odoo_log_note``.** With ``body_is_html=True``
+  the string is stored and mailed verbatim, so ``&lt;p&gt;Hi&lt;/p&gt;``
+  (an agent escaping its own markup, which the old "plain strings are
+  escaped" behaviour taught) would reach the customer as literal tags.
+  The check runs before the dry-run, so no token is issued for such a body.
+  It refuses rather than unescapes: rewriting the body after the preview
+  would post something other than what the human approved. A body with at
+  least one real tag (e.g. ``<code>&lt;br/&gt;</code>`` quoting a tag),
+  plain text, and non-tag entities (``3 &lt; 5``) are unchanged. Tool
+  schemas now say "pass real markup, never pre-escaped". Corroborated by
+  ``pantalytics/odoo-mcp-pro`` #152 (2026-09-22), where it reached the same
+  customer three times after they set the flag; they repair the body in
+  place, which deltix's approval gate rules out.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

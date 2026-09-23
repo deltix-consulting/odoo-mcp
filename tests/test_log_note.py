@@ -374,3 +374,24 @@ def test_token_rejects_body_swap(tmp_path: Path) -> None:
     assert swapped["ok"] is False
     assert "different payload" in swapped["error"]
     assert fake.message_post_calls == []
+
+
+def test_log_note_refuses_fully_escaped_body(tmp_path: Path) -> None:
+    """Same ``body_is_html=True`` path as ``odoo_send_message``: a note whose
+    markup is entirely escaped would land in the chatter as literal tags.
+    Dev commits without a preview, so the refusal must happen before the
+    RPC, not in a preview branch."""
+    fake = _LogNoteFake()
+    app = _build(tmp_path, fake)
+    out = _call(
+        Dispatcher(app),
+        {
+            "instance": "dev",
+            "model": "sale.order",
+            "record_id": 42,
+            "body": "&lt;p&gt;Spoke to customer.&lt;/p&gt;",
+        },
+    )
+    assert out["ok"] is False
+    assert "HTML-escaped" in out["error"]
+    assert fake.message_post_calls == []
