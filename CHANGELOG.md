@@ -10,6 +10,23 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two MCP prompts named fields that the supported Odoo versions do not
+  have.** `odoo_open_manufacturing_orders` requested and sorted by
+  `mrp.production.date_planned_start`, which Odoo 17.0 renamed to
+  `date_start`. On both tested versions (17.0, 18.0) the prompt's step-3 read
+  failed with `Invalid field`. `odoo_low_stock_check` filtered on
+  `product.product` `type='product'`, a value Odoo 18.0 removed when stock
+  tracking moved to `is_storable`. On 18.0 the filter matches no products,
+  so the check reports "no low stock" on any database. The prompts now use
+  `date_start` and `is_storable`, and name the pre-17 / pre-18 spelling for
+  older databases. A new test renders every prompt, extracts each field its
+  read steps name (`fields=`, `groupby=`, `order=`, domain leaves), and
+  checks them against `_odoo_reference.py`, following `_inherits` for
+  `product.product`. On the old prompts it flags exactly
+  `date_planned_start`.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
