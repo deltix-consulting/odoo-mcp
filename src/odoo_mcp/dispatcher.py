@@ -1175,7 +1175,7 @@ class Dispatcher:
         _refuse_write_blocklisted(model)
 
         record_id = _require_int(args, "record_id")
-        body = _require_str(args, "body")
+        body = _require_message_body(args)
         message_type = args.get("message_type", "comment")
         if message_type not in ("comment", "notification"):
             raise OdooMcpError(
@@ -1301,7 +1301,7 @@ class Dispatcher:
         _refuse_write_blocklisted(model)
 
         record_id = _require_int(args, "record_id")
-        body = _require_str(args, "body")
+        body = _require_message_body(args)
 
         self.app.prod_guard.check_write(ctx.instance, rt.config.production)
 
@@ -2674,6 +2674,34 @@ def _require_str(args: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise OdooMcpError(f"Argument {key!r} must be a non-empty string.")
     return value
+
+
+# A real tag / comment / doctype opener, and the same opener entity-escaped
+# (``&lt;p``, ``&#60;p``, ``&#x3c;p``).
+_HTML_TAG_OPEN_RE: Final = re.compile(r"<[A-Za-z/!]")
+_ESCAPED_TAG_OPEN_RE: Final = re.compile(r"&(?:lt|#0*60|#x0*3c);[A-Za-z/!]", re.IGNORECASE)
+
+
+def _require_message_body(args: dict[str, Any]) -> str:
+    """``body`` for the chatter tools, refusing markup the caller pre-escaped.
+
+    ``message_post`` is sent with ``body_is_html=True``, so the string is
+    stored and mailed verbatim. A body whose markup is *entirely* escaped
+    (``&lt;p&gt;Hi&lt;/p&gt;``) would therefore reach the recipient as
+    literal tags. Refused rather than repaired: rewriting the body after the
+    dry-run would post something other than what the human approved (and
+    the payload digest binds the original). A body with at least one real
+    tag is left alone, since escaped markup inside real HTML is a legitimate
+    way to quote a tag.
+    """
+    body = _require_str(args, "body")
+    if _ESCAPED_TAG_OPEN_RE.search(body) and not _HTML_TAG_OPEN_RE.search(body):
+        raise OdooMcpError(
+            "Argument 'body' contains only HTML-escaped markup (e.g. '&lt;p&gt;'). "
+            "The body is posted as HTML, so this would reach the reader as literal "
+            "tags. Pass real markup ('<p>Hi</p>') or plain text instead."
+        )
+    return body
 
 
 def _require_list_of_str(args: dict[str, Any], key: str) -> list[str]:

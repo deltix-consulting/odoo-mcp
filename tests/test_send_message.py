@@ -364,3 +364,57 @@ def test_read_only_session_blocks_send(
     )
     assert payload["ok"] is False
     assert "read-only" in payload["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Pre-escaped markup (pantalytics/odoo-mcp-pro #152)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "&lt;p&gt;Hi&lt;/p&gt;",
+        "&lt;p&gt;See &lt;a href=&quot;https://x?a=1&amp;b=2&quot;&gt;here&lt;/a&gt;&lt;/p&gt;",
+        "&#60;p&#62;Hi&#60;/p&#62;",
+        "&#x3C;br/&#x3E;",
+    ],
+)
+def test_fully_escaped_body_refused_before_preview(
+    tmp_path: Path, external_comms_env: None, body: str
+) -> None:
+    """``message_post`` runs with ``body_is_html=True``, so an escaped body
+    would be emailed as literal tags. Refused at the preview, so no token is
+    ever issued for it and nothing is sent."""
+    app, fake = _build(tmp_path, production=False)
+    payload = _call(
+        Dispatcher(app),
+        {"instance": "dev", "model": "res.partner", "record_id": 7, "body": body},
+    )
+    assert payload["ok"] is False
+    assert "HTML-escaped" in payload["error"]
+    assert "confirmation_token" not in payload
+    assert fake.message_post_calls == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<p>Hi</p>",
+        "<p>Use <code>&lt;br/&gt;</code> for a line break.</p>",
+        "Plain text, no markup at all.",
+        "Totals: 3 &lt; 5 &amp; 5 &gt; 3",
+    ],
+)
+def test_real_html_or_plain_text_body_still_previews(
+    tmp_path: Path, external_comms_env: None, body: str
+) -> None:
+    """Real markup, escaped markup quoted inside real markup, plain text,
+    and entities that are not a tag opener all pass unchanged."""
+    app, _ = _build(tmp_path, production=False)
+    payload = _call(
+        Dispatcher(app),
+        {"instance": "dev", "model": "res.partner", "record_id": 7, "body": body},
+    )
+    assert payload["ok"] is True
+    assert payload["body_preview"] == body

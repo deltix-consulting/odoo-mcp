@@ -451,8 +451,9 @@ _TOOL_SEND_MESSAGE = Tool(
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "Message body. HTML is accepted; plain text gets wrapped "
-                    "in <p> by Odoo. Shown verbatim in the dry-run preview."
+                    "Message body, posted as HTML: pass real markup ('<p>Hi</p>'), "
+                    "never pre-escaped ('&lt;p&gt;' is refused). Plain text is "
+                    "accepted. Shown verbatim in the dry-run preview."
                 ),
             },
             "subject": {
@@ -612,8 +613,9 @@ _TOOL_LOG_NOTE = Tool(
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "Note body. HTML is accepted; plain text gets wrapped in <p>. "
-                    "Shown verbatim in the dry-run preview."
+                    "Note body, posted as HTML: pass real markup ('<p>Hi</p>'), "
+                    "never pre-escaped ('&lt;p&gt;' is refused). Plain text is "
+                    "accepted. Shown verbatim in the dry-run preview."
                 ),
             },
             "dry_run": {
