@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Pieter-Jan Luyssen" }]
 dependencies = [
-    "mcp>=1.2.0",
+    "mcp>=1.7.0",
     "keyring>=25.0",
 ]
 

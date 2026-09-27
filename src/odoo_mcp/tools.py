@@ -8,10 +8,37 @@ argument types, so we hand-write each schema.
 
 from __future__ import annotations
 
-from mcp.types import Tool
+from mcp.types import Tool, ToolAnnotations
+
+# MCP tool annotations (spec 2025-03-26). They are hints, not controls: a
+# client uses them to label a tool, to decide whether to ask before calling
+# it, and to decide whether calls may run in parallel. Every gate still runs
+# in the dispatcher. ``readOnlyHint`` must match which handlers call
+# ``_refuse_if_read_only_session`` (tests/test_tool_annotations.py pins it).
+# No write tool is marked idempotent: a repeated commit is refused by the
+# single-use token, and after a transport failure the caller must not retry.
+_READ = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+_WRITE_ADDITIVE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+)
+# Overwrites values or removes records.
+_WRITE_DESTRUCTIVE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
+)
+# Posts, validates or cancels a document. Odoo may email the partner as a
+# side effect (e.g. a validated delivery when the company sends delivery
+# confirmations), so the world is not closed.
+_DOCUMENT_ACTION_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True
+)
+# Followers get an email: the tool reaches people outside Odoo.
+_SEND_MESSAGE_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+)
 
 _TOOL_LIST_INSTANCES = Tool(
     name="odoo_list_instances",
+    annotations=_READ,
     description=(
         "List the configured Odoo instances the MCP can talk to. Returns for each "
         "instance: name, production flag, whether prod writes are currently unlocked, "
@@ -24,6 +51,7 @@ _TOOL_LIST_INSTANCES = Tool(
 
 _TOOL_DESCRIBE_MODEL = Tool(
     name="odoo_describe_model",
+    annotations=_READ,
     description=(
         "Return the field metadata (fields_get) for one allowlisted Odoo model. "
         "Default response is minimal: per field {type, string, required?, _sensitive?} "
@@ -59,6 +87,7 @@ _TOOL_DESCRIBE_MODEL = Tool(
 
 _TOOL_LOOKUP = Tool(
     name="odoo_lookup",
+    annotations=_READ,
     description=(
         "Fast name-based lookup. Searches the model's `name` field for "
         "case-insensitive substring matches and returns only id + "
@@ -95,6 +124,7 @@ _TOOL_LOOKUP = Tool(
 
 _TOOL_SEARCH_READ = Tool(
     name="odoo_search_read",
+    annotations=_READ,
     description=(
         "Run Odoo search_read against an allowlisted model. Pass an explicit "
         "`fields` list, OR omit it to get a curated default (id + name + a few "
@@ -154,6 +184,7 @@ _TOOL_SEARCH_READ = Tool(
 
 _TOOL_SEARCH_COUNT = Tool(
     name="odoo_search_count",
+    annotations=_READ,
     description=(
         "Count records matching a domain on an allowlisted model. Returns a "
         "single integer — much cheaper than fetching records just to count them. "
@@ -180,6 +211,7 @@ _TOOL_SEARCH_COUNT = Tool(
 
 _TOOL_READ_GROUP = Tool(
     name="odoo_read_group",
+    annotations=_READ,
     description=(
         "Aggregate records via Odoo's read_group. Use this for dashboards and "
         "summaries instead of fetching records to count / sum them yourself. "
@@ -251,6 +283,7 @@ _TOOL_READ_GROUP = Tool(
 
 _TOOL_READ = Tool(
     name="odoo_read",
+    annotations=_READ,
     description=(
         "Fetch specific records by ID from an allowlisted model. Same field-level "
         "policies as odoo_search_read: pass `fields` explicitly OR omit for the "
@@ -291,6 +324,7 @@ _TOOL_READ = Tool(
 
 _TOOL_CREATE = Tool(
     name="odoo_create",
+    annotations=_WRITE_ADDITIVE,
     description=(
         "Create a record in an allowlisted model. Writes to production instances "
         "are blocked unless odoo_enable_prod_writes has been called first, AND the "
@@ -325,6 +359,7 @@ _TOOL_CREATE = Tool(
 
 _TOOL_WRITE = Tool(
     name="odoo_write",
+    annotations=_WRITE_DESTRUCTIVE,
     description=(
         "Update existing records on an allowlisted model. Same prod guardrails as "
         "odoo_create: blocked on prod without unlock, dry_run default on prod, "
@@ -353,6 +388,7 @@ _TOOL_WRITE = Tool(
 
 _TOOL_ARCHIVE_OR_DELETE = Tool(
     name="odoo_archive_or_delete",
+    annotations=_WRITE_DESTRUCTIVE,
     description=(
         "Archive OR permanently delete records. ALWAYS ask the user which "
         "they want before calling this tool — archiving is almost always "
@@ -398,6 +434,7 @@ _TOOL_ARCHIVE_OR_DELETE = Tool(
 
 _TOOL_ENABLE_PROD_WRITES = Tool(
     name="odoo_enable_prod_writes",
+    annotations=_WRITE_ADDITIVE,
     description=(
         "Unlock writes to a production instance for the next 15 minutes. Every "
         "subsequent write still defaults to dry_run=true on prod and requires a "
@@ -417,6 +454,7 @@ _TOOL_ENABLE_PROD_WRITES = Tool(
 
 _TOOL_SEND_MESSAGE = Tool(
     name="odoo_send_message",
+    annotations=_SEND_MESSAGE_ANNOTATIONS,
     description=(
         "Post a message on a record — sends an email when message_type='comment' "
         "AND partner_ids contains at least one recipient (or the record has "
@@ -493,6 +531,7 @@ _TOOL_SEND_MESSAGE = Tool(
 
 _TOOL_RUN_DOCUMENT_ACTION = Tool(
     name="odoo_run_document_action",
+    annotations=_DOCUMENT_ACTION_ANNOTATIONS,
     description=(
         "Run a document workflow action — confirm / cancel / post / validate — "
         "on one or more records. This is NOT a generic method runner: the "
@@ -550,6 +589,7 @@ _TOOL_RUN_DOCUMENT_ACTION = Tool(
 
 _TOOL_DIAGNOSE_ACCESS = Tool(
     name="odoo_diagnose_access",
+    annotations=_READ,
     description=(
         "Diagnose what the authenticated Odoo user can do on a model. Returns "
         "read/write/create/unlink booleans (Odoo's check_access_rights), the "
@@ -576,6 +616,7 @@ _TOOL_DIAGNOSE_ACCESS = Tool(
 
 _TOOL_LOG_NOTE = Tool(
     name="odoo_log_note",
+    annotations=_WRITE_ADDITIVE,
     description=(
         "Post an internal log note on an Odoo record (visible in the "
         "record's chatter; NEVER emailed). Bounded sibling of "
@@ -635,6 +676,7 @@ _TOOL_LOG_NOTE = Tool(
 
 _TOOL_CREATE_ATTACHMENT = Tool(
     name="odoo_create_attachment",
+    annotations=_WRITE_ADDITIVE,
     description=(
         "Attach a file to an Odoo record. Bounded surface for creating "
         "``ir.attachment`` rows — that model stays read-blocked via the "
@@ -744,6 +786,7 @@ _TOOL_CREATE_ATTACHMENT = Tool(
 
 _TOOL_DIAGNOSE_ROUTING = Tool(
     name="odoo_diagnose_routing",
+    annotations=_READ,
     description=(
         "Diagnose Odoo's stock-routing config for a (product, warehouse) "
         "pair. Returns: the product's active routes (own + template + "
@@ -779,6 +822,7 @@ _TOOL_DIAGNOSE_ROUTING = Tool(
 
 _TOOL_HELP = Tool(
     name="odoo_help",
+    annotations=_READ,
     description=(
         "Returns a capability overview of this Odoo MCP. Default response is "
         "terse: a one-sentence summary, a tool list with one-liners, and the "
