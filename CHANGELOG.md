@@ -10,6 +10,26 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Every tool now carries MCP tool annotations** (`readOnlyHint`,
+  `destructiveHint`, `idempotentHint`, `openWorldHint`). The ten read
+  tools say they are read-only and closed-world, so a client can label
+  them, run them in parallel and skip its approval prompt for them. The
+  eight write tools say they are not read-only and never idempotent;
+  `odoo_write`, `odoo_archive_or_delete` and `odoo_run_document_action`
+  say they are destructive; `odoo_send_message` and
+  `odoo_run_document_action` say they can reach people outside Odoo.
+  These are hints for the client. Every gate still runs in the
+  dispatcher. `readOnlyHint` is pinned by a test to the handlers that
+  call `_refuse_if_read_only_session`, so a new write tool cannot be
+  labelled read-only by mistake. `tools/list` grows by about 1.5 KB.
+
+### Changed
+
+- **`mcp` floor raised from 1.2.0 to 1.7.0**, the first SDK release with
+  `ToolAnnotations`. The lock already pins 1.27.0.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
