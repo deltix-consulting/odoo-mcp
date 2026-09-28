@@ -229,6 +229,22 @@ class Dispatcher:
     # ---- Entry point ------------------------------------------------------
 
     async def call(self, name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        content, _failed = await self.call_with_status(name, arguments)
+        return content
+
+    async def call_with_status(
+        self, name: str, arguments: dict[str, Any]
+    ) -> tuple[list[TextContent], bool]:
+        """Run one tool call; return its content and whether it FAILED.
+
+        The flag is True exactly when the envelope carries ``ok: false``
+        (a refusal, an Odoo fault, or the last-resort ``internal_error``).
+        The server uses it to set MCP's ``isError`` on the result — the
+        spec's signal that the call did not do what was asked — so a
+        client or agent framework that branches on ``isError`` does not
+        treat a refused write as a success. The text is identical either
+        way; only the protocol-level flag differs.
+        """
         started = time.monotonic()
         instance = arguments.get("instance") if isinstance(arguments, dict) else None
         logger.info(
@@ -251,13 +267,13 @@ class Dispatcher:
             # drop it. Only include hints that add new information.
             if exc.hint and exc.hint not in exc.user_message:
                 payload["hint"] = exc.hint
-            return [_text(payload)]
+            return [_text(payload)], True
         except Exception as exc:  # noqa: BLE001 — last-resort safety net
             wrapped = OdooMcpError(f"Unhandled error in {name}: {type(exc).__name__}: {exc}")
             self._audit_failure(name, arguments, wrapped, _elapsed_ms(started))
             return [
                 _text({"ok": False, "error_code": "internal_error", "error": wrapped.user_message})
-            ]
+            ], True
         elapsed = _elapsed_ms(started)
         budget = _latency_budget_ms()
         if budget is not None and elapsed > budget:
@@ -269,7 +285,7 @@ class Dispatcher:
                 elapsed,
                 budget,
             )
-        return [_text({"ok": True, **result}, default=str)]
+        return [_text({"ok": True, **result}, default=str)], False
 
     def _dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         # Enforce ODOO_MCP_DISABLE_TOOLS at CALL time, not just in the
