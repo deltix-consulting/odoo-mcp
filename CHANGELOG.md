@@ -10,6 +10,19 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed tool call now reaches the client with MCP's `isError: true`.**
+  Every refusal (allowlist, prod-guard, read-only session, disabled tool,
+  bad argument), every Odoo fault and the last-resort `internal_error`
+  already carried `ok: false` in the JSON envelope, but went out as an
+  ordinary tool result — `isError: false` at the protocol level. A client
+  or agent framework that branches on the spec's flag (rather than
+  parsing deltix's JSON) therefore saw a refused write as a success. The
+  envelope text is byte-for-byte unchanged; only the flag differs. Works
+  on every supported `mcp` 1.x release (raised through the SDK's own
+  error path, which every release since 1.2.0 maps to `isError: true`).
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

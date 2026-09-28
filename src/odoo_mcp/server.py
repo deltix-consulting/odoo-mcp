@@ -40,6 +40,26 @@ from .tools import build_tools
 _logger = logging.getLogger(__name__)
 
 
+class _ToolCallFailed(Exception):
+    """Carries a failed call's envelope to the SDK's error path.
+
+    Every ``mcp`` release this project supports (1.x, from the pyproject
+    floor up) turns an exception raised by a ``call_tool`` handler into
+    ``CallToolResult(content=[TextContent(text=str(exc))], isError=True)``.
+    Raising this with the envelope's own text is therefore the one
+    version-portable way to set ``isError`` without changing a byte of
+    what the model reads. (Returning a ``CallToolResult`` directly only
+    works from ``mcp`` 1.20.)
+    """
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.text = text
+
+    def __str__(self) -> str:
+        return self.text
+
+
 def _disabled_tools() -> frozenset[str]:
     """Return tool names hidden by ``ODOO_MCP_DISABLE_TOOLS``.
 
@@ -151,7 +171,15 @@ def build_server(app: OdooMcpApp) -> Server:
 
     @server.call_tool()  # type: ignore[untyped-decorator]
     async def _call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
-        return await dispatcher.call(name, arguments or {})
+        content, failed = await dispatcher.call_with_status(name, arguments or {})
+        if failed:
+            # ``ok: false`` must reach the client as ``isError: true`` — the
+            # MCP spec's tool-execution-error signal. Without it a refused
+            # write, a prod-guard refusal or an Odoo fault is a SUCCESSFUL
+            # tool result at the protocol level, and only a client that
+            # parses deltix's JSON can tell. The envelope text is unchanged.
+            raise _ToolCallFailed(content[0].text)
+        return content
 
     @server.list_prompts()  # type: ignore[no-untyped-call, untyped-decorator]
     async def _list_prompts() -> list[Prompt]:
