@@ -292,3 +292,71 @@ def test_max_commits_per_unlock_defaults_to_fifty(tmp_path: Path) -> None:
     cfg_file = _write_cfg(tmp_path / "config.toml", _VALID_CONFIG)
     cfg = load_config(cfg_file)
     assert cfg.instances["prod"].max_commits_per_unlock == 50
+
+
+# ---------------------------------------------------------------------------
+# Boolean keys must be TOML booleans. ``bool("false")`` is True, so a quoted
+# value used to flip the setting ON — for ``allow_self_signed`` that means
+# TLS verification off, for ``external_comms_enabled`` that means email on.
+# ---------------------------------------------------------------------------
+
+
+def _bool_instance_keys() -> list[str]:
+    """Every ``InstanceConfig`` field typed ``bool`` — derived, so a new
+    boolean key is covered by the tests below without editing them."""
+    import dataclasses
+    import typing
+
+    from odoo_mcp.config import InstanceConfig
+
+    hints = typing.get_type_hints(InstanceConfig)
+    return [f.name for f in dataclasses.fields(InstanceConfig) if hints[f.name] is bool]
+
+
+def _dev_instance(extra: str) -> str:
+    return f"""
+[instances.dev]
+url = "https://dev.example.com"
+database = "d"
+credentials_env_prefix = "ODOO_MCP_DEV"
+{extra}
+"""
+
+
+def test_bool_key_list_is_the_four_documented_switches() -> None:
+    assert sorted(_bool_instance_keys()) == [
+        "allow_self_signed",
+        "external_comms_enabled",
+        "production",
+        "refuse_admin_on_production",
+    ]
+
+
+@pytest.mark.parametrize("key", _bool_instance_keys())
+@pytest.mark.parametrize("raw", ['"false"', '"true"', '"no"', "0", "1", '""'])
+def test_bool_key_refuses_non_boolean(tmp_path: Path, key: str, raw: str) -> None:
+    cfg_file = _write_cfg(tmp_path / "config.toml", _dev_instance(f"{key} = {raw}"))
+    with pytest.raises(ConfigError, match=rf"'{key}' must be true or false"):
+        load_config(cfg_file)
+
+
+@pytest.mark.parametrize("key", _bool_instance_keys())
+@pytest.mark.parametrize("raw", ["true", "false"])
+def test_bool_key_accepts_toml_boolean(tmp_path: Path, key: str, raw: str) -> None:
+    # dev instance on an https url: every key/value pair here is a legal config
+    body = _dev_instance(f"{key} = {raw}")
+    cfg = load_config(_write_cfg(tmp_path / "config.toml", body))
+    assert getattr(cfg.instances["dev"], key) is (raw == "true")
+
+
+def test_quoted_false_does_not_disable_tls_verification(tmp_path: Path) -> None:
+    """The fail-open case, end to end: the operator wrote "false" and meant it."""
+    body = _dev_instance('allow_self_signed = "false"')
+    with pytest.raises(ConfigError, match="allow_self_signed"):
+        load_config(_write_cfg(tmp_path / "config.toml", body))
+
+
+def test_quoted_false_does_not_enable_external_comms(tmp_path: Path) -> None:
+    body = _dev_instance('external_comms_enabled = "false"')
+    with pytest.raises(ConfigError, match="external_comms_enabled"):
+        load_config(_write_cfg(tmp_path / "config.toml", body))
