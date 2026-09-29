@@ -283,7 +283,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         raise ConfigError(
             f"[instances.{name}].url must start with http:// or https:// (got {url!r})"
         )
-    production = bool(entry.get("production", False))
+    production = _require_bool(entry, "production", False)
     if production and not url.startswith("https://"):
         raise ConfigError(
             f"[instances.{name}] is marked production but url is not HTTPS. Refusing."
@@ -298,7 +298,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         )
 
     # TLS-strictness policy: no self-signed certs in production.
-    allow_self_signed = bool(entry.get("allow_self_signed", False))
+    allow_self_signed = _require_bool(entry, "allow_self_signed", False)
     if production and allow_self_signed:
         raise ConfigError(
             f"[instances.{name}] cannot set allow_self_signed on a production instance"
@@ -333,7 +333,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         raise ConfigError(f"[instances.{name}].allowed_models cannot be empty")
     sensitive_fields = _parse_sensitive_fields(entry.get("sensitive_fields"), name)
 
-    refuse_admin_on_production = bool(entry.get("refuse_admin_on_production", True))
+    refuse_admin_on_production = _require_bool(entry, "refuse_admin_on_production", True)
 
     raw_patterns = _require_str_list(entry, "custom_sensitive_field_patterns", [])
     for pattern in raw_patterns:
@@ -352,7 +352,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
     # defeats the operator-in-the-loop pattern the unlock exists for.
     unlock_ttl = _require_int(entry, "unlock_ttl_seconds", 15 * 60, minimum=60, maximum=3600)
     smart_overrides = _parse_smart_fields_overrides(entry.get("smart_fields_overrides"), name)
-    external_comms = bool(entry.get("external_comms_enabled", False))
+    external_comms = _require_bool(entry, "external_comms_enabled", False)
     attachment_paths = _parse_attachment_source_paths(entry.get("attachment_source_paths"), name)
 
     return InstanceConfig(
@@ -552,6 +552,23 @@ def _require_int(
     if int_value < minimum or int_value > maximum:
         raise ConfigError(f"{key!r} must be in [{minimum}, {maximum}], got {int_value}")
     return int_value
+
+
+def _require_bool(raw: dict[str, Any], key: str, default: bool) -> bool:
+    """Return ``raw[key]`` if it is a TOML boolean; raise ConfigError otherwise.
+
+    ``bool(value)`` would read the quoted string ``"false"`` (or ``"no"``,
+    ``"0"``) as ``True`` — which turns ``allow_self_signed = "false"`` into
+    "skip TLS verification" and ``external_comms_enabled = "false"`` into
+    "email is on". Same strictness as :func:`_require_int`.
+    """
+    value = raw.get(key, default)
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f"{key!r} must be true or false (a TOML boolean, unquoted), "
+            f"got {type(value).__name__} {value!r}"
+        )
+    return value
 
 
 def _require_str_list(

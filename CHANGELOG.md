@@ -10,6 +10,22 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A quoted `"false"` in `config.toml` no longer switches a setting ON.**
+  The four per-instance switches (`production`, `allow_self_signed`,
+  `refuse_admin_on_production`, `external_comms_enabled`) were read with
+  Python's `bool()`, and `bool("false")` is `True`. So
+  `allow_self_signed = "false"` turned TLS certificate verification
+  **off** on that instance, and `external_comms_enabled = "false"` turned
+  the per-instance email opt-in **on** — each the opposite of what the
+  operator wrote, with no warning. The integer settings already refused a
+  wrong type (`_require_int`); the booleans now do the same and the MCP
+  refuses to start with `'<key>' must be true or false (a TOML boolean,
+  unquoted)`. **Upgrade note:** a config that quoted one of these values
+  now fails to load until the quotes are removed — `odoo-mcp doctor`
+  names the key.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
