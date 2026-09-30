@@ -12,7 +12,8 @@ Specifically checks:
 3. Audit log directory is writable.
 4. For each instance:
    a. Credential env vars are present.
-   b. TLS connects and the remote cert is valid (unless ``allow_self_signed``).
+   b. TLS connects and the remote cert is valid — against the instance's
+      ``ca_file`` when set — unless ``allow_self_signed``.
    c. Odoo ``authenticate`` succeeds.
    d. A smoke-test ``fields_get`` on one allowed model succeeds.
 """

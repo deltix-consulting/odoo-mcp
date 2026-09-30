@@ -4,7 +4,8 @@ This module is the only place that talks to Odoo. Everything else in the
 codebase interacts with Odoo via :class:`OdooClient`, which gives us a single
 place to enforce:
 
-* TLS posture (verified default, dev-only ``allow_self_signed``).
+* TLS posture (verified default, optional per-instance ``ca_file``,
+  dev-only ``allow_self_signed``).
 * Per-call timeouts via a custom :class:`socket` transport.
 * A fixed, minimal ``context`` dict — never forwarding caller input to Odoo.
 * Translation of :mod:`xmlrpc.client` faults and transport errors into our
@@ -332,8 +333,12 @@ class _TimeoutSafeTransport(_ConnectionRecyclingMixin, xmlrpc.client.SafeTranspo
         return conn
 
 
-def _build_ssl_context(allow_self_signed: bool) -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
+def _build_ssl_context(allow_self_signed: bool, ca_file: str = "") -> ssl.SSLContext:
+    # ``cafile`` replaces the system store (create_default_context only
+    # loads the default certs when no cafile/capath/cadata is given), so an
+    # instance pinned to an internal CA trusts that CA and nothing else.
+    # config.py already refused ca_file together with allow_self_signed.
+    ctx = ssl.create_default_context(cafile=ca_file or None)
     if allow_self_signed:
         # Dev-only escape hatch. Prod was already rejected in config.py.
         ctx.check_hostname = False
@@ -371,7 +376,7 @@ class OdooClient:
         self._credentials: Credentials | None = credentials
         self._credential_loader = credential_loader
         self._credential_lock = threading.Lock()
-        self._ssl_context = _build_ssl_context(instance.allow_self_signed)
+        self._ssl_context = _build_ssl_context(instance.allow_self_signed, instance.ca_file)
         if fields_cache_max_size <= 0:
             raise ValueError("fields_cache_max_size must be > 0")
         self._fields_cache_max_size = fields_cache_max_size

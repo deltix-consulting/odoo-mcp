@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import ssl
 import stat
 import tomllib
 from dataclasses import dataclass, field
@@ -74,6 +75,7 @@ _VALID_INSTANCE_KEYS: Final[frozenset[str]] = frozenset(
         "smart_fields_overrides",
         "external_comms_enabled",
         "attachment_source_paths",
+        "ca_file",
     }
 )
 
@@ -152,6 +154,15 @@ class InstanceConfig:
     #         "/home/api-server/.claude-api-server/attachments",
     #     ]
     attachment_source_paths: tuple[str, ...] = ()
+    # PEM bundle of the CA(s) that sign this instance's TLS certificate,
+    # for an Odoo behind a company-internal CA. Empty string = the system
+    # trust store. When set it REPLACES the system store for this instance
+    # (same semantics as ``curl --cacert``): verification stays on, the
+    # hostname is still checked, and only the listed CAs are trusted.
+    # Allowed on production — unlike ``allow_self_signed``, which turns
+    # verification off. Stored as an absolute, user-expanded path that
+    # was proven loadable at config-load time.
+    ca_file: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +314,13 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         raise ConfigError(
             f"[instances.{name}] cannot set allow_self_signed on a production instance"
         )
+    ca_file = _parse_ca_file(entry.get("ca_file"), name)
+    if ca_file and allow_self_signed:
+        raise ConfigError(
+            f"[instances.{name}] sets both ca_file and allow_self_signed. ca_file "
+            f"verifies the certificate against your CA; allow_self_signed turns "
+            f"verification off. Pick one (ca_file is the safe choice)."
+        )
 
     # Rate limits and record caps.
     default_rate = 60 if production else 300
@@ -375,6 +393,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         smart_fields_overrides=smart_overrides,
         external_comms_enabled=external_comms,
         attachment_source_paths=attachment_paths,
+        ca_file=ca_file,
     )
 
 
@@ -471,6 +490,31 @@ def _require_str(raw: dict[str, Any], key: str, section: str) -> str:
         raise ConfigError(f"[{section}].{key} is required and must be a string")
     value: str = raw[key]
     return value
+
+
+def _parse_ca_file(raw: Any, instance_name: str) -> str:
+    """Validate the per-instance ``ca_file`` and return its absolute path.
+
+    Fails at config-load time, not on the first tool call: a missing or
+    unparseable bundle would otherwise surface as an opaque TLS handshake
+    failure on every call. ``~`` is expanded; a relative path is refused
+    because the MCP host's working directory is not the operator's.
+    """
+    if raw is None or raw == "":
+        return ""
+    where = f"[instances.{instance_name}].ca_file"
+    if not isinstance(raw, str):
+        raise ConfigError(f"{where} must be a string path, got {type(raw).__name__}")
+    path = os.path.expanduser(raw)
+    if not os.path.isabs(path):
+        raise ConfigError(f"{where} must be an absolute path (got {raw!r})")
+    if not os.path.isfile(path):
+        raise ConfigError(f"{where} does not exist or is not a file: {path}")
+    try:
+        ssl.create_default_context(cafile=path)
+    except (ssl.SSLError, OSError, ValueError) as exc:
+        raise ConfigError(f"{where} is not a readable PEM CA bundle ({path}): {exc}") from exc
+    return path
 
 
 def _parse_attachment_source_paths(raw: Any, instance_name: str) -> tuple[str, ...]:

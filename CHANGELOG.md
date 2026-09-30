@@ -10,6 +10,25 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-instance `ca_file` — verified TLS for an Odoo behind a
+  company-internal CA.** TLS used to be all-or-nothing: the OS trust
+  store, or (dev only) `allow_self_signed`, which turns verification
+  **off**. A production Odoo whose certificate is signed by an internal
+  CA had no supported path at all, and a dev instance on one was pushed
+  to disable verification. Set `ca_file = "/path/to/internal-ca.pem"` on
+  the instance: certificate and hostname verification stay on, and that
+  instance trusts only the CAs in the file (same semantics as
+  `curl --cacert`). Allowed on production. A missing, relative or
+  non-PEM path refuses at config load, so `odoo-mcp doctor` names the
+  problem instead of every call failing with a handshake error.
+  Combining it with `allow_self_signed` is refused. `odoo-mcp config
+  show` prints the setting, and `odoo-mcp renew-key` verifies against
+  it when it sends your password. `setup --add` does not know the CA
+  yet: generate the key by pasting it (option 1), or add `ca_file` and
+  run `renew-key` afterwards.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

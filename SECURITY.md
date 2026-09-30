@@ -76,6 +76,7 @@ Run through this before pointing the MCP at any production Odoo. Each item maps 
 - [ ] **`allowed_models` is strict on prod**, not `["*"]` (open mode). Open mode is for discovery / staging. Enumerate the models you actually need. See [Reference](../README.md#reference).
 - [ ] **`production = true`** on the prod instance block in `config.toml`. The setup wizard defaults to `True`; verify with `odoo-mcp setup --list`.
 - [ ] **`refuse_admin_on_production` not opted out** unless you really need it. If the MCP's API key user has admin rights, every per-user ACL scoping below the MCP is bypassed.
+- [ ] **TLS verification on.** `allow_self_signed` is refused on production. If your Odoo's certificate comes from a company-internal CA, set `ca_file = "/path/to/internal-ca.pem"` on the instance instead of disabling verification — it keeps hostname and certificate checks on and trusts only that CA.
 - [ ] **Read-only env var for demos / training** (`ODOO_MCP_READ_ONLY=1`). Set in the shell that launches Claude Desktop / Codex for that session.
 - [ ] **Disabled-tools env var** (`ODOO_MCP_DISABLE_TOOLS=...`) when a particular surface is not needed. Tools that aren't in `tools/list` cannot be called even by a hallucinating model.
 - [ ] **Audit log is being reviewed** at a real cadence. `~/.odoo-mcp/audit.jsonl`, daily rotation, 30-day retention. Pipe to your SIEM if you have one, or set a weekly calendar reminder.

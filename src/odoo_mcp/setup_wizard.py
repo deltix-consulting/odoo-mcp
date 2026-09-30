@@ -520,6 +520,7 @@ def _generate_api_key_via_password(
     username: str,
     password: str,
     key_name: str,
+    ca_file: str = "",
 ) -> tuple[str, int]:
     """Authenticate with a password, clean up stale keys, generate a fresh one.
 
@@ -574,7 +575,14 @@ def _generate_api_key_via_password(
 
     base = url.rstrip("/")
     _refuse_cleartext_password_transport(base)
-    ssl_ctx = ssl.create_default_context()
+    # ``ca_file`` (renew-key on an instance behind an internal CA) keeps
+    # verification ON against that CA. There is deliberately no
+    # allow_self_signed path here: a password must never cross an
+    # unverified connection.
+    try:
+        ssl_ctx = ssl.create_default_context(cafile=ca_file or None)
+    except (ssl.SSLError, OSError) as exc:
+        raise _KeyGenError(f"Could not load ca_file {ca_file!r}: {exc}") from exc
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(
         urllib.request.HTTPCookieProcessor(cookie_jar),
@@ -1709,7 +1717,12 @@ def _cmd_renew_key(name: str) -> int:
             return 1
         try:
             new_key, num_cleaned = _generate_api_key_via_password(
-                url, database, username, password, _mcp_key_name(name)
+                url,
+                database,
+                username,
+                password,
+                _mcp_key_name(name),
+                ca_file=os.path.expanduser(str(inst.get("ca_file") or "")),
             )
         except _KeyGenError as exc:
             print(f"  {exc}")
