@@ -99,6 +99,7 @@ def _render_instance(
     lines.append(f"timeout_seconds:         {inst.timeout_seconds}")
     lines.append(f"rate_limit_per_minute:   {inst.rate_limit_per_minute}")
     lines.append(f"allow_self_signed:       {_bool(inst.allow_self_signed)}")
+    lines.append(f"ca_file:                 {inst.ca_file or '(system trust store)'}")
 
     # allowed_models: show full list only when overridden. Open mode gets a
     # one-line summary that includes the denylist size.
