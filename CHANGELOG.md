@@ -10,6 +10,23 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **Odoo's outbound delivery queues are now write-blocklisted (closes an
+  `external_comms` bypass).** `mail.mail`, `mail.scheduled.message`,
+  `mail.message.schedule`, `sms.sms` and `snailmail.letter` were reachable
+  through the generic `odoo_create` / `odoo_write` in open mode. A row in any
+  of them is delivered by an Odoo cron with no further method call — e.g.
+  `odoo_create(model="mail.mail", values={"email_to": ..., "body_html": ...})`
+  is emailed within a minute (state defaults to `outgoing`), and
+  `mail.scheduled.message` (Odoo 18+, creatable by any internal user) posts
+  on any record's chatter with a chosen `author_id` and emails its
+  `partner_ids`. That skipped both `external_comms` opt-ins, the mandatory
+  dry-run and the recipient confirmation of `odoo_send_message`, and —
+  because `mail.mail` `_inherits` `mail.message` — also the `mail.message`
+  write-blocklist (forged chatter author, edits to existing messages). The
+  models stay readable, so a stuck or failed queue can still be inspected.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

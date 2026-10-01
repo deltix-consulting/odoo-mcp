@@ -64,7 +64,7 @@ relationship. The full per-threat narrative is in the next section.
 | Runaway resource consumption | Per-instance token-bucket rate limiter, hard cap on record count (`max_records_hard_cap`), per-call XML-RPC timeout, latency-budget warning (`ODOO_MCP_TOOL_LATENCY_BUDGET_MS`). | `tests/test_limits.py` | A single very-slow Odoo call can still block the dispatcher for `timeout_seconds`. |
 | Unauthorized method execution | No generic `execute_kw` tool. Each Odoo method is wrapped behind a named tool with its own argument schema and security shape (`message_post` is the only named wrapper, behind double opt-in). | `tests/test_allowlist.py`, `tests/test_send_message.py` | A future maintainer adds a thin wrapper without the full pipeline. Pinned by `test_rights_modification_models_all_denied`. |
 | Model-level escalation | Hardcoded `MODEL_DENYLIST` (auth, ACLs, executable content, mail credentials, payment tokens, IAP, scheduler, module metadata, raw attachments — see `allowlist.py`). Not config-overridable. | `tests/test_allowlist.py::test_denylist_contents_are_locked_in`, `tests/test_allowlist.py::test_rights_modification_models_all_denied` | A new Odoo version adds a sensitive model not yet on the denylist. |
-| Outbound mail / message abuse | `mail.message`/`mail.followers`/`mail.notification` are write-blocklisted. The narrow `odoo_send_message` tool needs both `ODOO_MCP_ENABLE_EXTERNAL_COMMS=1` AND per-instance `external_comms_enabled=true`, then goes through dry-run + token, with `subtype_xmlid` server-forced to match `message_type`. | `tests/test_send_message.py` | Both opt-ins enabled + token reuse window — closes by token single-use and unlock-window binding. |
+| Outbound mail / message abuse | `mail.message`/`mail.followers`/`mail.notification` are write-blocklisted, and so are Odoo's outbound delivery queues (`mail.mail`, `mail.scheduled.message`, `mail.message.schedule`, `sms.sms`, `snailmail.letter`) — a row in one of those is delivered by an Odoo cron with no further call, so a generic `odoo_create` there would bypass every gate below. The narrow `odoo_send_message` tool needs both `ODOO_MCP_ENABLE_EXTERNAL_COMMS=1` AND per-instance `external_comms_enabled=true`, then goes through dry-run + token, with `subtype_xmlid` server-forced to match `message_type`. | `tests/test_send_message.py`, `tests/test_outbound_queue_models.py` | Both opt-ins enabled + token reuse window — closes by token single-use and unlock-window binding. |
 | Supply-chain compromise (build artefact tampering) | GitHub Actions build provenance attestation via Sigstore, hard-fail in `release.yml`. Verified-install flow documented in [VERIFY.md](../VERIFY.md). `pip-audit` runs in CI as an advisory. | Release workflow run logs | Maintainer-machine compromise can still produce signed-but-malicious builds; tag-signing policy is an [open owner question](../ROADMAP.md). |
 
 ## Safe production setup checklist
@@ -200,7 +200,9 @@ nested writes such as a sale order with `order_line` are unaffected.
 
 **7. Read-only model enforcement.** A small hardcoded
 `MODEL_WRITE_BLOCKLIST` (`mail.message`, `mail.followers`,
-`mail.notification`) is exposed for *reading* — so Claude can answer
+`mail.notification`, `res.users`, and the outbound delivery queues
+`mail.mail`, `mail.scheduled.message`, `mail.message.schedule`,
+`sms.sms`, `snailmail.letter`) is exposed for *reading* — so Claude can answer
 "what was discussed on this lead" — but every write-path call against
 those models is refused before the prod-guard pipeline even runs. This
 closes the side door that would otherwise open when those models are

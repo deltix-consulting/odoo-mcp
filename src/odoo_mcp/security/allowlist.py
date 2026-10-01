@@ -183,6 +183,17 @@ MODEL_WRITE_BLOCKLIST: Final[frozenset[str]] = frozenset(
         # email, ...). Writes would be rights modification — refused
         # regardless of prod-guard state.
         "res.users",
+        # Outbound delivery queues. A row in one of these IS a send
+        # instruction: Odoo's own crons deliver whatever is queued, with
+        # no further method call. A plain ``odoo_create`` here would send
+        # email / SMS / post on any record's chatter while bypassing both
+        # ``external_comms`` opt-ins, the mandatory dry-run and the
+        # recipient confirmation of ``odoo_send_message``.
+        "mail.mail",  # email queue (cron, every minute); _inherits mail.message
+        "mail.scheduled.message",  # 18.0+: posted by cron; any internal user
+        "mail.message.schedule",  # 17.0+: re-sends a message's notifications
+        "sms.sms",  # SMS queue (cron)
+        "snailmail.letter",  # postal letters via IAP (cron); any internal user
     }
 )
 
