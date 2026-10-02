@@ -342,6 +342,16 @@ def test_write_blocklist_contents_are_locked_in() -> None:
         "mail.followers",
         "mail.notification",
         "res.users",
+        "mail.mail",
+        "mail.scheduled.message",
+        "mail.message.schedule",
+        "sms.sms",
+        "snailmail.letter",
+        "mail.push",
+        "mail.push.device",
+        "event.mail",
+        "event.mail.registration",
+        "event.mail.slot",
     }
     missing = required - MODEL_WRITE_BLOCKLIST
     assert not missing, f"MODEL_WRITE_BLOCKLIST is missing: {sorted(missing)}"
