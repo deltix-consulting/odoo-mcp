@@ -194,6 +194,15 @@ MODEL_WRITE_BLOCKLIST: Final[frozenset[str]] = frozenset(
         "mail.message.schedule",  # 17.0+: re-sends a message's notifications
         "sms.sms",  # SMS queue (cron)
         "snailmail.letter",  # postal letters via IAP (cron); any internal user
+        "mail.push",  # 18.0+: browser push queue (cron); payload is the notification
+        "mail.push.device",  # push subscription: its endpoint receives a partner's notifications
+        # Event communication schedulers. ``event.mail`` is creatable by any
+        # event user and mails EVERY attendee with any ``mail.template``
+        # once ``scheduled_date`` passes — a past date (large
+        # ``interval_nbr`` before the event) means the next cron run.
+        "event.mail",
+        "event.mail.registration",  # per-attendee scheduler row
+        "event.mail.slot",  # saas-18.3+: per-slot scheduler row
     }
 )
 

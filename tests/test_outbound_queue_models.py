@@ -52,6 +52,25 @@ _QUEUE_PAYLOADS: list[tuple[str, dict[str, Any]]] = [
     ("mail.message.schedule", {"mail_message_id": 5, "scheduled_datetime": "2099-01-01"}),
     ("sms.sms", {"number": "+3200000000", "body": "x"}),
     ("snailmail.letter", {"model": "account.move", "res_id": 1, "partner_id": 7}),
+    ("mail.push", {"mail_push_device_id": 1, "payload": '{"title": "x"}'}),
+    (
+        "mail.push.device",
+        {"partner_id": 3, "endpoint": "https://push.example.com/x", "keys": "{}"},
+    ),
+    # interval far before the event => scheduled_date already past => the
+    # next cron run mails every attendee with the chosen template.
+    (
+        "event.mail",
+        {
+            "event_id": 1,
+            "interval_type": "before_event",
+            "interval_nbr": 99,
+            "interval_unit": "months",
+            "template_ref": "mail.template,1",
+        },
+    ),
+    ("event.mail.registration", {"scheduler_id": 1, "registration_id": 1}),
+    ("event.mail.slot", {"scheduler_id": 1, "event_slot_id": 1}),
 ]
 _QUEUE_MODELS = [m for m, _ in _QUEUE_PAYLOADS]
 
@@ -212,8 +231,16 @@ def test_queue_models_stay_readable(model: str) -> None:
     assert model in MODEL_WRITE_BLOCKLIST
 
 
+# Newer than the generated reference (ODOO_REFERENCE_VERSION 18.0); each
+# was checked by hand against Odoo source.
+_NEWER_THAN_REFERENCE = {"event.mail.slot"}  # saas-18.3+: addons/event/models/event_mail_slot.py
+
+
 @pytest.mark.parametrize("model", _QUEUE_MODELS)
 def test_queue_model_names_are_real_odoo_models(model: str) -> None:
     """Pin the names against the generated Odoo reference so a typo can
     never leave a queue silently unblocked."""
+    if model in _NEWER_THAN_REFERENCE:
+        assert model not in ODOO_STANDARD_MODELS, "reference regenerated: drop the exemption"
+        return
     assert model in ODOO_STANDARD_MODELS
