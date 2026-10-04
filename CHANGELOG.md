@@ -10,6 +10,21 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Binary fields are no longer downloaded just to be stripped.**
+  `odoo_search_read` and `odoo_read` replace binary values with a
+  `<binary:N bytes>` placeholder unless `include_binary=true`, but the
+  client still asked Odoo for the full base64 content first. A page of
+  `ir.attachment.datas` or product `image_1920` could pull megabytes per
+  row over the wire and through the timeout budget, only to be thrown
+  away. The client now reads with Odoo's `bin_size` context unless the
+  caller opted in (the same flag the Odoo web client sends), so Odoo
+  returns a size string instead of the content. The placeholder size is
+  parsed from that string. Odoo 20.0 ignores `bin_size` and returns
+  binaries as a `{"content", "size"}` dict; the placeholder now reads
+  the size from that dict too, where it used to report `0 bytes`.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

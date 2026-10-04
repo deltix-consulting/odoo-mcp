@@ -85,10 +85,14 @@ class _FakeClient:
         limit: int,
         offset: int,
         order: str | None,
+        *,
+        bin_size: bool = True,
     ) -> list[dict[str, Any]]:
         return [dict(r) for r in self._records]
 
-    def read(self, model: str, ids: list[int], fields: list[str]) -> list[dict[str, Any]]:
+    def read(
+        self, model: str, ids: list[int], fields: list[str], *, bin_size: bool = True
+    ) -> list[dict[str, Any]]:
         return [dict(r) for r in self._records]
 
     def read_group(

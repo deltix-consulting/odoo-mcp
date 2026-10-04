@@ -46,6 +46,15 @@ logger = logging.getLogger(__name__)
 # can add a vetted opt-in, not a pass-through.
 _FROZEN_CONTEXT: Final[dict[str, Any]] = {"lang": "en_US"}
 
+# The one vetted addition to that context, set by this module and never by the
+# caller. With ``bin_size`` Odoo answers ``read`` / ``search_read`` with a size
+# string ("12.34 Kb", or "12 kB" for column-stored binaries) in place of the
+# base64 content, so an image or attachment the redactor would replace with a
+# placeholder anyway never crosses the wire. The Odoo web client sends the same
+# flag on its own form reads. Odoo 20.0 ignores it (binary reads there return a
+# ``{"content", "size"}`` dict), which is harmless.
+_BIN_SIZE_CONTEXT: Final[dict[str, Any]] = {"bin_size": True}
+
 # Default cap for the per-process L1 fields cache. A long-running MCP server
 # that touches many distinct models (an Odoo with hundreds of installed
 # modules) would otherwise grow ``_fields_cache`` without bound. 64 covers
@@ -702,11 +711,16 @@ class OdooClient:
         limit: int,
         offset: int,
         order: str | None,
+        *,
+        bin_size: bool = True,
     ) -> list[dict[str, Any]]:
+        """``bin_size=False`` returns binary fields as content; see ``_BIN_SIZE_CONTEXT``."""
         kwargs: dict[str, Any] = {"fields": fields, "limit": limit, "offset": offset}
         if order:
             kwargs["order"] = order
-        result = self._execute(model, "search_read", [domain], kwargs)
+        result = self._execute(
+            model, "search_read", [domain], kwargs, extra_context=_size_only(bin_size)
+        )
         if not isinstance(result, list):
             raise OdooRemoteError(
                 f"search_read({model!r}) returned unexpected type {type(result).__name__}"
@@ -766,8 +780,13 @@ class OdooClient:
             )
         return result
 
-    def read(self, model: str, ids: list[int], fields: list[str]) -> list[dict[str, Any]]:
-        result = self._execute(model, "read", [ids], {"fields": fields})
+    def read(
+        self, model: str, ids: list[int], fields: list[str], *, bin_size: bool = True
+    ) -> list[dict[str, Any]]:
+        """``bin_size=False`` returns binary fields as content; see ``_BIN_SIZE_CONTEXT``."""
+        result = self._execute(
+            model, "read", [ids], {"fields": fields}, extra_context=_size_only(bin_size)
+        )
         if not isinstance(result, list):
             raise OdooRemoteError(
                 f"read({model!r}) returned unexpected type {type(result).__name__}"
@@ -885,6 +904,8 @@ class OdooClient:
         method: str,
         args: list[Any],
         kwargs: dict[str, Any],
+        *,
+        extra_context: dict[str, Any] | None = None,
     ) -> Any:
         """Single chokepoint for every Odoo call.
 
@@ -901,7 +922,7 @@ class OdooClient:
         worse than failing.
         """
         merged_kwargs = dict(kwargs)
-        merged_kwargs["context"] = dict(_FROZEN_CONTEXT)
+        merged_kwargs["context"] = {**_FROZEN_CONTEXT, **(extra_context or {})}
         creds = self._get_credentials()
         retry_guard: contextlib.AbstractContextManager[None] = (
             contextlib.nullcontext()
@@ -937,3 +958,7 @@ class OdooClient:
             raise OdooTransportError(
                 f"Network error calling {model}.{method} on {self._instance.name!r}: {exc}"
             ) from exc
+
+
+def _size_only(bin_size: bool) -> dict[str, Any] | None:
+    return _BIN_SIZE_CONTEXT if bin_size else None

@@ -49,12 +49,16 @@ class _FakeClient:
         limit: int,
         offset: int,
         order: str | None,
+        *,
+        bin_size: bool = True,
     ) -> list[dict[str, Any]]:
         self.last_fields_arg = list(fields)
         # Filter to requested fields, mimicking Odoo behavior.
         return [{k: v for k, v in r.items() if k in set(fields) | {"id"}} for r in self._records]
 
-    def read(self, model: str, ids: list[int], fields: list[str]) -> list[dict[str, Any]]:
+    def read(
+        self, model: str, ids: list[int], fields: list[str], *, bin_size: bool = True
+    ) -> list[dict[str, Any]]:
         self.last_fields_arg = list(fields)
         return [
             {k: v for k, v in r.items() if k in set(fields) | {"id"}}

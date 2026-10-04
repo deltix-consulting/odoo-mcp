@@ -16,7 +16,9 @@ Two categories of redaction:
 Binary fields (as reported by ``fields_get``) are replaced with a placeholder
 unless the caller passes ``include_binary=True``. This is pure ergonomics
 rather than security, but it matters: base64 blobs blow up the model context
-in a hurry.
+in a hurry. The client asks Odoo for sizes only (``bin_size``) unless the
+caller opted in, so the placeholder is usually built from Odoo's size string
+rather than from content that was fetched and thrown away.
 """
 
 from __future__ import annotations
@@ -644,11 +646,36 @@ def redact_fields_get(
     return out
 
 
+# What Odoo returns for a binary field under ``bin_size``: ``human_size``
+# ("12.34 Kb") for attachment-stored fields, PostgreSQL ``pg_size_pretty``
+# ("12 kB") for column-stored ones. Base64 never contains a space, so the two
+# shapes cannot be confused with content.
+_BIN_SIZE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(\d+(?:\.\d+)?) (bytes|Kb|Mb|Gb|Tb|kB|MB|GB|TB|PB)"
+)
+_BIN_SIZE_UNITS: Final[dict[str, int]] = {
+    unit: 1024**power
+    for power, units in enumerate(
+        (("bytes",), ("Kb", "kB"), ("Mb", "MB"), ("Gb", "GB"), ("Tb", "TB"), ("PB",))
+    )
+    for unit in units
+}
+
+
 def _binary_size_hint(value: Any) -> int:
-    """Best-effort size of a base64-encoded binary field."""
+    """Best-effort size in bytes of a binary field value as Odoo returned it."""
     if isinstance(value, bytes):
         return len(value)
+    if isinstance(value, dict):
+        # Odoo 20.0: {"content": <base64>, "size": <int>, "filename"?: str}
+        size = value.get("size")
+        if isinstance(size, int) and not isinstance(size, bool):
+            return size
+        return _binary_size_hint(value.get("content"))
     if isinstance(value, str):
+        match = _BIN_SIZE_RE.fullmatch(value)
+        if match:
+            return int(float(match.group(1)) * _BIN_SIZE_UNITS[match.group(2)])
         # base64 is ~4/3 the size of the raw bytes
         return (len(value) * 3) // 4
     return 0
