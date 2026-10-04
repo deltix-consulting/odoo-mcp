@@ -608,13 +608,16 @@ class Dispatcher:
             instance_overrides=overrides,
             extra_redacted=rt.extra_redacted,
         )
-        records = rt.client.search_read(model, domain, fields, limit, offset, order)
+        include_binary = bool(args.get("include_binary") or False)
+        records = rt.client.search_read(
+            model, domain, fields, limit, offset, order, bin_size=not include_binary
+        )
         redacted = redact_response(
             model,
             records,
             {n: m.get("type", "") for n, m in fields_meta.items()},
             allow_sensitive=allow_sensitive,
-            include_binary=bool(args.get("include_binary") or False),
+            include_binary=include_binary,
             instance_overrides=overrides,
             extra_redacted=rt.extra_redacted,
         )
@@ -780,12 +783,13 @@ class Dispatcher:
         fields, smart = self._resolve_read_fields(
             rt, model, fields_meta, known, args, allow_sensitive
         )
+        include_binary = bool(args.get("include_binary") or False)
         redacted = redact_response(
             model,
-            rt.client.read(model, ids, fields),
+            rt.client.read(model, ids, fields, bin_size=not include_binary),
             {n: m.get("type", "") for n, m in fields_meta.items()},
             allow_sensitive=allow_sensitive,
-            include_binary=bool(args.get("include_binary") or False),
+            include_binary=include_binary,
             instance_overrides=overrides,
             extra_redacted=rt.extra_redacted,
         )

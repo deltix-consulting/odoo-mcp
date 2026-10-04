@@ -141,7 +141,10 @@ enforced:
   without opt-in, because grouping by a field effectively reveals its
   distinct values.
 - Binary fields are replaced with a `<binary:N bytes>` placeholder
-  unless `include_binary=true`.
+  unless `include_binary=true`. Without that opt-in the client reads
+  with Odoo's `bin_size` context, so Odoo returns the size and the
+  content never leaves the server (Odoo 17.0 to saas-19.4; 20.0 ignores
+  the flag and the content is still stripped here).
 - **Filtering and ordering obey the same policy as reading.** A field
   you cannot read cannot be used as a `domain` filter or an `order`
   term either. Always-redacted fields are refused outright; default-

@@ -132,6 +132,8 @@ class _FakeClient:
         limit: int,
         offset: int,
         order: str | None,
+        *,
+        bin_size: bool = True,
     ) -> list[dict[str, Any]]:
         self.last_fields = list(fields)
         return [{"id": 1, **{f: f"val_{f}" for f in fields if f != "id"}}]
