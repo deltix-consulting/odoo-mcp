@@ -23,6 +23,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from odoo_mcp.audit import AuditLog
 from odoo_mcp.client import OdooClient
 from odoo_mcp.config import AppConfig, Defaults, InstanceConfig
@@ -87,7 +89,9 @@ class _FakeClient:
         return True
 
 
-def _build(tmp_path: Path) -> tuple[Dispatcher, _FakeClient]:
+def _build(
+    tmp_path: Path, allowed_models: frozenset[str] = frozenset({ALLOWLIST_WILDCARD})
+) -> tuple[Dispatcher, _FakeClient]:
     cfg = InstanceConfig(
         name="dev",
         url="https://example.odoo.com",
@@ -99,7 +103,7 @@ def _build(tmp_path: Path) -> tuple[Dispatcher, _FakeClient]:
         max_records_hard_cap=500,
         rate_limit_per_minute=300,
         allow_self_signed=False,
-        allowed_models=frozenset({ALLOWLIST_WILDCARD}),
+        allowed_models=allowed_models,
     )
     creds = Credentials(instance_name=cfg.name, username="u", _api_key="k" * 10)
     real = OdooClient(cfg, credentials=creds)
@@ -284,4 +288,94 @@ def test_m2m_set_command_rejects_non_int_ids(tmp_path: Path) -> None:
     )
     assert payload["ok"] is False
     assert payload["error_code"] == "field_policy"
+    assert fake.written == []
+
+
+# --- a falsy x2many value is Command.clear(), not a no-op ------------------
+#
+# Odoo's x2many ``write_batch`` rewrites ``False`` / ``None`` to
+# ``[Command.clear()]`` (17.0 to 20.0). On a one2many with a cascading inverse
+# (``sale.order.line.order_id``) that deletes every line; otherwise it writes
+# the inverse to False on each related record. The gate used to ``continue``
+# on a falsy value, so it skipped the target-model checks that refuse the
+# explicit ``[(5,)]`` to the very same field.
+
+
+def _write(disp: Dispatcher, model: str, values: dict[str, Any]) -> dict[str, Any]:
+    return _call(
+        disp,
+        "odoo_write",
+        {"instance": "dev", "model": model, "ids": [1], "values": values, "dry_run": False},
+    )
+
+
+@pytest.mark.parametrize("falsy", [False, None])
+def test_falsy_x2many_into_write_blocklisted_model_refused(tmp_path: Path, falsy: Any) -> None:
+    # mail.message is write-blocklisted: clearing message_ids rewrites res_id
+    # on every chatter message of the record.
+    disp, fake = _build(tmp_path)
+    payload = _write(disp, "crm.lead", {"message_ids": falsy})
+    assert payload["ok"] is False
+    assert payload["error_code"] == "model_not_allowed"
+    assert fake.written == []
+
+
+@pytest.mark.parametrize("falsy", [False, None])
+def test_falsy_x2many_into_denylisted_model_refused(tmp_path: Path, falsy: Any) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _write(disp, "crm.lead", {"server_action_ids": falsy})
+    assert payload["ok"] is False
+    assert payload["error_code"] == "model_not_allowed"
+    assert fake.written == []
+
+
+@pytest.mark.parametrize("value", [False, None, [(5,)], []])
+def test_clear_outside_allowlist_refused_in_every_spelling(tmp_path: Path, value: Any) -> None:
+    # Allowlist names sale.order only. order_line=False would delete every
+    # sale.order.line of the order (order_id is ondelete='cascade') — a model
+    # the operator never allowed. All four spellings must refuse alike.
+    disp, fake = _build(tmp_path, allowed_models=frozenset({"sale.order"}))
+    payload = _write(disp, "sale.order", {"order_line": value})
+    assert payload["ok"] is False
+    assert payload["error_code"] == "model_not_allowed"
+    assert fake.written == []
+
+
+def test_falsy_x2many_with_no_relation_metadata_refused(tmp_path: Path) -> None:
+    # Same fail-closed posture as an explicit command list.
+    disp, fake = _build(tmp_path)
+    _META["sale.order"]["mystery_ids"] = {"type": "one2many"}
+    try:
+        payload = _write(disp, "sale.order", {"mystery_ids": False})
+    finally:
+        del _META["sale.order"]["mystery_ids"]
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert fake.written == []
+
+
+@pytest.mark.parametrize("falsy", [False, None])
+def test_legit_falsy_clear_allowed_and_sent_unchanged(tmp_path: Path, falsy: Any) -> None:
+    # Clearing tags on an allowed, writable target still works, and the value
+    # reaches Odoo exactly as the caller sent it (the payload digest and the
+    # dry-run preview were computed over it).
+    disp, fake = _build(tmp_path)
+    payload = _write(disp, "sale.order", {"tag_ids": falsy})
+    assert payload["ok"] is True
+    assert fake.written == [("sale.order", [1], {"tag_ids": falsy})]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        [{"name": "x"}],  # Odoo reads a bare dict as a CREATE (convert_to_cache)
+        [1, 2],  # Odoo reads a list of bare ids as Command.set
+    ],
+)
+def test_non_tuple_x2many_shapes_refused(tmp_path: Path, value: Any) -> None:
+    # Both shapes are commands to Odoo; deltix refuses them rather than
+    # guessing which command they become.
+    disp, fake = _build(tmp_path)
+    payload = _write(disp, "crm.lead", {"message_ids": value})
+    assert payload["ok"] is False
     assert fake.written == []
