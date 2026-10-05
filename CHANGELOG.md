@@ -10,6 +10,18 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **A `False` / `None` x2many value now clears the same gates as `[(5,)]`.**
+  Odoo's x2many `write_batch` rewrites a falsy value to `Command.clear()`
+  (17.0 to 20.0). On a one2many whose inverse is `ondelete='cascade'` that
+  deletes every related line, and on any other x2many it unlinks them all.
+  The relational gate skipped falsy values, so the target model was never
+  checked. `odoo_write(sale.order, order_line=False)` deleted every order
+  line with only `sale.order` allowlisted, and `message_ids=False` reached
+  the write-blocklisted `mail.message`, while the explicit `[(5,)]` to the
+  same field was refused. The value is still sent to Odoo unchanged.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

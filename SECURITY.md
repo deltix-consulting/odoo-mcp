@@ -195,8 +195,12 @@ let a write reach a model the caller can't name — forging a
 `res.groups`. So every command's target model runs through the same
 denylist + allowlist + write-blocklist checks the top-level model
 does, and nested value dicts recurse through the always-redacted /
-default-hidden field policy (with bounded nesting depth). Legitimate
-nested writes such as a sale order with `order_line` are unaffected.
+default-hidden field policy (with bounded nesting depth). A bare
+`False` / `None` on an x2many counts as a command too: Odoo rewrites it
+to `Command.clear()`, which deletes every line of a one2many whose
+inverse cascades, so it clears the same gates as an explicit `[(5,)]`.
+Legitimate nested writes such as a sale order with `order_line` are
+unaffected.
 
 **7. Read-only model enforcement.** A small hardcoded
 `MODEL_WRITE_BLOCKLIST` (`mail.message`, `mail.followers`,

@@ -868,7 +868,13 @@ class Dispatcher:
                 continue
             # one2many / many2many: a list of Odoo command tuples.
             if value is None or value is False:
-                continue
+                # Not a no-op: Odoo's x2many ``write_batch`` rewrites a falsy
+                # value to ``[Command.clear()]`` (17.0 to 20.0). On a one2many
+                # whose inverse is ``ondelete='cascade'`` that DELETES every
+                # related line; otherwise it writes the inverse to False on
+                # each one. So it must clear the same target-model gates as
+                # an explicit ``[(5,)]`` — validated as that, sent unchanged.
+                value = [(5,)]
             if not isinstance(value, list):
                 raise FieldPolicyError(
                     f"Field {name!r} on {model!r} is a {ttype} and must be a list of Odoo "
