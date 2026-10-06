@@ -10,6 +10,29 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_run_document_action` no longer says "the action did NOT
+  complete" when Odoo finished it and then returned something to show.**
+  Any dict an Odoo method returned was read as "a follow-up wizard
+  stopped the action", but Odoo also returns an action AFTER the work:
+  `stock.picking.button_validate` returns a `do_multi_print` client
+  action (picking type auto-prints the delivery slip) or the reception
+  report after `_action_done` (17.0-20.0), and `account.move.action_post`
+  returns the `account.autopost.bills.wizard` dialog after `_post` for an
+  imported vendor bill (18.0-20.0). The commit said `committed: false`
+  and "finish it in the Odoo UI" for a validated picking or a posted
+  bill. Now a non-dialog action counts as done, and a dialog is judged
+  per record by whether its `state` moved (the commit reads the states
+  before the action). The response carries `odoo_returned_action`
+  (type / res_model / tag / target only, never its context),
+  `states_before` / `states_after`, and `completed_record_ids` /
+  `pending_record_ids` for a dialog. With no state to compare, the old
+  answer stands, reworded as unverified. The audit row records
+  `committed` and the returned action. The `sale.order` cancel wizard
+  is now auto-completed only when Odoo returned that wizard, not on any
+  dict.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

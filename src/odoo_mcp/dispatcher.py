@@ -1633,17 +1633,29 @@ class Dispatcher:
             return preview
 
         self._consume_token_on_prod(ctx, args)
+        # Read the states BEFORE the action. Odoo's return value cannot
+        # say whether the work ran: a dialog comes back both BEFORE the
+        # work (stock.backorder.confirmation) and AFTER it
+        # (account.autopost.bills.wizard, returned by action_post once
+        # the bill is posted). The records' state can. Best-effort,
+        # id + state only, like the preview's ``current_states``.
+        states_before = self._peek_states(rt, model, record_ids)
         result = rt.client.call_document_action(model, method, record_ids)
         # Some Odoo methods (notably stock.picking.button_validate and
         # sale.order.action_cancel when there are linked pickings)
         # return a dict describing a follow-up wizard instead of
         # completing. For a SPECIFIC, audited set of these we drive
-        # the wizard ourselves (see :data:`_WIZARD_COMPLETIONS`); for
-        # everything else we surface the same "needs manual completion"
-        # signal the agent's been seeing.
+        # the wizard ourselves (see :data:`_WIZARD_COMPLETIONS`) — but
+        # only when the dict names THAT wizard, never on any dict.
         wizard_spec = resolve_wizard_completion(model, action)
         wizard_completion: dict[str, Any] | None = None
-        if isinstance(result, dict) and wizard_spec is not None:
+        returned = _returned_action_summary(result)
+        outcome: dict[str, Any] = {}
+        if (
+            returned is not None
+            and wizard_spec is not None
+            and returned.get("res_model") == wizard_spec.wizard_model
+        ):
             wizard_completion = self._complete_returned_wizard(rt, wizard_spec, record_ids)
             # If every record's wizard completed without itself
             # returning another wizard, the logical action succeeded.
@@ -1651,13 +1663,21 @@ class Dispatcher:
                 step.get("wizard_returned_wizard") for step in wizard_completion["steps"]
             )
             needs_manual = still_pending
+        elif returned is None:
+            needs_manual = False
         else:
-            needs_manual = isinstance(result, dict)
+            outcome = self._judge_returned_action(rt, model, record_ids, returned, states_before)
+            needs_manual = bool(outcome.get("pending_record_ids")) or outcome.get(
+                "unverified", False
+            )
 
         audit_details: dict[str, Any] = {"action": action, "id_count": len(record_ids)}
         if wizard_completion is not None:
             audit_details["wizard_model"] = wizard_spec.wizard_model  # type: ignore[union-attr]
             audit_details["wizard_completed"] = not needs_manual
+        if returned is not None and wizard_completion is None:
+            audit_details["odoo_returned_action"] = returned
+            audit_details["committed"] = not needs_manual
         self._audit_ok(ctx, audit_details, args)
 
         out: dict[str, Any] = {
@@ -1670,15 +1690,103 @@ class Dispatcher:
         }
         if wizard_completion is not None:
             out["wizard"] = wizard_completion
+        if returned is not None and wizard_completion is None:
+            out["odoo_returned_action"] = returned
+            for key in ("states_before", "states_after", "completed_record_ids"):
+                if outcome.get(key):
+                    out[key] = outcome[key]
         if needs_manual:
             out["needs_manual_completion"] = True
-            out["note"] = (
+            if outcome.get("pending_record_ids"):
+                out["pending_record_ids"] = outcome["pending_record_ids"]
+            out["note"] = outcome.get("note") or (
                 "Odoo returned a follow-up wizard (e.g. backorder or "
                 "immediate-transfer confirmation) we don't auto-complete. "
                 "The action did NOT fully complete — finish it in the Odoo UI."
             )
+        elif outcome.get("note"):
+            out["note"] = outcome["note"]
         self._add_commits_remaining(out, ctx)
         return out
+
+    def _judge_returned_action(
+        self,
+        rt: InstanceRuntime,
+        model: str,
+        record_ids: list[int],
+        returned: dict[str, Any],
+        states_before: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Decide whether a document action that returned an Odoo action ran.
+
+        Odoo methods return an action both when they STOP for input and
+        when they FINISHED and want the UI to show something next:
+
+        - ``stock.picking.button_validate`` returns a ``do_multi_print``
+          client action (the picking type auto-prints the delivery slip)
+          or the reception report AFTER ``_action_done`` — 17.0 to 20.0.
+        - ``account.move.action_post`` returns the
+          ``account.autopost.bills.wizard`` dialog AFTER ``_post`` for an
+          imported vendor bill — 18.0 to 20.0.
+
+        Telling the agent "the action did NOT complete" in those cases
+        invites it (or the operator) to run a posting / validation again.
+        So: a returned action that is not a dialog is navigation after
+        the work and counts as done. A dialog (or an ``act_window``
+        without an explicit non-dialog target) is judged per record by
+        whether its ``state`` moved. With no state to compare, the old
+        "not completed" answer stands, worded as unverified.
+        """
+        if not _is_dialog_action(returned):
+            return {
+                "note": (
+                    "Odoo ran the action and then returned a follow-up "
+                    f"{returned.get('type', 'action')} (e.g. a print or a report "
+                    "to show) that needs no completion. Do NOT run the action again."
+                )
+            }
+        states_after = self._peek_states(rt, model, record_ids) if states_before else []
+        before = {row.get("id"): row.get("state") for row in states_before}
+        after = {row.get("id"): row.get("state") for row in states_after}
+        if not before or set(before) != set(after):
+            return {
+                "unverified": True,
+                "note": (
+                    "Odoo returned a dialog "
+                    f"({returned.get('res_model') or 'unknown model'}) we don't "
+                    "auto-complete, and the records' state could not be compared "
+                    "to tell whether the action ran first. Check the records "
+                    "before running it again; finish the dialog in the Odoo UI."
+                ),
+            }
+        completed = [rid for rid in record_ids if after.get(rid) != before.get(rid)]
+        pending = [rid for rid in record_ids if after.get(rid) == before.get(rid)]
+        outcome: dict[str, Any] = {
+            "states_before": states_before,
+            "states_after": states_after,
+            "completed_record_ids": completed,
+            "pending_record_ids": pending,
+        }
+        dialog = returned.get("res_model") or "a dialog"
+        if not pending:
+            outcome["note"] = (
+                f"Odoo ran the action (every record's state moved) and then "
+                f"offered an optional dialog ({dialog}). The action is done — "
+                "do NOT run it again."
+            )
+        elif completed:
+            outcome["note"] = (
+                f"Odoo returned a dialog ({dialog}). The action ran on "
+                "completed_record_ids (their state moved) and did NOT run on "
+                "pending_record_ids — finish those in the Odoo UI."
+            )
+        else:
+            outcome["note"] = (
+                f"Odoo returned a follow-up wizard ({dialog}) we don't "
+                "auto-complete, and no record's state moved. The action did "
+                "NOT complete — finish it in the Odoo UI."
+            )
+        return outcome
 
     def _complete_returned_wizard(
         self,
@@ -2283,6 +2391,41 @@ def _strip_extra_fields(
     keep: set[str] = set(requested)
     keep.add("id")
     return [{k: v for k, v in rec.items() if k in keep} for rec in records]
+
+
+# Keys of a returned Odoo action that say WHAT it is. Everything else
+# (context, domain, data, report payloads) is dropped: it can carry
+# record values, and the agent needs the kind, not the content.
+_RETURNED_ACTION_KEYS = ("type", "res_model", "tag", "target", "report_name")
+
+# ``act_window`` targets that open a page instead of a dialog. Odoo's
+# default target is ``current``, but a missing target is treated as a
+# possible dialog here: the state check decides then, never the shape.
+_NON_DIALOG_TARGETS = frozenset({"current", "main", "fullscreen", "self", "inline"})
+
+
+def _returned_action_summary(result: Any) -> dict[str, Any] | None:
+    """The identifying keys of an action dict an Odoo method returned.
+
+    ``None`` when the method did not return a dict (``True`` / ``False``
+    / ``None`` — the plain "done" answers).
+    """
+    if not isinstance(result, dict):
+        return None
+    return {k: result[k] for k in _RETURNED_ACTION_KEYS if isinstance(result.get(k), str)}
+
+
+def _is_dialog_action(returned: dict[str, Any]) -> bool:
+    """True when ``returned`` is, or may be, a dialog asking for input.
+
+    Only a window action can ask for input; a client action
+    (``do_multi_print``, ``reload``), a report or a URL is something to
+    show after the work. A dict without a ``type`` stays "maybe".
+    """
+    kind = returned.get("type")
+    if kind is None or kind == "ir.actions.act_window":
+        return returned.get("target") not in _NON_DIALOG_TARGETS
+    return False
 
 
 _DRY_RUN_NOTE = (

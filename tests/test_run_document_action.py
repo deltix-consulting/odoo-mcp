@@ -568,3 +568,155 @@ def test_id_count_cap_enforced(tmp_path: Path) -> None:
     )
     assert payload["ok"] is False
     assert fake.action_calls == []
+
+
+# ---------------------------------------------------------------------------
+# An action returned AFTER the work is not "did not complete"
+# ---------------------------------------------------------------------------
+#
+# Odoo returns an action both when a method STOPS for input (backorder
+# wizard) and when it FINISHED and wants the UI to show something next:
+# stock.picking.button_validate returns a ``do_multi_print`` client action
+# after ``_action_done`` when the picking type auto-prints (17.0-20.0), and
+# account.move.action_post returns the ``account.autopost.bills.wizard``
+# dialog after ``_post`` for an imported vendor bill (18.0-20.0). Saying
+# "the action did NOT fully complete" there invites a second posting.
+# Pointer: pantalytics/odoo-mcp-pro #157 (an ``act_url`` returned after a
+# module upgrade was reported as "nothing was changed").
+
+
+class _MovingStateClient(_FakeClient):
+    """The action moves each record in ``moves`` to its new state."""
+
+    def __init__(self, *, action_return: Any, moves: dict[int, str], has_state: bool = True):
+        super().__init__(action_return=action_return)
+        self._moves = moves
+        self._has_state = has_state
+        self.reads: list[list[int]] = []
+
+    def fields_get(self, model: str, *, use_cache: bool = True) -> dict[str, dict[str, Any]]:
+        if not self._has_state:
+            return {"id": {"type": "integer"}}
+        return super().fields_get(model, use_cache=use_cache)
+
+    def read(self, model: str, ids: list[int], fields: list[str]) -> list[dict[str, Any]]:
+        self.reads.append(list(ids))
+        return super().read(model, ids, fields)
+
+    def call_document_action(self, model: str, method: str, record_ids: list[int]) -> Any:
+        self._states.update(self._moves)
+        return super().call_document_action(model, method, record_ids)
+
+
+def _commit(app: OdooMcpApp, model: str, action: str, ids: list[int]) -> dict[str, Any]:
+    return _call(
+        Dispatcher(app),
+        {"instance": "dev", "model": model, "record_ids": ids, "action": action, "dry_run": False},
+    )
+
+
+_AUTOPRINT = {
+    "type": "ir.actions.client",
+    "tag": "do_multi_print",
+    "params": {"reports": [{"type": "ir.actions.report", "data": {"secret": "x"}}]},
+}
+_AUTOPOST_DIALOG = {
+    "name": "Autopost Bills",
+    "type": "ir.actions.act_window",
+    "res_model": "account.autopost.bills.wizard",
+    "res_id": 7,
+    "views": [[False, "form"]],
+    "target": "new",
+    "context": {"partner_email": "bob@example.com"},
+}
+
+
+def test_print_action_after_validate_is_committed(tmp_path: Path) -> None:
+    fake = _MovingStateClient(action_return=_AUTOPRINT, moves={5: "done"})
+    payload = _commit(_build_with_client(tmp_path, fake), "stock.picking", "validate", [5])
+    assert payload["ok"] is True
+    assert payload["committed"] is True
+    assert "needs_manual_completion" not in payload
+    assert "not run the action again" in payload["note"].lower()
+    # The kind of action, never its payload.
+    assert payload["odoo_returned_action"] == {"type": "ir.actions.client", "tag": "do_multi_print"}
+    assert "secret" not in json.dumps(payload)
+
+
+def test_autopost_dialog_after_post_is_committed_by_state(tmp_path: Path) -> None:
+    fake = _MovingStateClient(action_return=_AUTOPOST_DIALOG, moves={41: "posted"})
+    app = _build_with_client(tmp_path, fake)
+    payload = _commit(app, "account.move", "post", [41])
+    assert payload["committed"] is True
+    assert "needs_manual_completion" not in payload
+    assert payload["states_before"] == [{"id": 41, "state": "draft"}]
+    assert payload["states_after"] == [{"id": 41, "state": "posted"}]
+    assert payload["completed_record_ids"] == [41]
+    assert "account.autopost.bills.wizard" in payload["note"]
+    assert "do not run it again" in payload["note"].lower()
+    assert payload["odoo_returned_action"]["target"] == "new"
+    # The dialog's context (record data) reaches neither the agent nor the log.
+    assert "bob@example.com" not in json.dumps(payload)
+    audit_text = (tmp_path / "audit.jsonl").read_text()
+    assert "bob@example.com" not in audit_text
+    commit = [json.loads(line) for line in audit_text.splitlines()][-1]
+    assert commit["details"]["committed"] is True
+    assert commit["details"]["odoo_returned_action"]["res_model"] == (
+        "account.autopost.bills.wizard"
+    )
+
+
+def test_dialog_before_the_work_still_needs_manual(tmp_path: Path) -> None:
+    backorder = {
+        "type": "ir.actions.act_window",
+        "res_model": "stock.backorder.confirmation",
+        "target": "new",
+    }
+    fake = _MovingStateClient(action_return=backorder, moves={})
+    payload = _commit(_build_with_client(tmp_path, fake), "stock.picking", "validate", [5])
+    assert payload["committed"] is False
+    assert payload["needs_manual_completion"] is True
+    assert payload["pending_record_ids"] == [5]
+    assert "stock.backorder.confirmation" in payload["note"]
+    assert "did not complete" in payload["note"].lower()
+
+
+def test_dialog_with_some_records_moved_names_both_sets(tmp_path: Path) -> None:
+    dialog = {"type": "ir.actions.act_window", "res_model": "x.wizard", "target": "new"}
+    fake = _MovingStateClient(action_return=dialog, moves={1: "posted"})
+    payload = _commit(_build_with_client(tmp_path, fake), "account.move", "post", [1, 2])
+    assert payload["committed"] is False
+    assert payload["completed_record_ids"] == [1]
+    assert payload["pending_record_ids"] == [2]
+
+
+def test_dialog_without_state_is_reported_as_unverified(tmp_path: Path) -> None:
+    dialog = {"type": "ir.actions.act_window", "res_model": "x.wizard", "target": "new"}
+    fake = _MovingStateClient(action_return=dialog, moves={}, has_state=False)
+    payload = _commit(_build_with_client(tmp_path, fake), "account.move", "post", [3])
+    assert payload["committed"] is False
+    assert payload["needs_manual_completion"] is True
+    assert "could not be compared" in payload["note"]
+    assert "states_before" not in payload
+
+
+def test_plain_true_return_reads_states_once_and_reports_nothing_new(tmp_path: Path) -> None:
+    fake = _MovingStateClient(action_return=True, moves={9: "sale"})
+    payload = _commit(_build_with_client(tmp_path, fake), "sale.order", "confirm", [9])
+    assert payload["committed"] is True
+    assert "odoo_returned_action" not in payload
+    assert "note" not in payload
+    assert fake.reads == [[9]]  # the before-read only
+
+
+def test_wizard_completion_only_for_the_wizard_it_names(tmp_path: Path) -> None:
+    """sale.order.cancel is auto-completed only when Odoo returned THAT
+    wizard. Any other action dict must not create a sale.order.cancel row
+    on an order that may already be cancelled."""
+    fake = _CancelWizardFakeClient()
+    fake._next_action_returns = [{"type": "ir.actions.client", "tag": "reload"}]
+    payload = _commit(_build_with_client(tmp_path, fake), "sale.order", "cancel", [42])
+    assert fake.create_calls == []
+    assert "wizard" not in payload
+    assert payload["committed"] is True
+    assert payload["odoo_returned_action"] == {"type": "ir.actions.client", "tag": "reload"}
