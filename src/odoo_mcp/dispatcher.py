@@ -1632,14 +1632,16 @@ class Dispatcher:
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
-        self._consume_token_on_prod(ctx, args)
         # Read the states BEFORE the action. Odoo's return value cannot
         # say whether the work ran: a dialog comes back both BEFORE the
         # work (stock.backorder.confirmation) and AFTER it
         # (account.autopost.bills.wizard, returned by action_post once
         # the bill is posted). The records' state can. Best-effort,
-        # id + state only, like the preview's ``current_states``.
+        # id + state only, like the preview's ``current_states``. Read
+        # before the token is consumed, so the action stays the first
+        # RPC after the commit is charged.
         states_before = self._peek_states(rt, model, record_ids)
+        self._consume_token_on_prod(ctx, args)
         result = rt.client.call_document_action(model, method, record_ids)
         # Some Odoo methods (notably stock.picking.button_validate and
         # sale.order.action_cancel when there are linked pickings)
