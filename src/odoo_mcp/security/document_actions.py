@@ -80,16 +80,19 @@ _DOCUMENT_ACTIONS: Final[dict[tuple[str, str], str]] = {
     # to "open". A real accounting event; the operator's dry-run review
     # is the safety net.
     ("account.payment", "cancel"): "action_cancel",
-    # hr.leave.action_cancel — user-side withdraw of an own time-off
-    # request. Distinct from ``action_refuse`` (manager-side rejection),
-    # which is deliberately NOT exposed — refusing someone else's leave
-    # is an HR decision that should go through the UI, not an agent.
-    ("hr.leave", "cancel"): "action_cancel",
-    # hr.expense.sheet.action_cancel — cancels an entire expense
-    # report. We intentionally do NOT expose individual hr.expense
-    # cancel: Odoo manages expense state through the parent sheet, and
-    # a per-line cancel would put the sheet in an inconsistent state.
-    ("hr.expense.sheet", "cancel"): "action_cancel",
+    # NOT mapped, although v0.20.0 shipped both rows (verified against
+    # Odoo source, 17.0 to 20.0):
+    #
+    # - hr.leave.action_cancel does no work. It returns the
+    #   ``hr.holidays.cancel.leave`` dialog (target new) BEFORE anything
+    #   changes, after ``ensure_one()``, so a multi-record call faults.
+    #   The dialog's ``reason`` is required on 17.0 and is the
+    #   employee's own words, so it is not a wizard we can complete
+    #   without inventing them. Every commit was an operator approval
+    #   spent on a no-op.
+    # - hr.expense.sheet has no ``action_cancel`` on any release
+    #   (15.0 to 18.0), and the model itself is gone from 19.0 on. Every
+    #   commit faulted after the operator approved it.
 }
 
 # Action verbs the tool's schema advertises. Derived from the map so the

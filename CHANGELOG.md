@@ -10,6 +10,29 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_run_document_action` no longer maps two cancel actions that
+  Odoo cannot run.** v0.20.0 added both, and neither could ever do the
+  work. Checked against Odoo source, 15.0 to 20.0:
+
+  - `hr.leave` *cancel* (`action_cancel`) changes nothing. It returns
+    the `hr.holidays.cancel.leave` dialog before any work, and it calls
+    `ensure_one()`, so a call on several records faults. The dialog
+    needs the employee's own `reason` (required on 17.0). An agent
+    should not write that, so the wizard is not auto-completed either.
+    Every commit was an operator approval spent on a no-op that came
+    back as "needs manual completion".
+  - `hr.expense.sheet` *cancel* (`action_cancel`) faulted after the
+    operator approved it. The model has no `action_cancel` on any
+    release, and from 19.0 on (Odoo Online `saas-19.x` included) the
+    model itself is gone.
+
+  Both pairs are now refused at the dry run, before a confirmation
+  token is issued or any RPC is made. A test pins them as not mapped:
+  adding one back needs the Odoo source that shows the method does the
+  work on 17.0+.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
