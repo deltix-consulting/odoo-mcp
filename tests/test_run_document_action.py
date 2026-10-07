@@ -124,8 +124,6 @@ def test_map_resolves_cancel_pairs() -> None:
     # v0.20.0 additions:
     assert resolve_document_action("mrp.production", "cancel") == "action_cancel"
     assert resolve_document_action("account.payment", "cancel") == "action_cancel"
-    assert resolve_document_action("hr.leave", "cancel") == "action_cancel"
-    assert resolve_document_action("hr.expense.sheet", "cancel") == "action_cancel"
 
 
 def test_deliberately_excluded_cancel_targets() -> None:
@@ -133,23 +131,60 @@ def test_deliberately_excluded_cancel_targets() -> None:
     PR has to delete this test (and explain why) instead of slipping
     past code review.
 
-    - ``hr.leave`` cancel is the user-side withdraw. ``action_refuse``
-      is the manager-side rejection — that's an HR decision, not an
-      agent action.
+    - ``hr.leave`` ``action_refuse`` is the manager-side rejection —
+      that's an HR decision, not an agent action.
     - ``hr.expense`` (singular) is a single line on a sheet. Cancelling
-      a line out of band would leave the parent sheet inconsistent;
-      callers must cancel the sheet.
+      a line out of band would leave the parent sheet inconsistent.
     """
     from odoo_mcp.errors import OperationNotAllowedError
 
-    # hr.leave does NOT expose refuse — only the user's own cancel.
+    # hr.leave does NOT expose refuse.
     with pytest.raises(OperationNotAllowedError):
         resolve_document_action("hr.leave", "refuse")
 
-    # hr.expense (singular) is intentionally not in the map; callers
-    # cancel via hr.expense.sheet.
+    # hr.expense (singular) is intentionally not in the map either.
     with pytest.raises(OperationNotAllowedError):
         resolve_document_action("hr.expense", "cancel")
+
+
+@pytest.mark.parametrize(
+    ("model", "why"),
+    [
+        # hr.leave.action_cancel returns the hr.holidays.cancel.leave
+        # dialog BEFORE any work (17.0 to 20.0), after ensure_one(); the
+        # dialog needs the employee's own reason.
+        ("hr.leave", "dialog before the work"),
+        # hr.expense.sheet has no action_cancel on 15.0 to 18.0, and the
+        # model is gone from 19.0 on.
+        ("hr.expense.sheet", "no such method"),
+    ],
+)
+def test_cancel_rows_odoo_cannot_run_are_not_mapped(model: str, why: str) -> None:
+    """v0.20.0 mapped these two, and no commit could ever do the work.
+
+    Re-adding one needs the Odoo source that shows the method exists
+    and does the work on 17.0+, not a deletion of this test.
+    """
+    from odoo_mcp.errors import OperationNotAllowedError
+
+    with pytest.raises(OperationNotAllowedError):
+        resolve_document_action(model, "cancel")
+    assert f"{model}:cancel" not in supported_pairs(), why
+
+
+@pytest.mark.parametrize("model", ["hr.leave", "hr.expense.sheet"])
+def test_dead_cancel_row_refused_before_a_token_or_rpc(tmp_path: Path, model: str) -> None:
+    """The dry run must refuse, so no operator approves a no-op or a fault."""
+    app, fake = _build(tmp_path, production=True)
+    payload = _call(
+        Dispatcher(app),
+        {"instance": "dev", "model": model, "record_ids": [7], "action": "cancel"},
+    )
+    assert payload["ok"] is False
+    assert f"{model}:cancel" not in payload["error"]
+    assert "Supported" in payload["error"]
+    assert "confirmation_token" not in payload
+    assert fake.action_calls == []
 
 
 def test_map_rejects_unknown_pair() -> None:
