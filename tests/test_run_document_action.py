@@ -469,6 +469,131 @@ def test_wizard_chained_wizard_marks_still_pending(tmp_path: Path) -> None:
     assert step["wizard_returned_wizard"] is True
 
 
+class _Odoo18SaleCancelFakeClient(_CancelWizardFakeClient):
+    """``sale.order.action_cancel`` as Odoo 16.0 to 18.0 runs it.
+
+    ``_show_cancel_wizard()`` is true for any order that is not a
+    draft (a sent quotation too), and then ``action_cancel`` calls
+    ``self.ensure_one()`` before it returns the ``sale.order.cancel``
+    wizard. So a batch with a non-draft order raises "Expected
+    singleton"; a single non-draft order returns the wizard; drafts
+    are cancelled directly. ``refuse`` ids raise like a locked order.
+    """
+
+    def __init__(self, states: dict[int, str], refuse: frozenset[int] = frozenset()) -> None:
+        super().__init__()
+        self._states = dict(states)
+        self._refuse = refuse
+        self._wizard_order: dict[int, int] = {}
+
+    def call_document_action(self, model: str, method: str, record_ids: list[int]) -> Any:
+        from odoo_mcp.errors import OdooRemoteError
+
+        self.action_calls.append((model, method, list(record_ids)))
+        if model == "sale.order.cancel":
+            for wid in record_ids:
+                self._states[self._wizard_order[wid]] = "cancel"
+            return True
+        if self._refuse & set(record_ids):
+            raise OdooRemoteError(
+                "UserError: You cannot cancel a locked order. Please unlock it first.",
+                server_text=True,
+            )
+        if any(self._states.get(i, "draft") != "draft" for i in record_ids):
+            if len(record_ids) > 1:
+                raise OdooRemoteError(
+                    f"ValueError: Expected singleton: sale.order{tuple(record_ids)}",
+                    server_text=True,
+                )
+            return {"type": "ir.actions.act_window", "res_model": "sale.order.cancel"}
+        for i in record_ids:
+            self._states[i] = "cancel"
+        return True
+
+    def create(self, model: str, values: dict[str, Any]) -> int:
+        wid = super().create(model, values)
+        self._wizard_order[wid] = values["order_id"]
+        return wid
+
+
+def _cancel_orders(tmp_path: Path, fake: _FakeClient, ids: list[int]) -> dict[str, Any]:
+    return _call(
+        Dispatcher(_build_with_client(tmp_path, fake)),
+        {
+            "instance": "dev",
+            "model": "sale.order",
+            "record_ids": ids,
+            "action": "cancel",
+            "dry_run": False,
+        },
+    )
+
+
+def test_sale_order_cancel_several_sent_quotations(tmp_path: Path) -> None:
+    """Two sent quotations in one call. On Odoo 16-18 the batch call
+    raised "Expected singleton" and cancelled neither: the wizard
+    completion only ever worked for one record."""
+    fake = _Odoo18SaleCancelFakeClient({10: "sent", 11: "sale"})
+    payload = _cancel_orders(tmp_path, fake, [10, 11])
+    assert payload["ok"] is True, payload
+    assert payload["committed"] is True
+    assert [s["origin_id"] for s in payload["wizard"]["steps"]] == [10, 11]
+    assert fake._states == {10: "cancel", 11: "cancel"}
+    assert [c[1] for c in fake.create_calls] == [{"order_id": 10}, {"order_id": 11}]
+
+
+def test_sale_order_cancel_wizard_only_for_orders_that_returned_it(tmp_path: Path) -> None:
+    """A draft is cancelled by action_cancel itself. No wizard row may
+    be created for it: that would run the wizard's cancel a second
+    time on an order Odoo already cancelled."""
+    fake = _Odoo18SaleCancelFakeClient({20: "draft", 21: "sent"})
+    payload = _cancel_orders(tmp_path, fake, [20, 21])
+    assert payload["ok"] is True, payload
+    assert payload["committed"] is True
+    assert [s["origin_id"] for s in payload["wizard"]["steps"]] == [21]
+    assert fake.create_calls == [("sale.order.cancel", {"order_id": 21})]
+    assert fake._states == {20: "cancel", 21: "cancel"}
+
+
+def test_sale_order_cancel_refusal_names_the_orders_already_cancelled(tmp_path: Path) -> None:
+    """One call per record is not atomic. When Odoo refuses a later
+    order, the error must say which ones it already cancelled."""
+    fake = _Odoo18SaleCancelFakeClient({30: "draft", 31: "sale"}, refuse=frozenset({31}))
+    payload = _cancel_orders(tmp_path, fake, [30, 31])
+    assert payload["ok"] is False
+    assert "[30]" in payload["error"]
+    assert "locked" in payload["error"]
+    assert "Do NOT run the action again" in payload["error"]
+
+
+def test_sale_order_cancel_first_refusal_is_raised_unchanged(tmp_path: Path) -> None:
+    """Nothing ran yet: Odoo's own error, no "already ran" claim."""
+    fake = _Odoo18SaleCancelFakeClient({40: "sale", 41: "sale"}, refuse=frozenset({40}))
+    payload = _cancel_orders(tmp_path, fake, [40, 41])
+    assert payload["ok"] is False
+    assert "locked" in payload["error"]
+    assert "Do NOT run" not in payload["error"]
+    assert fake.action_calls == [("sale.order", "action_cancel", [40])]
+
+
+def test_actions_without_a_wizard_completion_stay_one_batch_call(tmp_path: Path) -> None:
+    """Only methods with a mapped wizard are split per record; every
+    other action keeps Odoo's single, all-or-nothing call."""
+    app, fake = _build(tmp_path)
+    payload = _call(
+        Dispatcher(app),
+        {
+            "instance": "dev",
+            "model": "purchase.order",
+            "record_ids": [1, 2, 3],
+            "action": "confirm",
+            "dry_run": False,
+        },
+    )
+    assert payload["committed"] is True
+    assert fake.action_calls == [("purchase.order", "button_confirm", [1, 2, 3])]
+
+
 # ---------------------------------------------------------------------------
 # Prod flow
 # ---------------------------------------------------------------------------
