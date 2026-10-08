@@ -10,6 +10,21 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_run_document_action` can cancel several sale orders at once on
+  Odoo 16.0 to 18.0.** `sale.order.action_cancel` calls `ensure_one()`
+  before it returns the `sale.order.cancel` wizard, and it returns that
+  wizard for every order that is not a draft (sent quotations too). A
+  call with two such orders failed with "Expected singleton" and
+  cancelled nothing, so the wizard auto-completion only ever worked for
+  one record. Actions with a mapped wizard completion now run one record
+  at a time, and the wizard is completed only for the orders that
+  returned it. If Odoo refuses an order after earlier ones went through,
+  the error names the orders already cancelled. Every other action
+  still runs as one call. On 19.0 and later Odoo cancels directly, and
+  nothing changes.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

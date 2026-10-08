@@ -47,6 +47,8 @@ from .errors import (
     InstanceNotFoundError,
     ModelNotAllowedError,
     OdooMcpError,
+    OdooRemoteError,
+    OdooTransportError,
     OperationNotAllowedError,
     ProdGuardError,
 )
@@ -1633,7 +1635,8 @@ class Dispatcher:
             return preview
 
         self._consume_token_on_prod(ctx, args)
-        result = rt.client.call_document_action(model, method, record_ids)
+        wizard_spec = resolve_wizard_completion(model, action)
+        result, wizard_ids = self._call_document_action(rt, model, method, record_ids, wizard_spec)
         # Some Odoo methods (notably stock.picking.button_validate and
         # sale.order.action_cancel when there are linked pickings)
         # return a dict describing a follow-up wizard instead of
@@ -1641,10 +1644,9 @@ class Dispatcher:
         # the wizard ourselves (see :data:`_WIZARD_COMPLETIONS`); for
         # everything else we surface the same "needs manual completion"
         # signal the agent's been seeing.
-        wizard_spec = resolve_wizard_completion(model, action)
         wizard_completion: dict[str, Any] | None = None
         if isinstance(result, dict) and wizard_spec is not None:
-            wizard_completion = self._complete_returned_wizard(rt, wizard_spec, record_ids)
+            wizard_completion = self._complete_returned_wizard(rt, wizard_spec, wizard_ids)
             # If every record's wizard completed without itself
             # returning another wizard, the logical action succeeded.
             still_pending = any(
@@ -1679,6 +1681,55 @@ class Dispatcher:
             )
         self._add_commits_remaining(out, ctx)
         return out
+
+    def _call_document_action(
+        self,
+        rt: InstanceRuntime,
+        model: str,
+        method: str,
+        record_ids: list[int],
+        wizard_spec: WizardCompletion | None,
+    ) -> tuple[Any, list[int]]:
+        """Run the mapped method; return Odoo's result and the ids that got the wizard.
+
+        A method whose wizard we complete cannot take several records at
+        once on the Odoo versions that return that wizard:
+        ``sale.order.action_cancel`` calls ``self.ensure_one()`` before
+        it returns ``sale.order.cancel`` (16.0 to 18.0), and the wizard
+        is shown for every order that is not a draft, sent quotations
+        included. A batch of two such orders raised "Expected singleton"
+        and cancelled nothing. So those methods run one record at a
+        time, and the wizard is completed only for the records that
+        returned it, never for one Odoo already cancelled.
+
+        If Odoo refuses a record after earlier ones went through, the
+        error names the ids that already ran, so nobody runs them again.
+        """
+        if wizard_spec is None or len(record_ids) == 1:
+            return rt.client.call_document_action(model, method, record_ids), list(record_ids)
+        result: Any = True
+        wizard_ids: list[int] = []
+        done: list[int] = []
+        for rid in record_ids:
+            try:
+                one = rt.client.call_document_action(model, method, [rid])
+            except (OdooRemoteError, OdooTransportError) as exc:
+                if not done:
+                    raise
+                message = (
+                    f"Odoo ran {method} on {model} ids {done}, then failed on id {rid}: "
+                    f"{exc.user_message} Do NOT run the action again on {done}."
+                )
+                if isinstance(exc, OdooTransportError):
+                    raise OdooTransportError(message) from exc
+                raise OdooRemoteError(message, server_text=True) from exc
+            done.append(rid)
+            if isinstance(one, dict) and one.get("res_model") == wizard_spec.wizard_model:
+                wizard_ids.append(rid)
+                result = one
+            elif isinstance(one, dict) and not wizard_ids:
+                result = one
+        return result, wizard_ids
 
     def _complete_returned_wizard(
         self,
