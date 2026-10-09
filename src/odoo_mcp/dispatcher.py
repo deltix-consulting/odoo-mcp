@@ -154,6 +154,22 @@ _RELATIONAL_TYPES: Final[frozenset[str]] = frozenset({"many2one", "one2many", "m
 # a sign of an abusive payload, so we bound it.
 _MAX_RELATIONAL_WRITE_DEPTH: Final[int] = 4
 
+# Odoo emails a calendar.event's attendees from inside create/write itself
+# (addons/calendar/models/calendar_event.py, 16.0 to 20.0; force_send=True,
+# i.e. sent during the RPC, from 18.0 on). There is no cron to stop and nothing
+# to undo afterwards:
+#
+# * ``create`` with attendees      -> invitation to every attendee but the author
+# * ``write`` adding attendees     -> invitation to the new attendees
+# * ``write`` of ``start``         -> "date changed" mail to the existing attendees
+#
+# An outbound email is what ``odoo_send_message`` keeps behind the two
+# external-comms opt-ins, so these payloads need the same opt-ins.
+# Attendee records created directly (``calendar.attendee``) send nothing.
+_CALENDAR_EVENT_MODEL: Final[str] = "calendar.event"
+_CALENDAR_ATTENDEE_FIELDS: Final[tuple[str, ...]] = ("partner_ids", "attendee_ids")
+_CALENDAR_RESCHEDULE_FIELD: Final[str] = "start"
+
 
 # ---------------------------------------------------------------------------
 # Shared application state
@@ -946,6 +962,118 @@ class Dispatcher:
                     f"4 (link), 5 (clear), 6 (set)."
                 )
 
+    def _gate_calendar_emails(
+        self,
+        rt: InstanceRuntime,
+        instance: str,
+        model: str,
+        validated: dict[str, Any],
+        fields_meta: dict[str, dict[str, Any]],
+        ids: list[int] | None,
+    ) -> list[str]:
+        """Refuse a create/write that makes Odoo email calendar attendees.
+
+        Odoo sends calendar invitations and "date changed" mails from inside
+        ``calendar.event`` create/write (see :data:`_CALENDAR_EVENT_MODEL`),
+        so a generic ``odoo_create`` / ``odoo_write`` would otherwise send
+        outbound email without the opt-ins ``odoo_send_message`` requires.
+        Nested x2many create/update commands are followed too: a
+        ``(0, 0, vals)`` into ``calendar.event`` is a ``create`` there.
+
+        Runs BEFORE the dry-run branch so the refusal is the same on dev and
+        prod. When both opt-ins are set, returns what Odoo will email so the
+        preview and the commit result can say so; ``[]`` when nothing.
+        ``ids`` is ``None`` for a create.
+        """
+        triggers = self._calendar_email_triggers(rt, model, validated, fields_meta, ids, 0)
+        if not triggers:
+            return []
+        if _external_comms_globally_enabled() and rt.config.external_comms_enabled:
+            return triggers
+        raise ProdGuardError(
+            "Odoo would email calendar attendees as part of this "
+            f"{'create' if ids is None else 'write'}: {'; '.join(triggers)}. Odoo sends "
+            "these during the call itself, so a dry run cannot hold them back. Outbound "
+            "email through the MCP needs both opt-ins: ODOO_MCP_ENABLE_EXTERNAL_COMMS=1 "
+            f"in the environment AND 'external_comms_enabled = true' under "
+            f"[instances.{instance}] in your config."
+        )
+
+    def _calendar_email_triggers(
+        self,
+        rt: InstanceRuntime,
+        model: str,
+        values: dict[str, Any],
+        fields_meta: dict[str, dict[str, Any]],
+        ids: list[int] | None,
+        depth: int,
+    ) -> list[str]:
+        """List what Odoo will email for ``values`` on ``model`` (and nested commands).
+
+        Shapes were already checked by :meth:`_validate_relational_writes`.
+        """
+        out: list[str] = []
+        if model == _CALENDAR_EVENT_MODEL:
+            where = "new calendar.event" if ids is None else f"calendar.event {ids}"
+            adding = [f for f in _CALENDAR_ATTENDEE_FIELDS if _x2many_adds(values.get(f))]
+            # Odoo never mails the author: adding only yourself sends nothing.
+            if adding == ["partner_ids"] and self._only_session_partner(rt, values["partner_ids"]):
+                adding = []
+            if adding:
+                out.append(f"{where}: invitation to the attendees set in {', '.join(adding)}")
+            if (
+                ids is not None
+                and values.get(_CALENDAR_RESCHEDULE_FIELD)
+                and self._calendar_has_other_attendees(rt, ids)
+            ):
+                out.append(f"{where}: 'date changed' mail to its attendees")
+        if depth >= _MAX_RELATIONAL_WRITE_DEPTH:
+            return out
+        for name, value in values.items():
+            meta = fields_meta.get(name) or {}
+            relation = meta.get("relation")
+            if (
+                meta.get("type") not in ("one2many", "many2many")
+                or not isinstance(value, list)
+                or not isinstance(relation, str)
+            ):
+                continue
+            related_meta: dict[str, dict[str, Any]] | None = None
+            for cmd in value:
+                if cmd[0] not in (0, 1):
+                    continue
+                if related_meta is None:
+                    related_meta = self._fields_meta(rt, relation)
+                nested_ids = None if cmd[0] == 0 else [cmd[1]]
+                out += self._calendar_email_triggers(
+                    rt, relation, cmd[2], related_meta, nested_ids, depth + 1
+                )
+        return out
+
+    def _session_partner_id(self, rt: InstanceRuntime) -> int | None:
+        """Return the ``res.partner`` id of the user the MCP is logged in as."""
+        rows = rt.client.read("res.users", [rt.client.uid], ["partner_id"])
+        value = rows[0].get("partner_id") if rows else None
+        return value[0] if isinstance(value, list) and value else None
+
+    def _only_session_partner(self, rt: InstanceRuntime, commands: list[Any]) -> bool:
+        """True iff a ``partner_ids`` payload adds no partner but the session user's."""
+        added: set[int] = set()
+        for cmd in commands:
+            if cmd[0] == 0:
+                return False  # a brand-new partner is never the session user
+            if cmd[0] == 4:
+                added.add(cmd[1])
+            elif cmd[0] == 6:
+                added.update(cmd[2])
+        return bool(added) and added == {self._session_partner_id(rt)}
+
+    def _calendar_has_other_attendees(self, rt: InstanceRuntime, ids: list[int]) -> bool:
+        """True iff any of these events has an attendee other than the session user."""
+        me = self._session_partner_id(rt)
+        rows = rt.client.read(_CALENDAR_EVENT_MODEL, ids, ["partner_ids"])
+        return any(pid != me for row in rows for pid in row.get("partner_ids") or [])
+
     def _create(self, args: dict[str, Any]) -> dict[str, Any]:
         _refuse_if_read_only_session()
         ctx = self._begin("odoo_create", args, Operation.CREATE)
@@ -959,6 +1087,7 @@ class Dispatcher:
         known = frozenset(fields_meta.keys())
         validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
         self._validate_relational_writes(rt, model, validated, fields_meta)
+        emails = self._gate_calendar_emails(rt, ctx.instance, model, validated, fields_meta, None)
         n = len(validated)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
@@ -978,6 +1107,7 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_create"),
             }
+            _add_odoo_emails(preview, emails)
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
@@ -990,6 +1120,7 @@ class Dispatcher:
             "id": new_id,
             "committed": True,
         }
+        _add_odoo_emails(result, emails)
         self._add_commits_remaining(result, ctx)
         return result
 
@@ -1011,6 +1142,7 @@ class Dispatcher:
         known = frozenset(fields_meta.keys())
         validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
         self._validate_relational_writes(rt, model, validated, fields_meta)
+        emails = self._gate_calendar_emails(rt, ctx.instance, model, validated, fields_meta, ids)
         n = len(validated)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
@@ -1032,6 +1164,7 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_write"),
             }
+            _add_odoo_emails(preview, emails)
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
@@ -1044,6 +1177,7 @@ class Dispatcher:
             "ids": ids,
             "committed": ok,
         }
+        _add_odoo_emails(result, emails)
         self._add_commits_remaining(result, ctx)
         return result
 
@@ -2251,6 +2385,19 @@ def _refuse_if_read_only_session() -> None:
             "Session is read-only (ODOO_MCP_READ_ONLY=1). All write paths "
             "are refused regardless of instance, prod-guard state, or unlock."
         )
+
+
+def _x2many_adds(value: Any) -> bool:
+    """True iff an x2many command list links or creates at least one record."""
+    if not isinstance(value, list):
+        return False
+    return any(cmd[0] in (0, 4) or (cmd[0] == 6 and cmd[2]) for cmd in value)
+
+
+def _add_odoo_emails(out: dict[str, Any], emails: list[str]) -> None:
+    """Disclose the email Odoo itself sends during a create/write (preview and commit alike)."""
+    if emails:
+        out["odoo_will_email"] = emails
 
 
 def _refuse_write_blocklisted(model: str) -> None:

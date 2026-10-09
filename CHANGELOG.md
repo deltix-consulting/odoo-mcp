@@ -10,6 +10,22 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **`odoo_create` / `odoo_write` on `calendar.event` no longer email
+  attendees without the external-comms opt-ins.** Odoo sends calendar
+  invitations from inside `calendar.event` create/write (16.0 to 20.0,
+  and from 18.0 on `force_send=True`, so the mail goes out during the
+  RPC). An event created with attendees, attendees added to an event, or
+  a `start` moved on an event with other attendees therefore sent
+  outbound email that `odoo_send_message` keeps behind
+  `ODOO_MCP_ENABLE_EXTERNAL_COMMS=1` + `external_comms_enabled = true`.
+  Those payloads (also as nested `(0, 0, vals)` / `(1, id, vals)`
+  commands) now need both opt-ins and are refused before the dry run
+  otherwise. When allowed, the preview and the commit result both carry
+  `odoo_will_email`. An event with only the session user as attendee
+  (Odoo's default) sends nothing and stays allowed.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
