@@ -25,6 +25,17 @@ breaking change explicitly in this file.
   otherwise. When allowed, the preview and the commit result both carry
   `odoo_will_email`. An event with only the session user as attendee
   (Odoo's default) sends nothing and stays allowed.
+- **`odoo_create` / `odoo_write` that move `stage_id` into a stage with a
+  mail template no longer email the customer without the same opt-ins.**
+  Odoo posts the stage's template to the recipients it names from inside
+  create/write (`project.task`, `project.project`, `hr.applicant`,
+  `event.track`; 16.0 to 20.0), and `project.task` also sends a rating
+  request with `force_send=True` when the stage is in rating mode. Those
+  payloads, nested commands included, are now refused before the dry run
+  without both opt-ins, and disclosed in `odoo_will_email` when allowed. A
+  write that leaves every record in its current stage, a stage without a
+  template, and a create without an explicit `stage_id` send nothing and
+  stay allowed.
 
 ## [0.27.0] - 2026-08-20
 
