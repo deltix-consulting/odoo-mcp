@@ -12,6 +12,10 @@ This module enforces a strict subset of the domain language:
 
 * Leaves must be 3-tuples ``(field, operator, value)``.
 * ``field`` must be a simple (undotted) attribute on the target model.
+* A relational ``field`` (many2one / one2many / many2many) must be compared
+  to ids, ``False`` or ``None`` — never to a string. Odoo turns a string on a
+  relational field into a search on the RELATED model's display name, which
+  is the dotted traversal above in another spelling.
 * ``operator`` must be in :data:`_ALLOWED_OPS`.
 * ``value`` must be ``None``, ``bool``, ``int``, ``float``, ``str``, or a
   homogeneous list of those scalars.
@@ -69,6 +73,7 @@ def sandbox_domain(
     allow_sensitive: frozenset[str] = frozenset(),
     instance_overrides: dict[str, frozenset[str]] | None = None,
     extra_redacted: tuple[re.Pattern[str], ...] = (),
+    relational_fields: frozenset[str] = frozenset(),
 ) -> list[Any]:
     """Validate and return a normalized copy of ``domain``.
 
@@ -87,6 +92,20 @@ def sandbox_domain(
     returned for redaction to act on. Grouping is already blocked for the same
     reason (:func:`odoo_mcp.security.fields.validate_groupby`); domains are the
     other value-revealing surface.
+
+    **Strings on relational fields.** ``relational_fields`` names the
+    target model's many2one / one2many / many2many fields. A leaf on one of
+    them whose value is a string (or a list holding one) is refused: Odoo
+    rewrites ``('partner_id', 'ilike', 'x')`` as ``('partner_id', 'any',
+    [('display_name', 'ilike', 'x')])`` (16.0-18.0 through ``_name_search`` /
+    ``_search`` on ``display_name``, 19.0+ in ``_optimize_relational_name_search``),
+    and the related model's ``_search_display_name`` matches every field in
+    its ``_rec_names_search``. On ``res.partner`` that list is ``vat`` and
+    ``company_registry`` too (16.0-20.0), both default-hidden here — so a
+    string on ``partner_id`` is a prefix oracle on a hidden field of a model
+    the caller never named, with the same reach as the dotted path the sandbox
+    refuses. ``child_of`` / ``parent_of`` with a string value take the same
+    route. Ids are the supported form, as for dotted paths.
 
     When ``model`` is ``None`` the policy check is skipped — this is the bare
     defense-in-depth call shape used by unit tests, where the model + field
@@ -124,6 +143,7 @@ def sandbox_domain(
                     allow_sensitive=allow_sensitive,
                     instance_overrides=instance_overrides,
                     extra_redacted=extra_redacted,
+                    relational_fields=relational_fields,
                 )
             )
             continue
@@ -144,6 +164,7 @@ def _validate_leaf(
     allow_sensitive: frozenset[str] = frozenset(),
     instance_overrides: dict[str, frozenset[str]] | None = None,
     extra_redacted: tuple[re.Pattern[str], ...] = (),
+    relational_fields: frozenset[str] = frozenset(),
 ) -> tuple[str, str, Any]:
     if len(leaf) != 3:
         raise DomainSandboxError(f"Domain leaf must be a 3-tuple, got {leaf!r}.")
@@ -191,7 +212,25 @@ def _validate_leaf(
         )
 
     _validate_value(value)
+    if field in relational_fields and _holds_string(value):
+        # See "Strings on relational fields" in the sandbox_domain docstring.
+        raise DomainSandboxError(
+            f"Field {field!r} is relational: compare it to record ids, not to a name "
+            f"({value!r}). Odoo would match the text against the related model's "
+            f"display name and its other name-search fields (on contacts: VAT and "
+            f"company registry), which reaches into that model the way a dotted path "
+            f"does. Do it in two calls instead: (1) find the ids on the related model "
+            f"with odoo_lookup or odoo_search_read, then (2) re-run this call filtering "
+            f"on ({field!r}, 'in', [<those ids>])."
+        )
     return (field, operator, value)
+
+
+def _holds_string(value: Any) -> bool:
+    """Whether a leaf value is, or contains, a string."""
+    if isinstance(value, str):
+        return True
+    return isinstance(value, list) and any(isinstance(item, str) for item in value)
 
 
 def _validate_value(value: Any) -> None:

@@ -117,7 +117,8 @@ _TOOL_SEARCH_READ = Tool(
                 "type": "array",
                 "description": (
                     "Odoo domain: list of (field, op, value) tuples plus optional "
-                    "'&'/'|'/'!' prefix operators. Dotted fields are rejected."
+                    "'&'/'|'/'!' prefix operators. Dotted fields are rejected, and a "
+                    "relational field takes ids, not names: ['partner_id','in',[7]]."
                 ),
                 "default": [],
             },

@@ -10,6 +10,23 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **A relational filter compared to a string is refused.** Odoo turns
+  `('partner_id', 'ilike', 'x')` into a search on the related model's
+  display name, and `res.partner` searches its display name across
+  `vat` and `company_registry` too (16.0-20.0). Both are default-hidden,
+  so `odoo_search_count(sale.order, [('partner_id', '=like', 'BE0477%')])`
+  recovered a customer's VAT number one prefix at a time, with no opt-in
+  and on a model the call never named. It was the dotted-path traversal
+  the sandbox refuses, spelled without the dot. `odoo_search_read`,
+  `odoo_search_count` and `odoo_read_group` now refuse a string (or a
+  list holding one) on a many2one / one2many / many2many leaf. The
+  refusal names the two-call route: find the ids with `odoo_lookup`,
+  then filter with `('partner_id', 'in', [ids])`. Ids, `False` and
+  `None` are unchanged. Pointer: ivnvxd/mcp-server-odoo 0.9.0 refuses
+  names on x2many conditions into models its allowlist refuses.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

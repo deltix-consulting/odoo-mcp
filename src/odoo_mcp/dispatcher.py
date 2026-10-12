@@ -149,6 +149,12 @@ def _disabled_tool_names() -> frozenset[str]:
 # ``Dispatcher._validate_relational_writes``.
 _RELATIONAL_TYPES: Final[frozenset[str]] = frozenset({"many2one", "one2many", "many2many"})
 
+
+def _relational_names(fields_meta: dict[str, dict[str, Any]]) -> frozenset[str]:
+    """Names of the relational fields in ``fields_meta`` (for :func:`sandbox_domain`)."""
+    return frozenset(n for n, m in fields_meta.items() if m.get("type") in _RELATIONAL_TYPES)
+
+
 # Maximum depth of nested relational create/update commands accepted in a
 # single write. A sale order with lines is depth 1; deeper is rare and mostly
 # a sign of an abusive payload, so we bound it.
@@ -596,6 +602,7 @@ class Dispatcher:
             allow_sensitive=allow_sensitive,
             instance_overrides=overrides,
             extra_redacted=rt.extra_redacted,
+            relational_fields=_relational_names(fields_meta),
         )
         limit = clamp_limit(
             args.get("limit"), rt.config.max_records_default, rt.config.max_records_hard_cap
@@ -663,7 +670,8 @@ class Dispatcher:
     def _search_count(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_search_count", args, Operation.SEARCH_COUNT)
         assert ctx.model is not None
-        known = frozenset(self._fields_meta(ctx.rt, ctx.model).keys())
+        fields_meta = self._fields_meta(ctx.rt, ctx.model)
+        known = frozenset(fields_meta.keys())
         # search_count is the sharpest value-oracle surface (a bare boolean /
         # match count, no rows to redact), so the domain redaction policy
         # matters most here.
@@ -675,6 +683,7 @@ class Dispatcher:
             allow_sensitive=allow_sensitive,
             instance_overrides=ctx.rt.config.sensitive_fields,
             extra_redacted=ctx.rt.extra_redacted,
+            relational_fields=_relational_names(fields_meta),
         )
         count = ctx.rt.client.search_count(ctx.model, domain)
         self._audit_ok(
@@ -695,7 +704,8 @@ class Dispatcher:
         offset = _offset(args)
         lazy = bool(args.get("lazy", True))
 
-        known = frozenset(self._fields_meta(rt, model).keys())
+        fields_meta = self._fields_meta(rt, model)
+        known = frozenset(fields_meta.keys())
         overrides = rt.config.sensitive_fields
         fields = validate_aggregate_fields(
             model,
@@ -720,6 +730,7 @@ class Dispatcher:
             allow_sensitive=allow_sensitive,
             instance_overrides=overrides,
             extra_redacted=rt.extra_redacted,
+            relational_fields=_relational_names(fields_meta),
         )
         # Clamp group count to the hard cap regardless of caller input.
         cap = rt.config.max_records_hard_cap

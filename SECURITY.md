@@ -154,7 +154,11 @@ enforced:
 
 **4. Privilege escalation via domain traversal.** The domain sandbox
 (`src/odoo_mcp/security/domain.py`) walks every leaf tuple and rejects
-any field name containing a dot. It also validates operators against a
+any field name containing a dot. It also refuses a string compared to a
+relational field (`('partner_id', 'ilike', 'x')`): Odoo answers that by
+searching the related model's display name and its other name-search
+fields (on contacts: VAT and company registry), which is the same
+traversal under another spelling. It also validates operators against a
 closed set and verifies field names against the target model's
 `fields_get`, so unknown fields fail loudly rather than being silently
 ignored. The sandbox runs before any XML-RPC call, so a rejected
