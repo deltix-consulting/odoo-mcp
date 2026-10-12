@@ -36,6 +36,16 @@ breaking change explicitly in this file.
   write that leaves every record in its current stage, a stage without a
   template, and a create without an explicit `stage_id` send nothing and
   stay allowed.
+- **`odoo_create` / `odoo_write` that confirm an `event.registration` no
+  longer email the attendee without the same opt-ins.** A registration that
+  becomes `open` (a create, where `open` is Odoo's default from 17.0, or a
+  write moving it out of `draft` / `cancel`) runs its event's "after each
+  registration" mail schedulers from inside create/write as superuser
+  (`_update_mail_schedulers`, 16.0 to 20.0). Those payloads, nested
+  `(0, 0, vals)` / `(1, id, vals)` under `event.event` included, are now
+  refused before the dry run without both opt-ins, and disclosed in
+  `odoo_will_email` when allowed. Registrations on an event without such a
+  scheduler, and creates in `draft` / `done` / `cancel`, stay allowed.
 
 ## [0.27.0] - 2026-08-20
 

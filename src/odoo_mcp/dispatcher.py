@@ -190,6 +190,17 @@ _TASK_MODEL: Final[str] = "project.task"
 _TASK_RATING_TEMPLATE_FIELD: Final[str] = "rating_template_id"
 _TASK_RATING_FLAGS: Final[tuple[str, str]] = ("rating_active", "rating_status")
 
+# An event.registration that becomes 'open' (create, default state from 17.0
+# on; or a write moving it out of draft/cancel) runs its event's "after each
+# registration" schedulers inside create/write (``_update_mail_schedulers``,
+# 16.0 to 20.0, as superuser): the attendee gets the event's confirmation
+# mail. With ``event.event_mail_async`` set the same mail is queued for cron
+# instead, which is still outbound mail.
+_REGISTRATION_MODEL: Final[str] = "event.registration"
+_REGISTRATION_OPEN: Final[str] = "open"
+_REGISTRATION_UNCONFIRMED: Final[frozenset[str]] = frozenset({"draft", "cancel"})
+_EVENT_SCHEDULER_MODEL: Final[str] = "event.mail"
+
 
 # ---------------------------------------------------------------------------
 # Shared application state
@@ -1051,6 +1062,8 @@ class Dispatcher:
                 out.append(f"{where}: 'date changed' mail to its attendees")
         if model in _STAGE_TEMPLATE_FIELDS:
             out += self._stage_email_triggers(rt, model, values, fields_meta, ids)
+        if model == _REGISTRATION_MODEL:
+            out += self._registration_email_triggers(rt, values, ids)
         if depth >= _MAX_RELATIONAL_WRITE_DEPTH:
             return out
         for name, value in values.items():
@@ -1129,6 +1142,48 @@ class Dispatcher:
         ):
             out.append(f"{where}: a rating request to the task's customer")
         return out
+
+    def _registration_email_triggers(
+        self,
+        rt: InstanceRuntime,
+        values: dict[str, Any],
+        ids: list[int] | None,
+    ) -> list[str]:
+        """List the event mails Odoo sends when ``values`` confirms registrations.
+
+        Only a registration that ends up 'open' runs the schedulers. A create
+        without an explicit state counts (Odoo's default from 17.0, and 16.0
+        may auto-confirm), and so does a create without ``event_id`` (a nested
+        ``(0, 0, vals)`` under event.event): its event is not known here, so it
+        is assumed to have schedulers.
+        """
+        state = values.get("state")
+        if ids is None:
+            if state not in (None, _REGISTRATION_OPEN):
+                return []
+            where = f"new {_REGISTRATION_MODEL}"
+            event_ids: list[Any] = [values.get("event_id")]
+            if not _is_record_id(event_ids[0]):
+                return [f"{where}: the event's 'after each registration' mails to the attendee"]
+        else:
+            if state != _REGISTRATION_OPEN:
+                return []
+            rows = [
+                row
+                for row in rt.client.read(_REGISTRATION_MODEL, ids, ["state", "event_id"])
+                if row.get("state") in _REGISTRATION_UNCONFIRMED
+            ]
+            if not rows:
+                return []
+            where = f"{_REGISTRATION_MODEL} {[row['id'] for row in rows]}"
+            event_ids = [_many2one_id(row.get("event_id")) for row in rows]
+        wanted: list[int] = sorted({eid for eid in event_ids if _is_record_id(eid)})
+        if not wanted:
+            return []
+        domain = [("event_id", "in", wanted), ("interval_type", "=", "after_sub")]
+        if not rt.client.search_count(_EVENT_SCHEDULER_MODEL, domain):
+            return []
+        return [f"{where}: the event's 'after each registration' mails to the attendee"]
 
     def _task_rating_requested(
         self,
@@ -2504,6 +2559,11 @@ def _refuse_if_read_only_session() -> None:
 def _many2one_id(value: Any) -> int | None:
     """Return the id of a many2one read value (``[id, name]`` or ``False``)."""
     return value[0] if isinstance(value, list) and value else None
+
+
+def _is_record_id(value: Any) -> bool:
+    """True iff ``value`` is a positive int id (``bool`` excluded)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def _x2many_adds(value: Any) -> bool:
