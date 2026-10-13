@@ -154,6 +154,69 @@ _RELATIONAL_TYPES: Final[frozenset[str]] = frozenset({"many2one", "one2many", "m
 # a sign of an abusive payload, so we bound it.
 _MAX_RELATIONAL_WRITE_DEPTH: Final[int] = 4
 
+# Odoo emails a calendar.event's attendees from inside create/write itself
+# (addons/calendar/models/calendar_event.py, 16.0 to 20.0; force_send=True,
+# i.e. sent during the RPC, from 18.0 on). There is no cron to stop and nothing
+# to undo afterwards:
+#
+# * ``create`` with attendees      -> invitation to every attendee but the author
+# * ``write`` adding attendees     -> invitation to the new attendees
+# * ``write`` of ``start``         -> "date changed" mail to the existing attendees
+#
+# An outbound email is what ``odoo_send_message`` keeps behind the two
+# external-comms opt-ins, so these payloads need the same opt-ins.
+# Attendee records created directly (``calendar.attendee``) send nothing.
+_CALENDAR_EVENT_MODEL: Final[str] = "calendar.event"
+_CALENDAR_ATTENDEE_FIELDS: Final[tuple[str, ...]] = ("partner_ids", "attendee_ids")
+_CALENDAR_RESCHEDULE_FIELD: Final[str] = "start"
+
+# Odoo also mails from inside create/write when a tracked ``stage_id`` moves to
+# a stage with a mail template: mail.thread posts the stage's template to the
+# recipients the template names (the customer, the applicant, the speaker) from
+# the tracking precommit (``_track_template``, renamed
+# ``_track_template_parameters`` in 20.0; 16.0 to 20.0). A create counts only
+# when ``stage_id`` is passed explicitly. Model -> template field on its stage.
+_STAGE_FIELD: Final[str] = "stage_id"
+_STAGE_TEMPLATE_FIELDS: Final[dict[str, str]] = {
+    "project.task": "mail_template_id",
+    "project.project": "mail_template_id",
+    "hr.applicant": "template_id",
+    "event.track": "mail_template_id",
+}
+# project.task also sends the stage's rating request (force_send=True) to the
+# task's customer when ratings are on "stage" mode. The two flags live on the
+# task's project up to 18.0 and on the stage from 19.0.
+_TASK_MODEL: Final[str] = "project.task"
+_TASK_RATING_TEMPLATE_FIELD: Final[str] = "rating_template_id"
+_TASK_RATING_FLAGS: Final[tuple[str, str]] = ("rating_active", "rating_status")
+
+# An event.registration that becomes 'open' (create, default state from 17.0
+# on; or a write moving it out of draft/cancel) runs its event's "after each
+# registration" schedulers inside create/write (``_update_mail_schedulers``,
+# 16.0 to 20.0, as superuser): the attendee gets the event's confirmation
+# mail. With ``event.event_mail_async`` set the same mail is queued for cron
+# instead, which is still outbound mail.
+_REGISTRATION_MODEL: Final[str] = "event.registration"
+_REGISTRATION_OPEN: Final[str] = "open"
+_REGISTRATION_UNCONFIRMED: Final[frozenset[str]] = frozenset({"draft", "cancel"})
+_EVENT_SCHEDULER_MODEL: Final[str] = "event.mail"
+
+# A loyalty.card (coupon, gift card, eWallet) mails its customer from inside
+# create/write when its program has a communication plan (``loyalty.mail``),
+# 16.0 to 20.0: create sends the "At Creation" template with the card's code,
+# and a points increase that crosses a "When Reaching" milestone sends that
+# template. Up to 19.0 the milestone mail is sent from ``loyalty.card.write``;
+# from 20.0 ``points`` is stored as loyalty.history lines and the mail is sent
+# from ``loyalty.history.create``, so a direct history line counts there too.
+# Only a card with a customer (``partner_id``) is mailed.
+_LOYALTY_CARD_MODEL: Final[str] = "loyalty.card"
+_LOYALTY_HISTORY_MODEL: Final[str] = "loyalty.history"
+_LOYALTY_MAIL_MODEL: Final[str] = "loyalty.mail"
+# A loyalty.history field that exists only from 20.0, the first release whose
+# history create sends the milestone mail.
+_LOYALTY_HISTORY_MAILS_MARKER: Final[str] = "linked_loyalty_history_id"
+_LOYALTY_MILESTONE_LIMIT: Final[int] = 200
+
 
 # ---------------------------------------------------------------------------
 # Shared application state
@@ -946,6 +1009,356 @@ class Dispatcher:
                     f"4 (link), 5 (clear), 6 (set)."
                 )
 
+    def _gate_odoo_emails(
+        self,
+        rt: InstanceRuntime,
+        instance: str,
+        model: str,
+        validated: dict[str, Any],
+        fields_meta: dict[str, dict[str, Any]],
+        ids: list[int] | None,
+    ) -> list[str]:
+        """Refuse a create/write that makes Odoo send email by itself.
+
+        Odoo sends calendar invitations and "date changed" mails from inside
+        ``calendar.event`` create/write (see :data:`_CALENDAR_EVENT_MODEL`),
+        and a stage's mail template or rating request when ``stage_id`` moves
+        (see :data:`_STAGE_TEMPLATE_FIELDS`), and a loyalty card's communication
+        plan when a card is created or topped up (see
+        :data:`_LOYALTY_CARD_MODEL`), so a generic ``odoo_create`` /
+        ``odoo_write`` would otherwise send outbound email without the opt-ins
+        ``odoo_send_message`` requires. Nested x2many create/update commands
+        are followed too: a ``(0, 0, vals)`` into ``calendar.event`` is a
+        ``create`` there.
+
+        Runs BEFORE the dry-run branch so the refusal is the same on dev and
+        prod. When both opt-ins are set, returns what Odoo will email so the
+        preview and the commit result can say so; ``[]`` when nothing.
+        ``ids`` is ``None`` for a create.
+        """
+        triggers = self._odoo_email_triggers(rt, model, validated, fields_meta, ids, 0)
+        if not triggers:
+            return []
+        if _external_comms_globally_enabled() and rt.config.external_comms_enabled:
+            return triggers
+        raise ProdGuardError(
+            "Odoo would send email as part of this "
+            f"{'create' if ids is None else 'write'}: {'; '.join(triggers)}. Odoo sends "
+            "these during the call itself, so a dry run cannot hold them back. Outbound "
+            "email through the MCP needs both opt-ins: ODOO_MCP_ENABLE_EXTERNAL_COMMS=1 "
+            f"in the environment AND 'external_comms_enabled = true' under "
+            f"[instances.{instance}] in your config."
+        )
+
+    def _odoo_email_triggers(
+        self,
+        rt: InstanceRuntime,
+        model: str,
+        values: dict[str, Any],
+        fields_meta: dict[str, dict[str, Any]],
+        ids: list[int] | None,
+        depth: int,
+    ) -> list[str]:
+        """List what Odoo will email for ``values`` on ``model`` (and nested commands).
+
+        Shapes were already checked by :meth:`_validate_relational_writes`.
+        """
+        out: list[str] = []
+        if model == _CALENDAR_EVENT_MODEL:
+            where = "new calendar.event" if ids is None else f"calendar.event {ids}"
+            adding = [f for f in _CALENDAR_ATTENDEE_FIELDS if _x2many_adds(values.get(f))]
+            # Odoo never mails the author: adding only yourself sends nothing.
+            if adding == ["partner_ids"] and self._only_session_partner(rt, values["partner_ids"]):
+                adding = []
+            if adding:
+                out.append(f"{where}: invitation to the attendees set in {', '.join(adding)}")
+            if (
+                ids is not None
+                and values.get(_CALENDAR_RESCHEDULE_FIELD)
+                and self._calendar_has_other_attendees(rt, ids)
+            ):
+                out.append(f"{where}: 'date changed' mail to its attendees")
+        if model in _STAGE_TEMPLATE_FIELDS:
+            out += self._stage_email_triggers(rt, model, values, fields_meta, ids)
+        if model == _REGISTRATION_MODEL:
+            out += self._registration_email_triggers(rt, values, ids)
+        if model == _LOYALTY_CARD_MODEL:
+            out += self._loyalty_card_email_triggers(rt, values, ids)
+        if (
+            model == _LOYALTY_HISTORY_MODEL
+            and ids is None
+            and _LOYALTY_HISTORY_MAILS_MARKER in fields_meta
+        ):
+            out += self._loyalty_history_email_triggers(rt, values)
+        if depth >= _MAX_RELATIONAL_WRITE_DEPTH:
+            return out
+        for name, value in values.items():
+            meta = fields_meta.get(name) or {}
+            relation = meta.get("relation")
+            if (
+                meta.get("type") not in ("one2many", "many2many")
+                or not isinstance(value, list)
+                or not isinstance(relation, str)
+            ):
+                continue
+            related_meta: dict[str, dict[str, Any]] | None = None
+            for cmd in value:
+                if cmd[0] not in (0, 1):
+                    continue
+                if related_meta is None:
+                    related_meta = self._fields_meta(rt, relation)
+                nested_ids = None if cmd[0] == 0 else [cmd[1]]
+                out += self._odoo_email_triggers(
+                    rt, relation, cmd[2], related_meta, nested_ids, depth + 1
+                )
+        return out
+
+    def _stage_email_triggers(
+        self,
+        rt: InstanceRuntime,
+        model: str,
+        values: dict[str, Any],
+        fields_meta: dict[str, dict[str, Any]],
+        ids: list[int] | None,
+    ) -> list[str]:
+        """List the stage mails Odoo sends when ``values`` moves ``stage_id``.
+
+        Odoo only posts on a tracked change, so a write that leaves every
+        record in its current stage sends nothing. Template fields the
+        installed Odoo does not have are skipped (#62).
+        """
+        stage_id = values.get(_STAGE_FIELD)
+        relation = (fields_meta.get(_STAGE_FIELD) or {}).get("relation")
+        if not isinstance(stage_id, int) or isinstance(stage_id, bool) or not stage_id:
+            return []
+        if not isinstance(relation, str):
+            return []
+        is_task = model == _TASK_MODEL
+        rows: list[dict[str, Any]] = []
+        if ids is not None:
+            read_fields = [_STAGE_FIELD, "project_id", "partner_id"] if is_task else [_STAGE_FIELD]
+            rows = [
+                row
+                for row in rt.client.read(model, ids, read_fields)
+                if _many2one_id(row.get(_STAGE_FIELD)) != stage_id
+            ]
+            if not rows:
+                return []
+        stage_meta = self._fields_meta(rt, relation)
+        template_field = _STAGE_TEMPLATE_FIELDS[model]
+        wanted = [template_field]
+        if is_task:
+            wanted += [_TASK_RATING_TEMPLATE_FIELD, *_TASK_RATING_FLAGS]
+        wanted = [name for name in wanted if name in stage_meta]
+        if not wanted:
+            return []
+        found = rt.client.read(relation, [stage_id], wanted)
+        stage = found[0] if found else {}
+        where = f"new {model}" if ids is None else f"{model} {[row['id'] for row in rows]}"
+        out: list[str] = []
+        if stage.get(template_field):
+            out.append(
+                f"{where}: the email template of {relation} {stage_id} ({template_field}) "
+                "to the recipients it names"
+            )
+        if (
+            is_task
+            and stage.get(_TASK_RATING_TEMPLATE_FIELD)
+            and self._task_rating_requested(rt, values, rows, stage, stage_meta, ids is None)
+        ):
+            out.append(f"{where}: a rating request to the task's customer")
+        return out
+
+    def _registration_email_triggers(
+        self,
+        rt: InstanceRuntime,
+        values: dict[str, Any],
+        ids: list[int] | None,
+    ) -> list[str]:
+        """List the event mails Odoo sends when ``values`` confirms registrations.
+
+        Only a registration that ends up 'open' runs the schedulers. A create
+        without an explicit state counts (Odoo's default from 17.0, and 16.0
+        may auto-confirm), and so does a create without ``event_id`` (a nested
+        ``(0, 0, vals)`` under event.event): its event is not known here, so it
+        is assumed to have schedulers.
+        """
+        state = values.get("state")
+        if ids is None:
+            if state not in (None, _REGISTRATION_OPEN):
+                return []
+            where = f"new {_REGISTRATION_MODEL}"
+            event_ids: list[Any] = [values.get("event_id")]
+            if not _is_record_id(event_ids[0]):
+                return [f"{where}: the event's 'after each registration' mails to the attendee"]
+        else:
+            if state != _REGISTRATION_OPEN:
+                return []
+            rows = [
+                row
+                for row in rt.client.read(_REGISTRATION_MODEL, ids, ["state", "event_id"])
+                if row.get("state") in _REGISTRATION_UNCONFIRMED
+            ]
+            if not rows:
+                return []
+            where = f"{_REGISTRATION_MODEL} {[row['id'] for row in rows]}"
+            event_ids = [_many2one_id(row.get("event_id")) for row in rows]
+        wanted: list[int] = sorted({eid for eid in event_ids if _is_record_id(eid)})
+        if not wanted:
+            return []
+        domain = [("event_id", "in", wanted), ("interval_type", "=", "after_sub")]
+        if not rt.client.search_count(_EVENT_SCHEDULER_MODEL, domain):
+            return []
+        return [f"{where}: the event's 'after each registration' mails to the attendee"]
+
+    def _loyalty_card_email_triggers(
+        self,
+        rt: InstanceRuntime,
+        values: dict[str, Any],
+        ids: list[int] | None,
+    ) -> list[str]:
+        """List the loyalty mails Odoo sends when ``values`` creates or tops up cards.
+
+        A create mails a customer when the program has an "At Creation" plan
+        (or a milestone the starting points reach). A create without
+        ``program_id`` (a nested ``(0, 0, vals)`` under loyalty.program) is
+        assumed to have one. A write mails only when ``points`` rises past a
+        milestone of the card's program.
+        """
+        points: Any = values.get("points")
+        if ids is None:
+            if not values.get("partner_id"):
+                return []
+            where = f"new {_LOYALTY_CARD_MODEL}"
+            program_id = values.get("program_id")
+            if not _is_record_id(program_id):
+                return [f"{where}: its program's loyalty emails to the customer"]
+            triggers = ["create"]
+            if _is_number(points) and points > 0:
+                triggers.append("points_reach")
+            domain = [("program_id", "=", program_id), ("trigger", "in", triggers)]
+            if not rt.client.search_count(_LOYALTY_MAIL_MODEL, domain):
+                return []
+            return [f"{where}: its program's loyalty emails to the customer"]
+        if not _is_number(points):
+            return []
+        rows = rt.client.read(_LOYALTY_CARD_MODEL, ids, ["points", "partner_id", "program_id"])
+        changes = []
+        for row in rows:
+            partner = values["partner_id"] if "partner_id" in values else row.get("partner_id")
+            if not partner:
+                continue
+            program = values.get("program_id") or _many2one_id(row.get("program_id"))
+            changes.append((row["id"], program, row.get("points") or 0.0, float(points)))
+        return self._loyalty_milestone_triggers(rt, changes)
+
+    def _loyalty_history_email_triggers(
+        self, rt: InstanceRuntime, values: dict[str, Any]
+    ) -> list[str]:
+        """List the milestone mails a new loyalty.history line sends (20.0 and later)."""
+        issued: Any = values.get("issued")
+        card_id: Any = values.get("card_id")
+        if not _is_number(issued) or issued <= 0 or not _is_record_id(card_id):
+            return []
+        rows = rt.client.read(
+            _LOYALTY_CARD_MODEL, [card_id], ["points", "partner_id", "program_id"]
+        )
+        changes = []
+        for row in rows:
+            if not row.get("partner_id"):
+                continue
+            old = row.get("points") or 0.0
+            program = _many2one_id(row.get("program_id"))
+            changes.append((row["id"], program, old, old + issued))
+        return self._loyalty_milestone_triggers(rt, changes)
+
+    def _loyalty_milestone_triggers(
+        self, rt: InstanceRuntime, changes: list[tuple[int, int | None, float, float]]
+    ) -> list[str]:
+        """List the cards whose ``(card, program, old, new)`` points cross a milestone."""
+        rising = [change for change in changes if change[3] > change[2] and change[1]]
+        if not rising:
+            return []
+        domain = [
+            ("program_id", "in", sorted({change[1] for change in rising if change[1]})),
+            ("trigger", "=", "points_reach"),
+        ]
+        milestones = rt.client.search_read(
+            _LOYALTY_MAIL_MODEL, domain, ["program_id", "points"], _LOYALTY_MILESTONE_LIMIT, 0, None
+        )
+        crossed = [
+            card
+            for card, program, old, new in rising
+            if any(
+                _many2one_id(m.get("program_id")) == program
+                and old < (m.get("points") or 0.0) <= new
+                for m in milestones
+            )
+        ]
+        if not crossed:
+            return []
+        return [
+            f"{_LOYALTY_CARD_MODEL} {crossed}: the program's 'When Reaching' email to the customer"
+        ]
+
+    def _task_rating_requested(
+        self,
+        rt: InstanceRuntime,
+        values: dict[str, Any],
+        rows: list[dict[str, Any]],
+        stage: dict[str, Any],
+        stage_meta: dict[str, dict[str, Any]],
+        creating: bool,
+    ) -> bool:
+        """True iff Odoo sends a rating request for these tasks entering ``stage``.
+
+        Odoo needs ratings in "stage" mode and a customer on the task. A new
+        task's customer can be computed from its project, so a create is
+        assumed to have one.
+        """
+        if not creating:
+            if "partner_id" in values:
+                if not values["partner_id"]:
+                    return False
+            elif not any(_many2one_id(row.get("partner_id")) for row in rows):
+                return False
+        active, status = _TASK_RATING_FLAGS
+        if active in stage_meta:  # 19.0 and later: the flags are on the stage
+            return bool(stage.get(active)) and stage.get(status) == "stage"
+        if "project_id" in values or creating:
+            project_ids = [values.get("project_id")]
+        else:
+            project_ids = [_many2one_id(row.get("project_id")) for row in rows]
+        wanted = [pid for pid in project_ids if isinstance(pid, int) and pid]
+        project_meta = self._fields_meta(rt, "project.project")
+        if not wanted or not all(name in project_meta for name in _TASK_RATING_FLAGS):
+            return False
+        projects = rt.client.read("project.project", sorted(set(wanted)), list(_TASK_RATING_FLAGS))
+        return any(row.get(active) and row.get(status) == "stage" for row in projects)
+
+    def _session_partner_id(self, rt: InstanceRuntime) -> int | None:
+        """Return the ``res.partner`` id of the user the MCP is logged in as."""
+        rows = rt.client.read("res.users", [rt.client.uid], ["partner_id"])
+        return _many2one_id(rows[0].get("partner_id")) if rows else None
+
+    def _only_session_partner(self, rt: InstanceRuntime, commands: list[Any]) -> bool:
+        """True iff a ``partner_ids`` payload adds no partner but the session user's."""
+        added: set[int] = set()
+        for cmd in commands:
+            if cmd[0] == 0:
+                return False  # a brand-new partner is never the session user
+            if cmd[0] == 4:
+                added.add(cmd[1])
+            elif cmd[0] == 6:
+                added.update(cmd[2])
+        return bool(added) and added == {self._session_partner_id(rt)}
+
+    def _calendar_has_other_attendees(self, rt: InstanceRuntime, ids: list[int]) -> bool:
+        """True iff any of these events has an attendee other than the session user."""
+        me = self._session_partner_id(rt)
+        rows = rt.client.read(_CALENDAR_EVENT_MODEL, ids, ["partner_ids"])
+        return any(pid != me for row in rows for pid in row.get("partner_ids") or [])
+
     def _create(self, args: dict[str, Any]) -> dict[str, Any]:
         _refuse_if_read_only_session()
         ctx = self._begin("odoo_create", args, Operation.CREATE)
@@ -959,6 +1372,7 @@ class Dispatcher:
         known = frozenset(fields_meta.keys())
         validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
         self._validate_relational_writes(rt, model, validated, fields_meta)
+        emails = self._gate_odoo_emails(rt, ctx.instance, model, validated, fields_meta, None)
         n = len(validated)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
@@ -978,6 +1392,7 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_create"),
             }
+            _add_odoo_emails(preview, emails)
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
@@ -990,6 +1405,7 @@ class Dispatcher:
             "id": new_id,
             "committed": True,
         }
+        _add_odoo_emails(result, emails)
         self._add_commits_remaining(result, ctx)
         return result
 
@@ -1011,6 +1427,7 @@ class Dispatcher:
         known = frozenset(fields_meta.keys())
         validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
         self._validate_relational_writes(rt, model, validated, fields_meta)
+        emails = self._gate_odoo_emails(rt, ctx.instance, model, validated, fields_meta, ids)
         n = len(validated)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
@@ -1032,6 +1449,7 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_write"),
             }
+            _add_odoo_emails(preview, emails)
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
@@ -1044,6 +1462,7 @@ class Dispatcher:
             "ids": ids,
             "committed": ok,
         }
+        _add_odoo_emails(result, emails)
         self._add_commits_remaining(result, ctx)
         return result
 
@@ -2251,6 +2670,34 @@ def _refuse_if_read_only_session() -> None:
             "Session is read-only (ODOO_MCP_READ_ONLY=1). All write paths "
             "are refused regardless of instance, prod-guard state, or unlock."
         )
+
+
+def _many2one_id(value: Any) -> int | None:
+    """Return the id of a many2one read value (``[id, name]`` or ``False``)."""
+    return value[0] if isinstance(value, list) and value else None
+
+
+def _is_record_id(value: Any) -> bool:
+    """True iff ``value`` is a positive int id (``bool`` excluded)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_number(value: Any) -> bool:
+    """True iff ``value`` is an int or float (``bool`` excluded)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _x2many_adds(value: Any) -> bool:
+    """True iff an x2many command list links or creates at least one record."""
+    if not isinstance(value, list):
+        return False
+    return any(cmd[0] in (0, 4) or (cmd[0] == 6 and cmd[2]) for cmd in value)
+
+
+def _add_odoo_emails(out: dict[str, Any], emails: list[str]) -> None:
+    """Disclose the email Odoo itself sends during a create/write (preview and commit alike)."""
+    if emails:
+        out["odoo_will_email"] = emails
 
 
 def _refuse_write_blocklisted(model: str) -> None:

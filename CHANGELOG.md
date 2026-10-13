@@ -10,6 +10,55 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **`odoo_create` / `odoo_write` on `calendar.event` no longer email
+  attendees without the external-comms opt-ins.** Odoo sends calendar
+  invitations from inside `calendar.event` create/write (16.0 to 20.0,
+  and from 18.0 on `force_send=True`, so the mail goes out during the
+  RPC). An event created with attendees, attendees added to an event, or
+  a `start` moved on an event with other attendees therefore sent
+  outbound email that `odoo_send_message` keeps behind
+  `ODOO_MCP_ENABLE_EXTERNAL_COMMS=1` + `external_comms_enabled = true`.
+  Those payloads (also as nested `(0, 0, vals)` / `(1, id, vals)`
+  commands) now need both opt-ins and are refused before the dry run
+  otherwise. When allowed, the preview and the commit result both carry
+  `odoo_will_email`. An event with only the session user as attendee
+  (Odoo's default) sends nothing and stays allowed.
+- **`odoo_create` / `odoo_write` that move `stage_id` into a stage with a
+  mail template no longer email the customer without the same opt-ins.**
+  Odoo posts the stage's template to the recipients it names from inside
+  create/write (`project.task`, `project.project`, `hr.applicant`,
+  `event.track`; 16.0 to 20.0), and `project.task` also sends a rating
+  request with `force_send=True` when the stage is in rating mode. Those
+  payloads, nested commands included, are now refused before the dry run
+  without both opt-ins, and disclosed in `odoo_will_email` when allowed. A
+  write that leaves every record in its current stage, a stage without a
+  template, and a create without an explicit `stage_id` send nothing and
+  stay allowed.
+- **`odoo_create` / `odoo_write` that confirm an `event.registration` no
+  longer email the attendee without the same opt-ins.** A registration that
+  becomes `open` (a create, where `open` is Odoo's default from 17.0, or a
+  write moving it out of `draft` / `cancel`) runs its event's "after each
+  registration" mail schedulers from inside create/write as superuser
+  (`_update_mail_schedulers`, 16.0 to 20.0). Those payloads, nested
+  `(0, 0, vals)` / `(1, id, vals)` under `event.event` included, are now
+  refused before the dry run without both opt-ins, and disclosed in
+  `odoo_will_email` when allowed. Registrations on an event without such a
+  scheduler, and creates in `draft` / `done` / `cancel`, stay allowed.
+- **`odoo_create` / `odoo_write` on `loyalty.card` no longer email the
+  card's customer without the same opt-ins.** When the card's program has
+  a communication plan (`loyalty.mail`), Odoo sends the "At Creation"
+  template (with the coupon / gift card code) from inside `loyalty.card`
+  create, and the "When Reaching" template when a `points` increase
+  crosses a milestone (from `loyalty.card` write up to 19.0, and from
+  `loyalty.history` create on 20.0, where `points` is stored as history
+  lines). Those payloads, a nested `(0, 0, vals)` under `loyalty.program`
+  included, are now refused before the dry run without both opt-ins, and
+  disclosed in `odoo_will_email` when allowed. Cards without a customer,
+  programs without a plan, and points changes that cross no milestone
+  stay allowed.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
