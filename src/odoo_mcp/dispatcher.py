@@ -201,6 +201,22 @@ _REGISTRATION_OPEN: Final[str] = "open"
 _REGISTRATION_UNCONFIRMED: Final[frozenset[str]] = frozenset({"draft", "cancel"})
 _EVENT_SCHEDULER_MODEL: Final[str] = "event.mail"
 
+# A loyalty.card (coupon, gift card, eWallet) mails its customer from inside
+# create/write when its program has a communication plan (``loyalty.mail``),
+# 16.0 to 20.0: create sends the "At Creation" template with the card's code,
+# and a points increase that crosses a "When Reaching" milestone sends that
+# template. Up to 19.0 the milestone mail is sent from ``loyalty.card.write``;
+# from 20.0 ``points`` is stored as loyalty.history lines and the mail is sent
+# from ``loyalty.history.create``, so a direct history line counts there too.
+# Only a card with a customer (``partner_id``) is mailed.
+_LOYALTY_CARD_MODEL: Final[str] = "loyalty.card"
+_LOYALTY_HISTORY_MODEL: Final[str] = "loyalty.history"
+_LOYALTY_MAIL_MODEL: Final[str] = "loyalty.mail"
+# A loyalty.history field that exists only from 20.0, the first release whose
+# history create sends the milestone mail.
+_LOYALTY_HISTORY_MAILS_MARKER: Final[str] = "linked_loyalty_history_id"
+_LOYALTY_MILESTONE_LIMIT: Final[int] = 200
+
 
 # ---------------------------------------------------------------------------
 # Shared application state
@@ -1007,7 +1023,9 @@ class Dispatcher:
         Odoo sends calendar invitations and "date changed" mails from inside
         ``calendar.event`` create/write (see :data:`_CALENDAR_EVENT_MODEL`),
         and a stage's mail template or rating request when ``stage_id`` moves
-        (see :data:`_STAGE_TEMPLATE_FIELDS`), so a generic ``odoo_create`` /
+        (see :data:`_STAGE_TEMPLATE_FIELDS`), and a loyalty card's communication
+        plan when a card is created or topped up (see
+        :data:`_LOYALTY_CARD_MODEL`), so a generic ``odoo_create`` /
         ``odoo_write`` would otherwise send outbound email without the opt-ins
         ``odoo_send_message`` requires. Nested x2many create/update commands
         are followed too: a ``(0, 0, vals)`` into ``calendar.event`` is a
@@ -1064,6 +1082,14 @@ class Dispatcher:
             out += self._stage_email_triggers(rt, model, values, fields_meta, ids)
         if model == _REGISTRATION_MODEL:
             out += self._registration_email_triggers(rt, values, ids)
+        if model == _LOYALTY_CARD_MODEL:
+            out += self._loyalty_card_email_triggers(rt, values, ids)
+        if (
+            model == _LOYALTY_HISTORY_MODEL
+            and ids is None
+            and _LOYALTY_HISTORY_MAILS_MARKER in fields_meta
+        ):
+            out += self._loyalty_history_email_triggers(rt, values)
         if depth >= _MAX_RELATIONAL_WRITE_DEPTH:
             return out
         for name, value in values.items():
@@ -1184,6 +1210,96 @@ class Dispatcher:
         if not rt.client.search_count(_EVENT_SCHEDULER_MODEL, domain):
             return []
         return [f"{where}: the event's 'after each registration' mails to the attendee"]
+
+    def _loyalty_card_email_triggers(
+        self,
+        rt: InstanceRuntime,
+        values: dict[str, Any],
+        ids: list[int] | None,
+    ) -> list[str]:
+        """List the loyalty mails Odoo sends when ``values`` creates or tops up cards.
+
+        A create mails a customer when the program has an "At Creation" plan
+        (or a milestone the starting points reach). A create without
+        ``program_id`` (a nested ``(0, 0, vals)`` under loyalty.program) is
+        assumed to have one. A write mails only when ``points`` rises past a
+        milestone of the card's program.
+        """
+        points: Any = values.get("points")
+        if ids is None:
+            if not values.get("partner_id"):
+                return []
+            where = f"new {_LOYALTY_CARD_MODEL}"
+            program_id = values.get("program_id")
+            if not _is_record_id(program_id):
+                return [f"{where}: its program's loyalty emails to the customer"]
+            triggers = ["create"]
+            if _is_number(points) and points > 0:
+                triggers.append("points_reach")
+            domain = [("program_id", "=", program_id), ("trigger", "in", triggers)]
+            if not rt.client.search_count(_LOYALTY_MAIL_MODEL, domain):
+                return []
+            return [f"{where}: its program's loyalty emails to the customer"]
+        if not _is_number(points):
+            return []
+        rows = rt.client.read(_LOYALTY_CARD_MODEL, ids, ["points", "partner_id", "program_id"])
+        changes = []
+        for row in rows:
+            partner = values["partner_id"] if "partner_id" in values else row.get("partner_id")
+            if not partner:
+                continue
+            program = values.get("program_id") or _many2one_id(row.get("program_id"))
+            changes.append((row["id"], program, row.get("points") or 0.0, float(points)))
+        return self._loyalty_milestone_triggers(rt, changes)
+
+    def _loyalty_history_email_triggers(
+        self, rt: InstanceRuntime, values: dict[str, Any]
+    ) -> list[str]:
+        """List the milestone mails a new loyalty.history line sends (20.0 and later)."""
+        issued: Any = values.get("issued")
+        card_id: Any = values.get("card_id")
+        if not _is_number(issued) or issued <= 0 or not _is_record_id(card_id):
+            return []
+        rows = rt.client.read(
+            _LOYALTY_CARD_MODEL, [card_id], ["points", "partner_id", "program_id"]
+        )
+        changes = []
+        for row in rows:
+            if not row.get("partner_id"):
+                continue
+            old = row.get("points") or 0.0
+            program = _many2one_id(row.get("program_id"))
+            changes.append((row["id"], program, old, old + issued))
+        return self._loyalty_milestone_triggers(rt, changes)
+
+    def _loyalty_milestone_triggers(
+        self, rt: InstanceRuntime, changes: list[tuple[int, int | None, float, float]]
+    ) -> list[str]:
+        """List the cards whose ``(card, program, old, new)`` points cross a milestone."""
+        rising = [change for change in changes if change[3] > change[2] and change[1]]
+        if not rising:
+            return []
+        domain = [
+            ("program_id", "in", sorted({change[1] for change in rising if change[1]})),
+            ("trigger", "=", "points_reach"),
+        ]
+        milestones = rt.client.search_read(
+            _LOYALTY_MAIL_MODEL, domain, ["program_id", "points"], _LOYALTY_MILESTONE_LIMIT, 0, None
+        )
+        crossed = [
+            card
+            for card, program, old, new in rising
+            if any(
+                _many2one_id(m.get("program_id")) == program
+                and old < (m.get("points") or 0.0) <= new
+                for m in milestones
+            )
+        ]
+        if not crossed:
+            return []
+        return [
+            f"{_LOYALTY_CARD_MODEL} {crossed}: the program's 'When Reaching' email to the customer"
+        ]
 
     def _task_rating_requested(
         self,
@@ -2564,6 +2680,11 @@ def _many2one_id(value: Any) -> int | None:
 def _is_record_id(value: Any) -> bool:
     """True iff ``value`` is a positive int id (``bool`` excluded)."""
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_number(value: Any) -> bool:
+    """True iff ``value`` is an int or float (``bool`` excluded)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _x2many_adds(value: Any) -> bool:

@@ -46,6 +46,18 @@ breaking change explicitly in this file.
   refused before the dry run without both opt-ins, and disclosed in
   `odoo_will_email` when allowed. Registrations on an event without such a
   scheduler, and creates in `draft` / `done` / `cancel`, stay allowed.
+- **`odoo_create` / `odoo_write` on `loyalty.card` no longer email the
+  card's customer without the same opt-ins.** When the card's program has
+  a communication plan (`loyalty.mail`), Odoo sends the "At Creation"
+  template (with the coupon / gift card code) from inside `loyalty.card`
+  create, and the "When Reaching" template when a `points` increase
+  crosses a milestone (from `loyalty.card` write up to 19.0, and from
+  `loyalty.history` create on 20.0, where `points` is stored as history
+  lines). Those payloads, a nested `(0, 0, vals)` under `loyalty.program`
+  included, are now refused before the dry run without both opt-ins, and
+  disclosed in `odoo_will_email` when allowed. Cards without a customer,
+  programs without a plan, and points changes that cross no milestone
+  stay allowed.
 
 ## [0.27.0] - 2026-08-20
 
