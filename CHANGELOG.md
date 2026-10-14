@@ -10,6 +10,17 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_read_group` no longer returns one aggregate labelled as another.**
+  Odoo's `read_group` names each aggregate after its field. On 17.0-19.0,
+  `fields=["amount_total:sum", "amount_total:max"]` computed only the max
+  and returned it as `amount_total`, and an aggregate on a grouped field
+  (`partner_id:count` with `groupby=["partner_id"]`) replaced the group
+  label with the count. 16.0 raised or dropped the value instead. Both
+  shapes are now refused before the call, with a message that says to use
+  one function per field per call.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

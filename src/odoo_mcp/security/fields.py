@@ -387,11 +387,19 @@ def validate_aggregate_fields(
     Same redaction policy as :func:`validate_requested_fields`:
     always-redacted fields are banned unconditionally, default-hidden fields
     require opt-in via ``allow_sensitive``.
+
+    Two different specs on the same field (``amount:sum`` and ``amount:max``,
+    or ``amount`` and ``amount:sum``) are refused. Odoo's legacy ``read_group``
+    names every aggregate after its field: 16.0 raises "Output name used
+    twice", and 17.0-19.0 keep them in a dict keyed by that name, so only the
+    last spec is computed and the result says ``amount`` with no function.
+    The caller would read a max as a sum.
     """
     if not isinstance(fields, list) or not fields:
         raise FieldPolicyError(
             "Aggregate field list is required — pass at least one 'field' or 'field:agg'."
         )
+    seen: dict[str, str] = {}
     for spec in fields:
         if not isinstance(spec, str) or not spec:
             raise FieldPolicyError(
@@ -412,6 +420,13 @@ def validate_aggregate_fields(
             )
         if not name:
             raise FieldPolicyError(f"Aggregate field spec {spec!r} has empty field name.")
+        if seen.setdefault(name, spec) != spec:
+            raise FieldPolicyError(
+                f"Aggregate specs {seen[name]!r} and {spec!r} both aggregate {name!r}. "
+                f"Odoo returns one value per field name, so the second would silently "
+                f"replace the first. Use one function per field per call, and make a "
+                f"second odoo_read_group call for the other function."
+            )
         if "." in name:
             raise FieldPolicyError(f"Dotted aggregate field {name!r} not allowed.")
         if name not in known_fields:
@@ -427,6 +442,29 @@ def validate_aggregate_fields(
                 f"explicitly unlocked via allow_sensitive_fields=[{name!r}, ...]."
             )
     return list(fields)
+
+
+def check_aggregate_groupby_overlap(fields: list[str], groupby: list[str], *, lazy: bool) -> None:
+    """Refuse ``field:agg`` on a field the call also groups by.
+
+    Odoo returns the group value and the aggregate under the same key. On
+    17.0-19.0 the aggregate overwrites the group label (``stage_id`` comes
+    back as a count instead of ``[id, name]``), and 16.0 drops the aggregate
+    (also for ``date:count`` next to ``date:month``). Either way one of the two
+    answers is silently missing. In lazy mode Odoo groups only by the first
+    entry, so only that one can collide. A bare field name in ``fields`` is
+    fine: Odoo skips it when it is grouped.
+    """
+    grouped = {g.split(":")[0] for g in (groupby[:1] if lazy else groupby)}
+    for spec in fields:
+        name, sep, _agg = spec.partition(":")
+        if sep and name in grouped:
+            raise FieldPolicyError(
+                f"Aggregate {spec!r} is on {name!r}, which is also a groupby field. "
+                f"Odoo returns both under the key {name!r}, so one of them is lost. "
+                f"Each group already has a count ('__count' or '<groupby>_count'); "
+                f"drop {spec!r} or aggregate another field."
+            )
 
 
 def validate_groupby(
