@@ -67,6 +67,7 @@ from .security.document_actions import (
 )
 from .security.domain import sandbox_domain
 from .security.fields import (
+    check_aggregate_groupby_overlap,
     redact_fields_get,
     redact_response,
     restrict_fields_meta,
@@ -713,6 +714,7 @@ class Dispatcher:
             instance_overrides=overrides,
             extra_redacted=rt.extra_redacted,
         )
+        check_aggregate_groupby_overlap(fields, groupby, lazy=lazy)
         domain = sandbox_domain(
             args.get("domain") or [],
             known,
