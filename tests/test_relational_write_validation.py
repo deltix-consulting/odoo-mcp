@@ -23,6 +23,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from odoo_mcp.audit import AuditLog
 from odoo_mcp.client import OdooClient
 from odoo_mcp.config import AppConfig, Defaults, InstanceConfig
@@ -36,6 +38,7 @@ _META: dict[str, dict[str, dict[str, Any]]] = {
     "res.partner": {
         "id": {"type": "integer"},
         "name": {"type": "char"},
+        "active": {"type": "boolean"},
         "user_ids": {"type": "one2many", "relation": "res.users"},
         "category_id": {"type": "many2many", "relation": "res.partner.category"},
         "parent_id": {"type": "many2one", "relation": "res.partner"},
@@ -285,3 +288,100 @@ def test_m2m_set_command_rejects_non_int_ids(tmp_path: Path) -> None:
     assert payload["ok"] is False
     assert payload["error_code"] == "field_policy"
     assert fake.written == []
+
+
+# --- a many2one value Odoo would store as an empty relation ---------------
+#
+# ``Many2one.convert_to_cache`` (16.0 to 20.0) maps anything that is not an
+# int, a recordset, a tuple or a dict to ``None``. ``BaseModel.write`` goes
+# through ``Field.write`` → ``convert_to_cache``, so ``partner_id="42"``,
+# ``"Acme"``, ``42.0`` or ``True`` clears the partner instead of setting it,
+# with no error. ``_create`` fills the cache the same way, so every field
+# computed from the relation in that transaction sees no record. The dry run
+# previews the value verbatim, so a human approved "set partner to 42" and
+# the commit emptied it.
+
+
+def _write(disp: Dispatcher, model: str, values: dict[str, Any]) -> dict[str, Any]:
+    return _call(
+        disp,
+        "odoo_write",
+        {"instance": "dev", "model": model, "ids": [1], "values": values, "dry_run": False},
+    )
+
+
+def _create(disp: Dispatcher, model: str, values: dict[str, Any]) -> dict[str, Any]:
+    return _call(
+        disp,
+        "odoo_create",
+        {"instance": "dev", "model": model, "values": values, "dry_run": False},
+    )
+
+
+_NOT_AN_ID: list[Any] = ["42", "Acme", 42.0, True]
+
+
+@pytest.mark.parametrize("value", _NOT_AN_ID)
+def test_many2one_non_int_value_refused_on_write(tmp_path: Path, value: Any) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _write(disp, "sale.order", {"partner_id": value})
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert "empty relation" in payload["error"]
+    assert "odoo_lookup(model='res.partner'" in payload["error"]
+    assert fake.written == []
+
+
+@pytest.mark.parametrize("value", _NOT_AN_ID)
+def test_many2one_non_int_value_refused_on_create(tmp_path: Path, value: Any) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _create(disp, "sale.order", {"partner_id": value})
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert fake.created == []
+
+
+def test_many2one_non_int_value_refused_inside_nested_command(tmp_path: Path) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _create(
+        disp,
+        "sale.order",
+        {"partner_id": 5, "order_line": [(0, 0, {"name": "Widget", "product_id": "7"})]},
+    )
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert "'product_id' on 'sale.order.line'" in payload["error"]
+    assert fake.created == []
+
+
+@pytest.mark.parametrize("value", [5, 0, False, None])
+def test_many2one_id_or_clear_still_sent_unchanged(tmp_path: Path, value: Any) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _write(disp, "sale.order", {"partner_id": value})
+    assert payload["ok"] is True
+    assert payload["committed"] is True
+    assert fake.written == [("sale.order", [1], {"partner_id": value})]
+
+
+# --- a boolean value Odoo reads as bool(value) -----------------------------
+#
+# ``Boolean.convert_to_cache`` is ``bool(value)`` (16.0 to 20.0), so the
+# string "false" writes True.
+
+
+@pytest.mark.parametrize("value", ["false", "no", "0", "", 1.0, [False]])
+def test_boolean_non_bool_value_refused(tmp_path: Path, value: Any) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _write(disp, "res.partner", {"active": value})
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert "takes true or false" in payload["error"]
+    assert fake.written == []
+
+
+@pytest.mark.parametrize("value", [True, False, 0, 1, None])
+def test_boolean_bool_int_or_none_still_sent_unchanged(tmp_path: Path, value: Any) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _write(disp, "res.partner", {"active": value})
+    assert payload["ok"] is True
+    assert fake.written == [("res.partner", [1], {"active": value})]

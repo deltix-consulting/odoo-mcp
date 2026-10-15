@@ -195,8 +195,13 @@ let a write reach a model the caller can't name — forging a
 `res.groups`. So every command's target model runs through the same
 denylist + allowlist + write-blocklist checks the top-level model
 does, and nested value dicts recurse through the always-redacted /
-default-hidden field policy (with bounded nesting depth). Legitimate
-nested writes such as a sale order with `order_line` are unaffected.
+default-hidden field policy (with bounded nesting depth). A many2one
+takes an integer id, `False` or `None` only: Odoo stores a string, a
+float or `True` on it as an *empty* relation rather than raising, so
+those shapes are refused before the dry run can preview a value the
+commit would not set (a boolean likewise refuses the string `"false"`,
+which Odoo reads as true). Legitimate nested writes such as a sale
+order with `order_line` are unaffected.
 
 **7. Read-only model enforcement.** A small hardcoded
 `MODEL_WRITE_BLOCKLIST` (`mail.message`, `mail.followers`,

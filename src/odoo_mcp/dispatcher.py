@@ -854,16 +854,49 @@ class Dispatcher:
         for name, value in validated.items():
             meta = fields_meta.get(name) or {}
             ttype = meta.get("type")
+            if ttype == "boolean":
+                # Odoo's ``Boolean.convert_to_cache`` is ``bool(value)`` (16.0
+                # to 20.0): the strings "false", "no" and "0" all write True.
+                # Refuse a non-bool so the dry run cannot preview one thing
+                # and the commit write the opposite. Ints stay: 0 / 1 read
+                # as Odoo reads them.
+                if value is not None and not isinstance(value, (bool, int)):
+                    raise FieldPolicyError(
+                        f"Field {name!r} on {model!r} is a boolean and takes true or false, "
+                        f'got {value!r}. Odoo reads any non-empty string, "false" included, '
+                        f"as true."
+                    )
+                continue
             if ttype not in _RELATIONAL_TYPES:
                 continue
             relation = meta.get("relation")
             if ttype == "many2one":
-                # A many2one takes a scalar id (or False/None). A list/dict
-                # here is a smuggled nested create/command payload — refuse.
+                # A many2one takes an integer record id, or False / None to
+                # clear it. A list/dict here is a smuggled nested
+                # create/command payload — refuse.
                 if isinstance(value, (list, dict)):
                     raise FieldPolicyError(
                         f"Field {name!r} on {model!r} is a many2one and takes a record id, "
                         f"not a nested create or command payload."
+                    )
+                # Every other shape is NOT an Odoo error. ``Many2one
+                # .convert_to_cache`` (16.0 to 20.0) maps a str (even "42"),
+                # a float and True to None, and both ``write()`` and
+                # ``_create()`` fill the cache through it. So a write
+                # silently CLEARS the relation, and on create every field
+                # computed from it sees no record. Refuse before the preview
+                # can show a value the commit will not set.
+                if (
+                    value is not None
+                    and value is not False
+                    and (isinstance(value, bool) or not isinstance(value, int))
+                ):
+                    raise FieldPolicyError(
+                        f"Field {name!r} on {model!r} is a many2one and takes an integer "
+                        f"record id (or False to clear it), got {value!r}. Odoo would "
+                        f"store this as an empty relation, not raise an error. Resolve "
+                        f"a name to an id with odoo_lookup(model={relation!r}, "
+                        f"query=...) first."
                     )
                 continue
             # one2many / many2many: a list of Odoo command tuples.
