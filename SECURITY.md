@@ -200,8 +200,10 @@ takes an integer id, `False` or `None` only: Odoo stores a string, a
 float or `True` on it as an *empty* relation rather than raising, so
 those shapes are refused before the dry run can preview a value the
 commit would not set (a boolean likewise refuses the string `"false"`,
-which Odoo reads as true). Legitimate nested writes such as a sale
-order with `order_line` are unaffected.
+which Odoo reads as true, and a numeric field refuses a boolean, which
+Odoo's `int()` / `float()` coercion would silently store as `1` or `0`).
+Legitimate nested writes such as a sale order with `order_line` are
+unaffected.
 
 **7. Read-only model enforcement.** A small hardcoded
 `MODEL_WRITE_BLOCKLIST` (`mail.message`, `mail.followers`,

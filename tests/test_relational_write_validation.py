@@ -45,6 +45,8 @@ _META: dict[str, dict[str, dict[str, Any]]] = {
     },
     "sale.order": {
         "id": {"type": "integer"},
+        "sequence": {"type": "integer"},
+        "amount_total": {"type": "monetary"},
         "partner_id": {"type": "many2one", "relation": "res.partner"},
         "order_line": {"type": "one2many", "relation": "sale.order.line"},
         "tag_ids": {"type": "many2many", "relation": "crm.tag"},
@@ -385,3 +387,62 @@ def test_boolean_bool_int_or_none_still_sent_unchanged(tmp_path: Path, value: An
     payload = _write(disp, "res.partner", {"active": value})
     assert payload["ok"] is True
     assert fake.written == [("res.partner", [1], {"active": value})]
+
+
+# --- a boolean on a numeric field, which Odoo coerces to 1 / 0 -------------
+#
+# The mirror of the boolean case above. ``Integer.convert_to_cache`` is
+# ``int(value or 0)`` and ``Float`` / ``Monetary`` are ``float(value or 0.0)``
+# (16.0 to 20.0). A Python bool is an ``int`` subclass, so ``True`` writes
+# 1 / 1.0 and ``False`` writes 0 / 0.0 with no error — an agent that took the
+# field for a boolean approves ``sequence=True`` and the commit stores 1.
+
+
+@pytest.mark.parametrize(
+    ("model", "field"),
+    [
+        ("sale.order", "sequence"),  # integer
+        ("sale.order", "amount_total"),  # monetary
+        ("sale.order.line", "product_uom_qty"),  # float
+    ],
+)
+@pytest.mark.parametrize("value", [True, False])
+def test_numeric_boolean_value_refused(tmp_path: Path, model: str, field: str, value: bool) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _write(disp, model, {field: value})
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert "takes a number" in payload["error"]
+    # The refusal shows the silent value Odoo would have stored (1 / 0).
+    assert f"store this as {int(value)}" in payload["error"]
+    assert fake.written == []
+
+
+def test_numeric_boolean_value_refused_on_create(tmp_path: Path) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _create(disp, "sale.order", {"partner_id": 5, "sequence": True})
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert fake.created == []
+
+
+def test_numeric_boolean_value_refused_inside_nested_command(tmp_path: Path) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _create(
+        disp,
+        "sale.order",
+        {"partner_id": 5, "order_line": [(0, 0, {"name": "Widget", "product_uom_qty": True})]},
+    )
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert "'product_uom_qty' on 'sale.order.line'" in payload["error"]
+    assert fake.created == []
+
+
+@pytest.mark.parametrize("value", [5, 0, 3.5, 0.0, None])
+def test_numeric_number_or_none_still_sent_unchanged(tmp_path: Path, value: Any) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _write(disp, "sale.order", {"sequence": value})
+    assert payload["ok"] is True
+    assert payload["committed"] is True
+    assert fake.written == [("sale.order", [1], {"sequence": value})]

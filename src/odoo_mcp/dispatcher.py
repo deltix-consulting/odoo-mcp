@@ -148,6 +148,7 @@ def _disabled_tool_names() -> frozenset[str]:
 # there). Relational write payloads are policed by
 # ``Dispatcher._validate_relational_writes``.
 _RELATIONAL_TYPES: Final[frozenset[str]] = frozenset({"many2one", "one2many", "many2many"})
+_NUMERIC_TYPES: Final[frozenset[str]] = frozenset({"integer", "float", "monetary"})
 
 # Maximum depth of nested relational create/update commands accepted in a
 # single write. A sale order with lines is depth 1; deeper is rare and mostly
@@ -865,6 +866,25 @@ class Dispatcher:
                         f"Field {name!r} on {model!r} is a boolean and takes true or false, "
                         f'got {value!r}. Odoo reads any non-empty string, "false" included, '
                         f"as true."
+                    )
+                continue
+            if ttype in _NUMERIC_TYPES:
+                # The mirror of the boolean case. ``Integer.convert_to_cache``
+                # is ``int(value or 0)`` and ``Float`` / ``Monetary`` are
+                # ``float(value or 0.0)`` (16.0 to 20.0), so a Python bool —
+                # itself an ``int`` subclass — is silently coerced: ``True``
+                # writes 1 / 1.0 and ``False`` writes 0 / 0.0, with no error.
+                # An agent that confused the field for a boolean approves
+                # ``amount=True`` and the commit stores 1.0. Refuse a bool;
+                # genuine ints / floats / None pass (Odoo reads them as
+                # intended — a float on an integer field still truncates, a
+                # separately scoped case).
+                if isinstance(value, bool):
+                    raise FieldPolicyError(
+                        f"Field {name!r} on {model!r} is a {ttype} and takes a number, "
+                        f"got the boolean {value!r}. Odoo would store this as "
+                        f"{int(value)} rather than raise an error. Pass the number you "
+                        f"mean (e.g. {int(value)}), or check the field is not a boolean."
                     )
                 continue
             if ttype not in _RELATIONAL_TYPES:

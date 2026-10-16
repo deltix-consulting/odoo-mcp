@@ -25,8 +25,15 @@ breaking change explicitly in this file.
   names `odoo_lookup` on the related model as the way to resolve a name
   to an id. Same class on booleans: `Boolean.convert_to_cache` is
   `bool(value)`, so `active="false"` wrote `True`. A boolean now takes
-  only `true` / `false`, an int, or `None`. Values Odoo reads as
-  intended are sent unchanged.
+  only `true` / `false`, an int, or `None`. The mirror on numbers:
+  `Integer.convert_to_cache` is `int(value or 0)` and `Float` /
+  `Monetary` are `float(value or 0.0)`, and a Python `bool` is an `int`
+  subclass, so `True` on an integer / float / monetary field wrote `1` /
+  `1.0` and `False` wrote `0` / `0.0` with no error — an agent that took
+  the field for a boolean approved `sequence=True` and the commit stored
+  `1`. A numeric field now refuses a bool (the refusal shows the value
+  Odoo would have stored); genuine ints and floats pass. Values Odoo
+  reads as intended are sent unchanged.
 
 ## [0.27.0] - 2026-08-20
 
