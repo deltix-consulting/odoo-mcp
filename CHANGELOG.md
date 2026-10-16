@@ -10,6 +10,31 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A string, float or `True` on a many2one is refused instead of
+  silently clearing the relation.** Odoo's `Many2one.convert_to_cache`
+  (16.0 to 20.0) maps every value that is not an integer id to `None`,
+  and `write()` reaches the cache through it. So `odoo_write(sale.order,
+  partner_id="42")`, or `"Acme"`, `42.0`, `True`, emptied the partner
+  with no error, while the dry run had previewed the value verbatim.
+  On `create` the same cache fill leaves every field computed from the
+  relation (addresses, pricelist, payment terms) seeing no record. The
+  relational gate only refused a list or dict on a many2one; it now also
+  refuses anything but an `int`, `False` or `None`, and the refusal
+  names `odoo_lookup` on the related model as the way to resolve a name
+  to an id. Same class on booleans: `Boolean.convert_to_cache` is
+  `bool(value)`, so `active="false"` wrote `True`. A boolean now takes
+  only `true` / `false`, an int, or `None`. The mirror on numbers:
+  `Integer.convert_to_cache` is `int(value or 0)` and `Float` /
+  `Monetary` are `float(value or 0.0)`, and a Python `bool` is an `int`
+  subclass, so `True` on an integer / float / monetary field wrote `1` /
+  `1.0` and `False` wrote `0` / `0.0` with no error — an agent that took
+  the field for a boolean approved `sequence=True` and the commit stored
+  `1`. A numeric field now refuses a bool (the refusal shows the value
+  Odoo would have stored); genuine ints and floats pass. Values Odoo
+  reads as intended are sent unchanged.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
