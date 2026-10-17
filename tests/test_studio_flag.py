@@ -118,3 +118,42 @@ def test_no_custom_fields_no_markers(tmp_path: Path) -> None:
         meta = payload["fields"][fname]
         assert "_custom" not in meta
         assert "_studio" not in meta
+
+
+# --- translate / company_dependent ------------------------------------------
+# Odoo stores these per language / per company; one call touches one value.
+
+_SCOPED_FIELDS: dict[str, dict[str, Any]] = {
+    "name": {"type": "char", "string": "Name", "translate": True},
+    "standard_price": {"type": "float", "string": "Cost", "company_dependent": True},
+    "default_code": {"type": "char", "string": "Reference", "translate": False},
+}
+
+
+def test_translate_and_company_dependent_marked_by_default(tmp_path: Path) -> None:
+    disp = Dispatcher(_build(tmp_path, _SCOPED_FIELDS))
+    out = _call(disp, {"instance": "dev", "model": "product.template"})
+    assert out["fields"]["name"]["translate"] is True
+    assert out["fields"]["standard_price"]["company_dependent"] is True
+    # Falsy flags are dropped in the minimal response.
+    assert "translate" not in out["fields"]["default_code"]
+    notes = out["notes"]
+    assert len(notes) == 2
+    assert "en_US" in notes[0] and "only the en_US value" in notes[0]
+    assert "current company only" in notes[1]
+
+
+def test_translate_and_company_dependent_kept_in_verbose(tmp_path: Path) -> None:
+    disp = Dispatcher(_build(tmp_path, _SCOPED_FIELDS))
+    out = _call(disp, {"instance": "dev", "model": "product.template", "verbose": True})
+    assert out["fields"]["name"]["translate"] is True
+    assert out["fields"]["standard_price"]["company_dependent"] is True
+    assert len(out["notes"]) == 2
+
+
+def test_no_scoped_fields_no_notes(tmp_path: Path) -> None:
+    fields = {"name": {"type": "char", "string": "Name", "translate": False}}
+    disp = Dispatcher(_build(tmp_path, fields))
+    out = _call(disp, {"instance": "dev", "model": "res.partner"})
+    assert "notes" not in out
+    assert out["fields"]["name"] == {"type": "char", "string": "Name"}

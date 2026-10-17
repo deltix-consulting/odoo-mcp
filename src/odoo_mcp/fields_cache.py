@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS fields (
 # History:
 #   1 — initial format (type/string/required/readonly/help/relation)
 #   2 — v0.14.1: adds ``store`` attribute for smart-field selection
-_PAYLOAD_SCHEMA_VERSION = 2
+#   3 — adds ``translate`` / ``company_dependent`` for odoo_describe_model
+_PAYLOAD_SCHEMA_VERSION = 3
 
 
 class PersistentFieldsCache:

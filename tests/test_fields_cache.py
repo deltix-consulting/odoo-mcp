@@ -174,6 +174,22 @@ def test_wrong_schema_version_treated_as_miss(tmp_path: Path) -> None:
     assert cache.get("dev", "res.partner") is None
 
 
+def test_v2_rows_without_translate_flags_read_as_miss(tmp_path: Path) -> None:
+    """v2 payloads predate translate/company_dependent; they must re-fetch."""
+    import json
+    import sqlite3
+
+    cache = PersistentFieldsCache(tmp_path / "fc.db")
+    stale = json.dumps({"_v": 2, "fields": {"name": {"type": "char"}}})
+    with sqlite3.connect(str(tmp_path / "fc.db")) as conn:
+        conn.execute(
+            "INSERT INTO fields(instance, model, payload, fetched_at) VALUES(?,?,?,?)",
+            ("dev", "product.template", stale, time.time()),
+        )
+        conn.commit()
+    assert cache.get("dev", "product.template") is None
+
+
 def test_round_trip_uses_current_schema_version(tmp_path: Path) -> None:
     """``put`` writes the wrapper; ``get`` decodes it transparently."""
     cache = PersistentFieldsCache(tmp_path / "fc.db")
