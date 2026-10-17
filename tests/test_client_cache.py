@@ -182,3 +182,17 @@ def test_fields_cache_default_cap_is_64() -> None:
     creds = Credentials(instance_name="dev", username="u", _api_key="k" * 10)
     client = OdooClient(cfg, credentials=creds)
     assert client._fields_cache_max_size == 64
+
+
+def test_fields_get_requests_translate_and_company_dependent() -> None:
+    """odoo_describe_model surfaces both flags, so fields_get must ask for them."""
+    client, _ = _build_client(None, execute_results=[{"id": {"type": "integer"}}])
+    seen: dict[str, Any] = {}
+
+    def _capture(model: str, method: str, args: list[Any], kwargs: dict[str, Any]) -> Any:
+        seen.update(kwargs)
+        return {"id": {"type": "integer"}}
+
+    client._execute = _capture  # type: ignore[assignment]
+    client.fields_get("res.partner")
+    assert {"translate", "company_dependent"} <= set(seen["attributes"])

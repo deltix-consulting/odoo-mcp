@@ -10,6 +10,18 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`odoo_describe_model` marks fields Odoo stores per language or per
+  company.** `translate: true` and `company_dependent: true` now appear on
+  the fields that carry them (default and verbose), with a `notes` entry
+  explaining the scope. odoo-mcp reads and writes in `en_US`, so a write to
+  a translatable field (e.g. `product.template.name`) changes only the
+  English value, and a company_dependent field (e.g. `standard_price`) only
+  the API user's current company. The dry run shows just the field name, so
+  this was invisible before. The persistent fields cache moves to payload
+  v3; older rows re-fetch once.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

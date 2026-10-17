@@ -216,6 +216,33 @@ class OdooMcpApp:
 # ---------------------------------------------------------------------------
 
 
+# A field Odoo stores per language or per company holds several values, and
+# every call reads and writes exactly one of them. The dry run of a write
+# shows the field name only, so without these notes "rename the product"
+# looks done while users in another language still see the old name.
+# Wording is pinned by tests; the language follows client._FROZEN_CONTEXT.
+_TRANSLATE_NOTE = (
+    "Fields marked translate hold one value per language. odoo-mcp reads and "
+    "writes them in en_US: a write changes only the en_US value, and users "
+    "working in another language keep seeing their own translation."
+)
+_COMPANY_DEPENDENT_NOTE = (
+    "Fields marked company_dependent hold one value per company. A read or "
+    "write applies to the API user's current company only; other companies "
+    "keep their own value."
+)
+
+
+def _scoped_value_notes(fields: dict[str, dict[str, Any]]) -> list[str]:
+    """Explain the translate / company_dependent markers present in ``fields``."""
+    notes: list[str] = []
+    if any(meta.get("translate") for meta in fields.values()):
+        notes.append(_TRANSLATE_NOTE)
+    if any(meta.get("company_dependent") for meta in fields.values()):
+        notes.append(_COMPANY_DEPENDENT_NOTE)
+    return notes
+
+
 class Dispatcher:
     """Wires MCP tool names to handlers.
 
@@ -478,11 +505,13 @@ class Dispatcher:
                 "readonly",
                 "help",
                 "relation",
+                "translate",
+                "company_dependent",
                 "_sensitive",
                 "_note",
             }
         else:
-            keep = {"type", "string", "required", "_sensitive"}
+            keep = {"type", "string", "required", "translate", "company_dependent", "_sensitive"}
         raw = redact_fields_get(
             ctx.model,
             self._fields_meta(ctx.rt, ctx.model),
@@ -494,8 +523,9 @@ class Dispatcher:
                 fname: {k: v for k, v in meta.items() if k in keep} for fname, meta in raw.items()
             }
         else:
-            # Drop falsy required / _sensitive entries — they add no signal
-            # but ~15 chars per field. type + string are always kept.
+            # Drop falsy required / translate / company_dependent / _sensitive
+            # entries — they add no signal but ~15 chars per field. type +
+            # string are always kept.
             filtered = {
                 fname: {
                     k: v for k, v in meta.items() if k in keep and (k in {"type", "string"} or v)
@@ -523,7 +553,11 @@ class Dispatcher:
         if studio_count:
             details["studio_field_count"] = studio_count
         self._audit_ok(ctx, details, args)
-        return {"model": ctx.model, "fields": filtered}
+        result: dict[str, Any] = {"model": ctx.model, "fields": filtered}
+        notes = _scoped_value_notes(filtered)
+        if notes:
+            result["notes"] = notes
+        return result
 
     def _lookup(self, args: dict[str, Any]) -> dict[str, Any]:
         """Fast `name ilike` lookup returning only id + display_name.

@@ -674,6 +674,8 @@ class OdooClient:
                     "help",
                     "relation",
                     "store",
+                    "translate",
+                    "company_dependent",
                 ],
             },
         )
