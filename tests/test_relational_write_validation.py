@@ -446,3 +446,44 @@ def test_numeric_number_or_none_still_sent_unchanged(tmp_path: Path, value: Any)
     assert payload["ok"] is True
     assert payload["committed"] is True
     assert fake.written == [("sale.order", [1], {"sequence": value})]
+
+
+# --- a list or dict on a numeric field, which Odoo stores as 0 ---------------
+#
+# ``Integer.convert_to_cache`` (16.0 to 20.0) maps a dict to
+# ``value.get('id')`` (the one2many-inverse special case), so a write stores
+# the dict's ``id`` or 0. An empty list / dict on any numeric field is
+# ``int(value or 0)`` / ``float(value or 0.0)`` → 0. None of these raise.
+
+
+@pytest.mark.parametrize(
+    ("model", "field"),
+    [
+        ("sale.order", "sequence"),  # integer
+        ("sale.order", "amount_total"),  # monetary
+        ("sale.order.line", "product_uom_qty"),  # float
+    ],
+)
+@pytest.mark.parametrize("value", [{}, {"value": 5}, {"id": 7}, [], [5]])
+def test_numeric_container_value_refused(
+    tmp_path: Path, model: str, field: str, value: Any
+) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _write(disp, model, {field: value})
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert "takes a number" in payload["error"]
+    assert fake.written == []
+
+
+def test_numeric_container_value_refused_inside_nested_command(tmp_path: Path) -> None:
+    disp, fake = _build(tmp_path)
+    payload = _create(
+        disp,
+        "sale.order",
+        {"partner_id": 5, "order_line": [(0, 0, {"name": "Widget", "product_uom_qty": {}})]},
+    )
+    assert payload["ok"] is False
+    assert payload["error_code"] == "field_policy"
+    assert "'product_uom_qty' on 'sale.order.line'" in payload["error"]
+    assert fake.created == []

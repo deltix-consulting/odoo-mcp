@@ -886,6 +886,19 @@ class Dispatcher:
                         f"{int(value)} rather than raise an error. Pass the number you "
                         f"mean (e.g. {int(value)}), or check the field is not a boolean."
                     )
+                # A list or dict is never a number, and Odoo does not always
+                # say so. ``Integer.convert_to_cache`` (16.0 to 20.0) maps any
+                # dict to ``value.get('id')`` (its one2many-inverse special
+                # case), so a write stores the dict's ``id`` or, failing
+                # that, 0; an empty list / dict on any numeric field is
+                # ``int(value or 0)`` / ``float(value or 0.0)`` → 0. Only a
+                # non-empty list (and a non-empty dict on a float) raises.
+                if isinstance(value, (list, tuple, dict)):
+                    raise FieldPolicyError(
+                        f"Field {name!r} on {model!r} is a {ttype} and takes a number, "
+                        f"got a {type(value).__name__}. Odoo would store 0 (or a dict's "
+                        f"'id') rather than raise an error."
+                    )
                 continue
             if ttype not in _RELATIONAL_TYPES:
                 continue

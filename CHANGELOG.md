@@ -32,8 +32,12 @@ breaking change explicitly in this file.
   `1.0` and `False` wrote `0` / `0.0` with no error — an agent that took
   the field for a boolean approved `sequence=True` and the commit stored
   `1`. A numeric field now refuses a bool (the refusal shows the value
-  Odoo would have stored); genuine ints and floats pass. Values Odoo
-  reads as intended are sent unchanged.
+  Odoo would have stored); genuine ints and floats pass. A list or dict
+  on a numeric field is refused too: `Integer.convert_to_cache` maps a
+  dict to its `id` key (the one2many-inverse special case), so
+  `sequence={"value": 5}` wrote `0`, and an empty list or dict wrote `0`
+  / `0.0` on any numeric field. Values Odoo reads as intended are sent
+  unchanged.
 
 ## [0.27.0] - 2026-08-20
 
