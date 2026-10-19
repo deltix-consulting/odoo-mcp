@@ -148,6 +148,7 @@ def _disabled_tool_names() -> frozenset[str]:
 # there). Relational write payloads are policed by
 # ``Dispatcher._validate_relational_writes``.
 _RELATIONAL_TYPES: Final[frozenset[str]] = frozenset({"many2one", "one2many", "many2many"})
+_NUMERIC_TYPES: Final[frozenset[str]] = frozenset({"integer", "float", "monetary"})
 
 # Maximum depth of nested relational create/update commands accepted in a
 # single write. A sale order with lines is depth 1; deeper is rare and mostly
@@ -854,16 +855,81 @@ class Dispatcher:
         for name, value in validated.items():
             meta = fields_meta.get(name) or {}
             ttype = meta.get("type")
+            if ttype == "boolean":
+                # Odoo's ``Boolean.convert_to_cache`` is ``bool(value)`` (16.0
+                # to 20.0): the strings "false", "no" and "0" all write True.
+                # Refuse a non-bool so the dry run cannot preview one thing
+                # and the commit write the opposite. Ints stay: 0 / 1 read
+                # as Odoo reads them.
+                if value is not None and not isinstance(value, (bool, int)):
+                    raise FieldPolicyError(
+                        f"Field {name!r} on {model!r} is a boolean and takes true or false, "
+                        f'got {value!r}. Odoo reads any non-empty string, "false" included, '
+                        f"as true."
+                    )
+                continue
+            if ttype in _NUMERIC_TYPES:
+                # The mirror of the boolean case. ``Integer.convert_to_cache``
+                # is ``int(value or 0)`` and ``Float`` / ``Monetary`` are
+                # ``float(value or 0.0)`` (16.0 to 20.0), so a Python bool —
+                # itself an ``int`` subclass — is silently coerced: ``True``
+                # writes 1 / 1.0 and ``False`` writes 0 / 0.0, with no error.
+                # An agent that confused the field for a boolean approves
+                # ``amount=True`` and the commit stores 1.0. Refuse a bool;
+                # genuine ints / floats / None pass (Odoo reads them as
+                # intended — a float on an integer field still truncates, a
+                # separately scoped case).
+                if isinstance(value, bool):
+                    raise FieldPolicyError(
+                        f"Field {name!r} on {model!r} is a {ttype} and takes a number, "
+                        f"got the boolean {value!r}. Odoo would store this as "
+                        f"{int(value)} rather than raise an error. Pass the number you "
+                        f"mean (e.g. {int(value)}), or check the field is not a boolean."
+                    )
+                # A list or dict is never a number, and Odoo does not always
+                # say so. ``Integer.convert_to_cache`` (16.0 to 20.0) maps any
+                # dict to ``value.get('id')`` (its one2many-inverse special
+                # case), so a write stores the dict's ``id`` or, failing
+                # that, 0; an empty list / dict on any numeric field is
+                # ``int(value or 0)`` / ``float(value or 0.0)`` → 0. Only a
+                # non-empty list (and a non-empty dict on a float) raises.
+                if isinstance(value, (list, tuple, dict)):
+                    raise FieldPolicyError(
+                        f"Field {name!r} on {model!r} is a {ttype} and takes a number, "
+                        f"got a {type(value).__name__}. Odoo would store 0 (or a dict's "
+                        f"'id') rather than raise an error."
+                    )
+                continue
             if ttype not in _RELATIONAL_TYPES:
                 continue
             relation = meta.get("relation")
             if ttype == "many2one":
-                # A many2one takes a scalar id (or False/None). A list/dict
-                # here is a smuggled nested create/command payload — refuse.
+                # A many2one takes an integer record id, or False / None to
+                # clear it. A list/dict here is a smuggled nested
+                # create/command payload — refuse.
                 if isinstance(value, (list, dict)):
                     raise FieldPolicyError(
                         f"Field {name!r} on {model!r} is a many2one and takes a record id, "
                         f"not a nested create or command payload."
+                    )
+                # Every other shape is NOT an Odoo error. ``Many2one
+                # .convert_to_cache`` (16.0 to 20.0) maps a str (even "42"),
+                # a float and True to None, and both ``write()`` and
+                # ``_create()`` fill the cache through it. So a write
+                # silently CLEARS the relation, and on create every field
+                # computed from it sees no record. Refuse before the preview
+                # can show a value the commit will not set.
+                if (
+                    value is not None
+                    and value is not False
+                    and (isinstance(value, bool) or not isinstance(value, int))
+                ):
+                    raise FieldPolicyError(
+                        f"Field {name!r} on {model!r} is a many2one and takes an integer "
+                        f"record id (or False to clear it), got {value!r}. Odoo would "
+                        f"store this as an empty relation, not raise an error. Resolve "
+                        f"a name to an id with odoo_lookup(model={relation!r}, "
+                        f"query=...) first."
                     )
                 continue
             # one2many / many2many: a list of Odoo command tuples.
