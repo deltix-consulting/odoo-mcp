@@ -10,6 +10,18 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_archive_or_delete` refuses ids Odoo cannot find.** Odoo's
+  `unlink` returns `True` for ids that are already gone (no row-count
+  check on 16.0-20.0), and `write` does the same from 18.0 when no record
+  rule applies. A stale or mistyped id therefore came back as
+  `committed: true`, the audit log recorded a delete that never happened,
+  and the record the agent meant was left in place. One `search_read` on
+  `id in ids` (archived records included) now runs after the prod-guard
+  check and before the dry-run / commit split; any missing id refuses the
+  call with the count and up to 20 of the ids, and no token is issued.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

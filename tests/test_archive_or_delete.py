@@ -29,10 +29,17 @@ class _FakeClient:
     Records calls so tests can assert on write vs unlink dispatch.
     """
 
-    def __init__(self, fields: dict[str, dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        fields: dict[str, dict[str, Any]] | None = None,
+        existing: set[int] | None = None,
+    ) -> None:
         self._fields = fields if fields is not None else {"id": {"type": "integer"}}
+        # Ids Odoo can find; ``None`` means every id asked for exists.
+        self._existing = existing
         self.write_calls: list[tuple[str, list[int], dict[str, Any]]] = []
         self.unlink_calls: list[tuple[str, list[int]]] = []
+        self.search_read_calls: list[tuple[str, list[Any], list[str], int]] = []
         # Match the OdooClient interface used by _instance_summary.
         self.is_admin: bool | None = None
         self.admin_reason: str | None = None
@@ -42,6 +49,20 @@ class _FakeClient:
 
     def fields_get(self, model: str, *, use_cache: bool = True) -> dict[str, dict[str, Any]]:
         return self._fields
+
+    def search_read(
+        self,
+        model: str,
+        domain: list[Any],
+        fields: list[str],
+        limit: int,
+        offset: int,
+        order: str | None,
+    ) -> list[dict[str, Any]]:
+        self.search_read_calls.append((model, domain, fields, limit))
+        ids = next(leaf[2] for leaf in domain if leaf[0] == "id")
+        found = ids if self._existing is None else [i for i in ids if i in self._existing]
+        return [{"id": i} for i in found]
 
     def write(self, model: str, ids: list[int], values: dict[str, Any]) -> bool:
         self.write_calls.append((model, ids, values))
@@ -73,13 +94,14 @@ def _build_app(
     *,
     production: bool = False,
     fields: dict[str, dict[str, Any]] | None = None,
+    existing: set[int] | None = None,
 ) -> tuple[OdooMcpApp, _FakeClient]:
     inst_cfg = _instance_config("prod" if production else "dev", production)
     # Construct a real OdooClient to satisfy InstanceRuntime's type, then
     # swap it out. The constructor doesn't contact Odoo.
     creds = Credentials(instance_name=inst_cfg.name, username="u", _api_key="k" * 10)
     real_client = OdooClient(inst_cfg, credentials=creds)
-    fake = _FakeClient(fields=fields)
+    fake = _FakeClient(fields=fields, existing=existing)
     app_cfg = AppConfig(
         path=tmp_path / "config.toml",
         defaults=Defaults(),
@@ -652,3 +674,140 @@ def test_dev_dry_run_omits_commits_remaining(tmp_path: Path) -> None:
     assert preview["preview"] is True
     assert "commits_remaining" not in preview
     assert "commits_remaining_note" not in preview
+
+
+# -- Ids Odoo cannot find -----------------------------------------------------
+#
+# Odoo's unlink returns True for ids that are already gone (no row count
+# check, 16.0-20.0), and write does the same from 18.0 when no record rule
+# applies. Without a check of our own, a stale id came back committed.
+
+
+def test_delete_of_missing_id_is_refused_and_unlink_not_called(tmp_path: Path) -> None:
+    app, fake = _build_app(tmp_path, existing={1})
+    dispatcher = Dispatcher(app)
+    payload = _call(
+        dispatcher,
+        {"instance": "dev", "model": "res.partner", "ids": [1, 99], "mode": "delete"},
+    )
+    assert payload["ok"] is False
+    assert "1 of 2 id(s) do not exist" in payload["error"]
+    assert "99" in payload["error"]
+    assert "Nothing was changed" in payload["error"]
+    assert fake.unlink_calls == []
+
+
+def test_archive_of_missing_id_is_refused_and_write_not_called(tmp_path: Path) -> None:
+    fields = {"id": {"type": "integer"}, "active": {"type": "boolean"}}
+    app, fake = _build_app(tmp_path, fields=fields, existing=set())
+    dispatcher = Dispatcher(app)
+    payload = _call(
+        dispatcher,
+        {"instance": "dev", "model": "res.partner", "ids": [7], "mode": "archive"},
+    )
+    assert payload["ok"] is False
+    assert "Cannot archive" in payload["error"]
+    assert fake.write_calls == []
+
+
+def test_dry_run_with_missing_id_issues_no_token(tmp_path: Path) -> None:
+    app, fake = _build_app(tmp_path, production=True, existing={1})
+    app.prod_guard.unlock("prod", production=True)
+    dispatcher = Dispatcher(app)
+    payload = _call(
+        dispatcher,
+        {"instance": "prod", "model": "res.partner", "ids": [1, 2], "mode": "delete"},
+    )
+    assert payload["ok"] is False
+    assert "confirmation_token" not in payload
+    assert fake.unlink_calls == []
+
+
+def test_prod_commit_rechecks_ids_deleted_after_the_preview(tmp_path: Path) -> None:
+    app, fake = _build_app(tmp_path, production=True)
+    app.prod_guard.unlock("prod", production=True)
+    dispatcher = Dispatcher(app)
+    args: dict[str, Any] = {
+        "instance": "prod",
+        "model": "res.partner",
+        "ids": [5],
+        "mode": "delete",
+    }
+    preview = _call(dispatcher, args)
+    assert preview["ok"] is True
+    # Someone else deletes record 5 between the preview and the commit.
+    fake._existing = set()
+    payload = _call(
+        dispatcher,
+        {**args, "dry_run": False, "confirmation_token": preview["confirmation_token"]},
+    )
+    assert payload["ok"] is False
+    assert "do not exist" in payload["error"]
+    assert fake.unlink_calls == []
+
+
+def test_existence_check_includes_archived_records(tmp_path: Path) -> None:
+    """Deleting an archived record is legitimate: the search must not apply
+    Odoo's implicit active=True filter, which naming ``active`` turns off."""
+    fields = {"id": {"type": "integer"}, "active": {"type": "boolean"}}
+    app, fake = _build_app(tmp_path, fields=fields)
+    dispatcher = Dispatcher(app)
+    payload = _call(
+        dispatcher,
+        {"instance": "dev", "model": "res.partner", "ids": [3, 4], "mode": "delete"},
+    )
+    assert payload["ok"] is True
+    (_, domain, fields_asked, limit) = fake.search_read_calls[0]
+    assert ("active", "in", [True, False]) in domain
+    assert ("id", "in", [3, 4]) in domain
+    assert fields_asked == ["id"]
+    assert limit == 2
+
+
+def test_existence_check_omits_active_leaf_on_model_without_active(tmp_path: Path) -> None:
+    app, fake = _build_app(tmp_path)  # fields: id only
+    dispatcher = Dispatcher(app)
+    payload = _call(
+        dispatcher,
+        {"instance": "dev", "model": "some.model", "ids": [3, 3], "mode": "delete"},
+    )
+    assert payload["ok"] is True
+    (_, domain, _, limit) = fake.search_read_calls[0]
+    assert domain == [("id", "in", [3])]
+    assert limit == 1
+
+
+def test_refusal_lists_at_most_twenty_missing_ids_but_counts_all(tmp_path: Path) -> None:
+    app, fake = _build_app(tmp_path, existing=set())
+    dispatcher = Dispatcher(app)
+    payload = _call(
+        dispatcher,
+        {"instance": "dev", "model": "res.partner", "ids": list(range(1, 31)), "mode": "delete"},
+    )
+    assert payload["ok"] is False
+    assert "30 of 30 id(s)" in payload["error"]
+    assert "(+10 more)" in payload["error"]
+    shown = ", ".join(str(i) for i in range(1, 21))
+    assert f"this user: {shown} (+10 more)." in payload["error"]
+
+
+def test_locked_prod_refuses_before_any_existence_search(tmp_path: Path) -> None:
+    app, fake = _build_app(tmp_path, production=True)
+    dispatcher = Dispatcher(app)
+    payload = _call(
+        dispatcher,
+        {"instance": "prod", "model": "res.partner", "ids": [1], "mode": "delete"},
+    )
+    assert payload["error_code"] == "prod_guard"
+    assert fake.search_read_calls == []
+
+
+def test_missing_id_refusal_is_audited_as_a_failure(tmp_path: Path) -> None:
+    app, _ = _build_app(tmp_path, existing=set())
+    dispatcher = Dispatcher(app)
+    _call(dispatcher, {"instance": "dev", "model": "res.partner", "ids": [8], "mode": "delete"})
+    lines = (tmp_path / "audit.jsonl").read_text().strip().splitlines()
+    entry = json.loads(lines[-1])
+    assert entry["tool"] == "odoo_archive_or_delete"
+    assert entry["result"] == "odoo_mcp_error"
+    assert "do not exist" in entry["details"]["error"]

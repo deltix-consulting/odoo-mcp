@@ -1070,15 +1070,15 @@ class Dispatcher:
             raise OdooMcpError(f"Cannot {mode} more than {cap} ids at once.")
 
         # Archive needs an 'active' field on the model; delete is unconditional.
-        if mode == "archive":
-            fields_meta = self._fields_meta(rt, model)
-            if "active" not in fields_meta:
-                raise FieldPolicyError(
-                    f"Model {model!r} has no 'active' field — cannot archive. "
-                    f"If deletion is intended, call with mode='delete' (permanent)."
-                )
+        fields_meta = self._fields_meta(rt, model)
+        if mode == "archive" and "active" not in fields_meta:
+            raise FieldPolicyError(
+                f"Model {model!r} has no 'active' field — cannot archive. "
+                f"If deletion is intended, call with mode='delete' (permanent)."
+            )
 
         self.app.prod_guard.check_write(ctx.instance, rt.config.production)
+        self._refuse_missing_ids(rt, model, ids, mode, has_active="active" in fields_meta)
         dry_run = self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production)
 
         if dry_run:
@@ -1132,6 +1132,49 @@ class Dispatcher:
         }
         self._add_commits_remaining(result, ctx)
         return result
+
+    def _refuse_missing_ids(
+        self, rt: InstanceRuntime, model: str, ids: list[int], mode: str, *, has_active: bool
+    ) -> None:
+        """Refuse an archive / delete that names ids Odoo cannot find.
+
+        Odoo's ``unlink`` runs ``DELETE ... WHERE id IN (...)`` and returns
+        ``True`` without checking how many rows went (16.0-20.0); its access
+        check skips ids that are already gone ("No need to warn about
+        deleting an already deleted record"). ``write`` has no row-count
+        check either, and from 18.0 its access check only looks at records
+        when a record rule applies. So a stale or mistyped id came back as
+        ``committed: true`` with nothing destroyed, the audit log recorded a
+        delete that never happened, and the record the agent meant stayed.
+
+        One ``search_read`` on ``id in ids`` settles it before the dry-run /
+        commit split, so the dev commit path (no preview) is covered too.
+        On a model with ``active`` the domain names ``active`` explicitly,
+        which turns off Odoo's implicit ``active = True`` filter: archived
+        records exist and may be deleted or re-archived. Records a record
+        rule hides from this user are reported with the missing ones; Odoo
+        would refuse those at commit anyway.
+        """
+        wanted = set(ids)
+        domain: list[Any] = [("id", "in", sorted(wanted))]
+        if has_active:
+            domain.append(("active", "in", [True, False]))
+        rows = rt.client.search_read(model, domain, ["id"], len(wanted), 0, None)
+        missing = sorted(wanted - {row.get("id") for row in rows})
+        if not missing:
+            return
+        shown = ", ".join(str(i) for i in missing[:_MISSING_IDS_SHOWN])
+        more = (
+            f" (+{len(missing) - _MISSING_IDS_SHOWN} more)"
+            if len(missing) > _MISSING_IDS_SHOWN
+            else ""
+        )
+        raise OdooMcpError(
+            f"Cannot {mode}: {len(missing)} of {len(wanted)} id(s) do not exist on {model!r} "
+            f"or are not visible to this user: {shown}{more}. Nothing was changed. "
+            f"Odoo would have answered 'success' for them without touching anything. "
+            f"Check the ids (e.g. with odoo_search_read) and call again with existing ones only."
+        )
 
     def _send_message(self, args: dict[str, Any]) -> dict[str, Any]:
         """Post a message on an Odoo record — email or log note.
@@ -2283,6 +2326,12 @@ def _strip_extra_fields(
     keep: set[str] = set(requested)
     keep.add("id")
     return [{k: v for k, v in rec.items() if k in keep} for rec in records]
+
+
+# How many missing ids odoo_archive_or_delete names in its refusal. The
+# count is always given in full; the list is for the agent to recognise
+# which ids went stale, not a dump of up to max_records_hard_cap ids.
+_MISSING_IDS_SHOWN = 20
 
 
 _DRY_RUN_NOTE = (
