@@ -102,6 +102,7 @@ class _FakeClient:
         offset: int,
         orderby: str | None,
         lazy: bool,
+        tz: str | None = None,
     ) -> list[dict[str, Any]]:
         return [dict(g) for g in self._groups]
 

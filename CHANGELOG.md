@@ -10,6 +10,24 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_read_group` grouped datetime fields in UTC without saying so.**
+  Odoo buckets a `datetime` groupby (`create_date:day`,
+  `date_order:month`) in `context['tz']`, and in UTC when there is none
+  (16.0 through 20.0). XML-RPC starts each call from an empty context and
+  the client only sent `lang`, so every datetime group was a UTC day or
+  month, while the user's own pivot views group in their timezone. A
+  record created at 00:30 Brussels time on 1 November counted toward
+  October. Both examples in the tool's own description group a datetime
+  field. New optional `tz` argument (an IANA name such as
+  `Europe/Brussels`), sent as `context['tz']` for that call only. It is
+  refused unless the host's timezone database knows it, because Odoo
+  silently falls back to UTC on an unknown name. Whenever a groupby
+  dimension is a datetime, the response now carries `timezone`, and a
+  note when that is UTC. `tz` is the client's first vetted context opt-in
+  (`_CONTEXT_OPT_INS`); `_execute` refuses every other added key.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

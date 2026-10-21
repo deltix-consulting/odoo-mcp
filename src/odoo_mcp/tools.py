@@ -189,7 +189,8 @@ _TOOL_READ_GROUP = Tool(
         "At most 4 groupby dimensions. Sensitive fields require "
         "allow_sensitive_fields opt-in; always-redacted fields are blocked. "
         'Example: leads per stage: fields=["id:count"], groupby=["stage_id"]. '
-        'Revenue per month: fields=["expected_revenue:sum"], groupby=["create_date:month"].'
+        'Revenue per month: fields=["expected_revenue:sum"], groupby=["create_date:month"]. '
+        "Datetime fields are grouped in UTC unless `tz` is set."
     ),
     inputSchema={
         "type": "object",
@@ -235,6 +236,14 @@ _TOOL_READ_GROUP = Tool(
                 "type": "array",
                 "items": {"type": "string"},
                 "default": [],
+            },
+            "tz": {
+                "type": "string",
+                "description": (
+                    "IANA timezone for datetime groupby buckets, e.g. "
+                    "'Europe/Brussels'. Without it Odoo groups datetime fields in "
+                    "UTC, so day and month totals can differ from Odoo's own reports."
+                ),
             },
             "include_domain": {
                 "type": "boolean",
