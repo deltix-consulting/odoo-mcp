@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import time
+import zoneinfo
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -694,8 +695,10 @@ class Dispatcher:
         allow_sensitive = frozenset(args.get("allow_sensitive_fields") or [])
         offset = _offset(args)
         lazy = bool(args.get("lazy", True))
+        tz = _optional_timezone(args)
 
-        known = frozenset(self._fields_meta(rt, model).keys())
+        fields_meta = self._fields_meta(rt, model)
+        known = frozenset(fields_meta.keys())
         overrides = rt.config.sensitive_fields
         fields = validate_aggregate_fields(
             model,
@@ -742,6 +745,7 @@ class Dispatcher:
             offset=offset,
             orderby=orderby,
             lazy=lazy,
+            tz=tz,
         )
         # Token discipline: Odoo returns a literal __domain per group for
         # drill-down, but Claude rarely uses it. Drop unless caller opts in.
@@ -759,10 +763,34 @@ class Dispatcher:
                 "groupby_count": len(groupby),
                 "domain_leaves": sum(1 for e in domain if not isinstance(e, str)),
                 "lazy": lazy,
+                "tz": tz,
             },
             args,
         )
-        return {"instance": ctx.instance, "model": model, "groups": rows, "count": len(rows)}
+        result: dict[str, Any] = {
+            "instance": ctx.instance,
+            "model": model,
+            "groups": rows,
+            "count": len(rows),
+        }
+        # Odoo buckets datetime groups in context['tz'], and in UTC without
+        # it. Say which zone the buckets are in whenever one is a datetime;
+        # date fields carry no time and are the same in every zone.
+        datetime_dims = [
+            spec
+            for spec in groupby
+            if (fields_meta.get(spec.split(":")[0]) or {}).get("type") == "datetime"
+        ]
+        if datetime_dims:
+            result["timezone"] = tz or "UTC"
+            if tz is None:
+                result["notes"] = [
+                    f"{', '.join(datetime_dims)} grouped in UTC. Odoo's own reports group "
+                    "in the user's timezone, so records near midnight can land in a "
+                    "different day, week or month. Pass tz (e.g. 'Europe/Brussels') "
+                    "to match them."
+                ]
+        return result
 
     def _read(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_read", args, Operation.READ)
@@ -2723,6 +2751,39 @@ def _optional_str(args: dict[str, Any], key: str) -> str | None:
     return value
 
 
+def _optional_timezone(args: dict[str, Any]) -> str | None:
+    """The ``tz`` argument, refused unless it is an IANA zone this host knows.
+
+    Odoo checks ``context['tz']`` against pytz's list and, on a name it does
+    not know, silently groups in UTC (16.0 through 20.0). Refusing here is
+    the only way the caller learns the name was wrong.
+    """
+    tz = _optional_str(args, "tz")
+    if tz is None:
+        return None
+    known = _available_timezones()
+    if tz not in known:
+        hint = (
+            ""
+            if known
+            else " This machine has no timezone database (on Windows, install the "
+            "'tzdata' package)."
+        )
+        raise OdooMcpError(f"tz {tz!r} is not an IANA timezone name, e.g. 'Europe/Brussels'.{hint}")
+    return tz
+
+
+_TIMEZONES: frozenset[str] | None = None
+
+
+def _available_timezones() -> frozenset[str]:
+    """``zoneinfo.available_timezones()``, read once per process (it walks the disk)."""
+    global _TIMEZONES
+    if _TIMEZONES is None:
+        _TIMEZONES = frozenset(zoneinfo.available_timezones())
+    return _TIMEZONES
+
+
 def _require_int_or_default(
     args: dict[str, Any], key: str, default: int, *, minimum: int = 0
 ) -> int:
@@ -2760,7 +2821,7 @@ def _offset(args: dict[str, Any]) -> int:
 # ---------------------------------------------------------------------------
 
 
-_IDENTIFIER_KEYS = frozenset({"instance", "model", "tool", "order", "orderby", "mode"})
+_IDENTIFIER_KEYS = frozenset({"instance", "model", "tool", "order", "orderby", "mode", "tz"})
 _SCALAR_KEYS = frozenset({"limit", "offset", "dry_run", "include_binary", "lazy"})
 
 

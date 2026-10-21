@@ -46,6 +46,16 @@ logger = logging.getLogger(__name__)
 # can add a vetted opt-in, not a pass-through.
 _FROZEN_CONTEXT: Final[dict[str, Any]] = {"lang": "en_US"}
 
+# The vetted opt-ins: context keys ONE call may add on top of
+# ``_FROZEN_CONTEXT``. Anything else is refused by :meth:`OdooClient._execute`.
+#
+# ``tz`` — Odoo buckets ``datetime`` groupby values (``create_date:day``,
+# ``date_order:month``) in ``context['tz']`` and in UTC when it is absent.
+# XML-RPC builds the environment from an empty context (16.0 through 20.0),
+# so without it every datetime group is a UTC day/month, while the user's own
+# pivot views group in their timezone. ``read_group`` passes it on request.
+_CONTEXT_OPT_INS: Final[frozenset[str]] = frozenset({"tz"})
+
 # Default cap for the per-process L1 fields cache. A long-running MCP server
 # that touches many distinct models (an Odoo with hundreds of installed
 # modules) would otherwise grow ``_fields_cache`` without bound. 64 covers
@@ -753,13 +763,26 @@ class OdooClient:
         offset: int,
         orderby: str | None,
         lazy: bool,
+        tz: str | None = None,
     ) -> list[dict[str, Any]]:
+        """Grouped aggregation via Odoo's ``read_group``.
+
+        ``tz`` is an IANA timezone name the caller has already validated; it
+        is sent as ``context['tz']`` so Odoo buckets datetime groups in that
+        zone. Without it they are bucketed in UTC.
+        """
         kwargs: dict[str, Any] = {"offset": offset, "lazy": lazy}
         if limit is not None:
             kwargs["limit"] = limit
         if orderby:
             kwargs["orderby"] = orderby
-        result = self._execute(model, "read_group", [domain, fields, groupby], kwargs)
+        result = self._execute(
+            model,
+            "read_group",
+            [domain, fields, groupby],
+            kwargs,
+            extra_context={"tz": tz} if tz else None,
+        )
         if not isinstance(result, list):
             raise OdooRemoteError(
                 f"read_group({model!r}) returned unexpected type {type(result).__name__}"
@@ -885,6 +908,8 @@ class OdooClient:
         method: str,
         args: list[Any],
         kwargs: dict[str, Any],
+        *,
+        extra_context: dict[str, Any] | None = None,
     ) -> Any:
         """Single chokepoint for every Odoo call.
 
@@ -899,9 +924,18 @@ class OdooClient:
         a dropped keep-alive connection. See
         :class:`_ConnectionRecyclingMixin` for why re-sending a write is
         worse than failing.
+
+        ``extra_context`` adds keys to the fixed context for this one call. Only
+        the keys in :data:`_CONTEXT_OPT_INS` are accepted, and none of them
+        may replace a frozen key.
         """
         merged_kwargs = dict(kwargs)
         merged_kwargs["context"] = dict(_FROZEN_CONTEXT)
+        if extra_context:
+            refused = sorted(set(extra_context) - _CONTEXT_OPT_INS)
+            if refused:
+                raise ValueError(f"context keys {refused} are not vetted opt-ins")
+            merged_kwargs["context"].update(extra_context)
         creds = self._get_credentials()
         retry_guard: contextlib.AbstractContextManager[None] = (
             contextlib.nullcontext()
