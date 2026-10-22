@@ -685,7 +685,9 @@ class Dispatcher:
             },
             args,
         )
-        return {"instance": ctx.instance, "model": ctx.model, "count": count}
+        result: dict[str, Any] = {"instance": ctx.instance, "model": ctx.model, "count": count}
+        _add_company_scope(result, ctx.rt, self._fields_meta(ctx.rt, ctx.model), domain, [])
+        return result
 
     def _read_group(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_read_group", args, Operation.READ_GROUP)
@@ -695,7 +697,8 @@ class Dispatcher:
         offset = _offset(args)
         lazy = bool(args.get("lazy", True))
 
-        known = frozenset(self._fields_meta(rt, model).keys())
+        fields_meta = self._fields_meta(rt, model)
+        known = frozenset(fields_meta.keys())
         overrides = rt.config.sensitive_fields
         fields = validate_aggregate_fields(
             model,
@@ -762,7 +765,14 @@ class Dispatcher:
             },
             args,
         )
-        return {"instance": ctx.instance, "model": model, "groups": rows, "count": len(rows)}
+        result: dict[str, Any] = {
+            "instance": ctx.instance,
+            "model": model,
+            "groups": rows,
+            "count": len(rows),
+        }
+        _add_company_scope(result, rt, fields_meta, domain, groupby)
+        return result
 
     def _read(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_read", args, Operation.READ)
@@ -2721,6 +2731,43 @@ def _optional_str(args: dict[str, Any], key: str) -> str | None:
     if not isinstance(value, str):
         raise OdooMcpError(f"{key} must be a string")
     return value
+
+
+def _add_company_scope(
+    result: dict[str, Any],
+    rt: InstanceRuntime,
+    fields_meta: dict[str, dict[str, Any]],
+    domain: list[Any],
+    groupby: list[str],
+) -> None:
+    """Say so when a count or total adds up records of several companies.
+
+    The client sends no ``allowed_company_ids``, so Odoo applies every
+    company the user belongs to (``Environment.companies``, 16.0 through
+    20.0), while the web client counts only the companies ticked in its
+    switcher. A row of ``odoo_search_read`` shows its ``company_id``; a count
+    or a sum does not, so these two tools carry the note. Nothing is added
+    when the model has no ``company_id``, when the caller already filters or
+    groups on it, or when the user has one company.
+    """
+    meta = fields_meta.get("company_id") or {}
+    if meta.get("type") != "many2one" or meta.get("relation") != "res.company":
+        return
+    if any(spec.split(":")[0] == "company_id" for spec in groupby):
+        return
+    # The sandbox has already refused dotted paths, so a leaf names the field.
+    if any(isinstance(leaf, (list, tuple)) and leaf and leaf[0] == "company_id" for leaf in domain):
+        return
+    company_ids = rt.client.user_company_ids()
+    if company_ids is None or len(company_ids) < 2:
+        return
+    result["company_ids"] = company_ids
+    result.setdefault("notes", []).append(
+        f"Covers all {len(company_ids)} companies this user belongs to: API calls "
+        "apply every one of them, while Odoo's own views count only the companies "
+        "selected in the company switcher. Filter on company_id, or group by it, "
+        "to split them."
+    )
 
 
 def _require_int_or_default(
