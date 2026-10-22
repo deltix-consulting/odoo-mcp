@@ -10,6 +10,21 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_read_group` and `odoo_search_count` added up every company
+  without saying so.** The client sends no `allowed_company_ids`, and
+  without it Odoo applies record rules for ALL of the user's companies
+  (`Environment.companies`, 16.0 through 20.0), while the web client
+  counts only the companies ticked in its switcher. For a user in two
+  companies, "revenue this month" was the sum of both. A row from
+  `odoo_search_read` shows its `company_id`; a count or a total does not.
+  The user's companies are now read once per client
+  (`res.users.company_ids`, which a user may always read on their own
+  record), and both tools return `company_ids` plus a note when the model
+  has a `company_id` and the call neither filters nor groups on it. No
+  note for single-company users, and none when the lookup fails.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
