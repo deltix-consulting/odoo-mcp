@@ -10,6 +10,21 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_create` did not say which company a new record landed in.**
+  Most `company_id` fields default to `env.company`. The client sends no
+  `allowed_company_ids`, and without it `env.company` is the user's
+  default company (`Environment.company`, 16.0 through master), while
+  Odoo's own forms use the company selected in the switcher. For a user
+  in several companies, a create that left `company_id` out could land in
+  a company the caller never named. When the model has a `company_id`,
+  `values` does not set it and the user has two or more companies, the
+  dry-run now asks Odoo's `default_get` for the company `create` would
+  apply, the commit reads the new record back, and both return
+  `company_id`, `company_ids` and a note. No note when the default is
+  empty (a record shared by all companies) or when a lookup fails.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

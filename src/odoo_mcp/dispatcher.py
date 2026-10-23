@@ -978,6 +978,7 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_create"),
             }
+            _add_create_company(preview, rt, model, fields_meta, validated)
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
@@ -990,6 +991,7 @@ class Dispatcher:
             "id": new_id,
             "committed": True,
         }
+        _add_create_company(result, rt, model, fields_meta, validated, new_id=new_id)
         self._add_commits_remaining(result, ctx)
         return result
 
@@ -2712,6 +2714,61 @@ def _require_dict(args: dict[str, Any], key: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise OdooMcpError(f"{key} must be an object/dict")
     return value
+
+
+def _add_create_company(
+    result: dict[str, Any],
+    rt: InstanceRuntime,
+    model: str,
+    fields_meta: dict[str, dict[str, Any]],
+    values: dict[str, Any],
+    *,
+    new_id: int | None = None,
+) -> None:
+    """Say which company a new record gets when ``values`` leaves it out.
+
+    Most ``company_id`` fields default to ``env.company``. The client sends no
+    ``allowed_company_ids``, and without it ``env.company`` is the user's
+    default company (``Environment.company``, 16.0 through master), while
+    Odoo's own forms use the company selected in the switcher. For a user in
+    several companies the record could land in a company the caller never
+    named, and neither the preview nor the result said which.
+
+    The preview asks Odoo's ``default_get`` (the same default ``create``
+    applies); the commit reads the new record back. Nothing is added when the
+    model has no ``company_id``, when ``values`` sets it, when the user has one
+    company, when the default is empty (a record shared by all companies), or
+    when a lookup fails: it is a disclosure, never a gate.
+    """
+    meta = fields_meta.get("company_id") or {}
+    if meta.get("type") != "many2one" or meta.get("relation") != "res.company":
+        return
+    if "company_id" in values:
+        return
+    try:
+        company_ids = rt.client.user_company_ids()
+        if company_ids is None or len(company_ids) < 2:
+            return
+        if new_id is None:
+            company = rt.client.default_get(model, ["company_id"]).get("company_id")
+        else:
+            rows = rt.client.read(model, [new_id], ["company_id"])
+            company = rows[0].get("company_id") if rows and isinstance(rows[0], dict) else None
+    except OdooMcpError:
+        return
+    if isinstance(company, list) and company:  # read returns [id, display_name]
+        company = company[0]
+    if not isinstance(company, int) or isinstance(company, bool) or company <= 0:
+        return
+    result["company_id"] = company
+    result["company_ids"] = company_ids
+    verb = "will set" if new_id is None else "set"
+    result.setdefault("notes", []).append(
+        f"values has no company_id, so Odoo {verb} it to company {company}. API "
+        "calls default to the user's default company, while Odoo's own forms use "
+        "the company selected in the company switcher. Put company_id in values "
+        "to choose another of company_ids."
+    )
 
 
 def _optional_str(args: dict[str, Any], key: str) -> str | None:
