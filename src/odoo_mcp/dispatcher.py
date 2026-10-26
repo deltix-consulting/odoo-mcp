@@ -960,6 +960,7 @@ class Dispatcher:
         validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
         self._validate_relational_writes(rt, model, validated, fields_meta)
         n = len(validated)
+        _refuse_foreign_company(rt, model, fields_meta, validated)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
             token = self.app.prod_guard.create_pending(
@@ -1012,6 +1013,7 @@ class Dispatcher:
         validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
         self._validate_relational_writes(rt, model, validated, fields_meta)
         n = len(validated)
+        _refuse_foreign_company(rt, model, fields_meta, validated)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
             id_preview = f"ids={ids[:5]}{'...' if len(ids) > 5 else ''}"
@@ -2251,6 +2253,46 @@ def _refuse_if_read_only_session() -> None:
             "Session is read-only (ODOO_MCP_READ_ONLY=1). All write paths "
             "are refused regardless of instance, prod-guard state, or unlock."
         )
+
+
+def _refuse_foreign_company(
+    rt: InstanceRuntime,
+    model: str,
+    fields_meta: dict[str, dict[str, Any]],
+    values: dict[str, Any],
+) -> None:
+    """Refuse a ``company_id`` the user does not belong to.
+
+    Odoo's ``write`` checks record rules on the records BEFORE the update and
+    never again after it (``check_access_rule('write')`` through 17.0,
+    ``check_access('write')`` from 18.0), and it does not check
+    the many2one target either. So writing the id of a company outside the
+    user's ``company_ids`` succeeds, and the record then falls outside the
+    multi-company rule: the user can no longer read or fix it. ``create``
+    re-checks the new records and raises an AccessError on most models, but
+    only after the dry run said nothing. Odoo's own forms offer such a company
+    only to ``base.group_erp_manager`` (the ``res.company`` rules, 16.0
+    through 19.0); everyone else never sees it in the dropdown.
+
+    Runs BEFORE the dry run, so the preview and the commit agree. Only a
+    positive integer is checked: ``False`` (a record shared by all
+    companies) and the other shapes are left to their own checks. When the
+    user's companies cannot be read, nothing is refused and Odoo decides.
+    """
+    company = values.get("company_id")
+    if not isinstance(company, int) or isinstance(company, bool) or company <= 0:
+        return
+    meta = fields_meta.get("company_id") or {}
+    if meta.get("type") != "many2one" or meta.get("relation") != "res.company":
+        return
+    company_ids = rt.client.user_company_ids()
+    if company_ids is None or company in company_ids:
+        return
+    raise FieldPolicyError(
+        f"company_id {company} on {model!r} is not one of your companies "
+        f"(company_ids {company_ids}). Odoo would store it, and the record would "
+        f"then be outside your access. Use one of company_ids."
+    )
 
 
 def _refuse_write_blocklisted(model: str) -> None:

@@ -10,6 +10,19 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_create` / `odoo_write` refuse a `company_id` you are not in.**
+  Odoo's `write` checks record rules on the records before the update and
+  never after it, and does not check the many2one target. Writing the id
+  of a company outside the user's `company_ids` therefore succeeded, and
+  the record fell outside the multi-company rule: the user could no longer
+  read or fix it. `create` raised an AccessError on most models, but only
+  at commit, after a dry run that said nothing. Both now refuse before the
+  dry run and list the user's `company_ids`. `False` (a record shared by
+  all companies) is untouched; when the user's companies cannot be read,
+  Odoo decides as before.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
