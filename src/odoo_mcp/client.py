@@ -394,6 +394,7 @@ class OdooClient:
         self._uid: int | None = None
         self._is_admin: bool | None = None  # set after authenticate()
         self._admin_reason: str | None = None  # human-readable why it's admin
+        self._company_ids: list[int] | None = None  # set by user_company_ids()
         self._auth_lock = threading.Lock()
 
     # --- Construction / auth ------------------------------------------------
@@ -606,6 +607,31 @@ class OdooClient:
     def admin_reason(self) -> str | None:
         """Short human-readable explanation of why :attr:`is_admin` is True."""
         return self._admin_reason
+
+    def user_company_ids(self) -> list[int] | None:
+        """Ids of the companies the authenticated user belongs to, read once.
+
+        The client never sends ``allowed_company_ids``, and without it Odoo
+        evaluates record rules against ALL of the user's companies
+        (``Environment.companies``, 16.0 through 20.0). The web client sends
+        only the companies ticked in its switcher. Callers use this to say
+        when a count or total spans several companies.
+
+        Returns ``None`` when the read fails: it is a disclosure, never a gate.
+        """
+        if self._company_ids is not None:
+            return self._company_ids
+        try:
+            rows = self.read("res.users", [self.uid], ["company_ids"])
+        except (OdooRemoteError, OdooTransportError):
+            return None
+        ids = rows[0].get("company_ids") if rows and isinstance(rows[0], dict) else None
+        if not isinstance(ids, list) or not all(
+            isinstance(i, int) and not isinstance(i, bool) for i in ids
+        ):
+            return None
+        self._company_ids = sorted(ids)
+        return self._company_ids
 
     def ensure_authenticated(self) -> None:
         """Authenticate lazily on first use. Thread-safe and idempotent.
