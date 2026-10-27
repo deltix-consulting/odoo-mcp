@@ -917,6 +917,10 @@ class Dispatcher:
                 validated_nested = validate_write_values(
                     relation, nested, related_known, extra_redacted=rt.extra_redacted
                 )
+                # Odoo runs (1, id, vals) through the line model's own write and
+                # (0, 0, vals) through its create, with the same rule checks as
+                # a top-level call: the same foreign-company gap applies.
+                _refuse_foreign_company(rt, relation, related_meta, validated_nested)
                 self._validate_relational_writes(
                     rt, relation, validated_nested, related_meta, depth=depth + 1
                 )
