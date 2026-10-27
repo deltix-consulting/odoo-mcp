@@ -22,6 +22,12 @@ breaking change explicitly in this file.
   dry run and list the user's `company_ids`. `False` (a record shared by
   all companies) is untouched; when the user's companies cannot be read,
   Odoo decides as before.
+- **The same refusal now covers a `company_id` inside x2many lines.**
+  Odoo runs `(1, id, {...})` through the line model's own `write` and
+  `(0, 0, {...})` through its `create`, with the same rule checks as a
+  direct call, so `order_line=[(1, 5, {"company_id": 2})]` stored a
+  foreign company on the line without a word. Nested create and update
+  values now get the check above, before the dry run.
 
 ## [0.27.0] - 2026-08-20
 
