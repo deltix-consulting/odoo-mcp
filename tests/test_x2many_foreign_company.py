@@ -43,7 +43,8 @@ def test_own_company_on_a_line_passes(tmp_path: Path, tool: str) -> None:
     values = {"order_line": [[1, 5, {"company_id": 3}]]}
     payload = _run(tmp_path, fake, tool, values)
     assert payload["ok"] is True, payload
-    assert fake.company_lookups == 1
+    # >= 1: #83 adds its own (cached) lookup on create.
+    assert fake.company_lookups >= 1
 
 
 def test_lines_without_company_id_skip_the_lookup(tmp_path: Path) -> None:
