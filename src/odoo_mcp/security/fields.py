@@ -562,6 +562,74 @@ def validate_order(
     return ", ".join(terms)
 
 
+def validate_group_order(orderby: str | None, groupby: list[str], fields: list[str]) -> str | None:
+    """Validate a ``read_group`` ``orderby`` against the groupby and aggregates.
+
+    A grouped result can only be sorted by what each group row carries: a
+    groupby dimension (``"stage_id"`` or its spec ``"date_order:month"``),
+    an aggregated field (``"amount_total"`` or ``"amount_total:sum"``, both
+    sent as the name) or the group count (``"__count"``, or the lazy
+    name ``"<first_groupby>_count"``, which is rewritten to ``"__count"``).
+
+    Anything else is refused here because Odoo does not refuse it reliably:
+    Odoo 16 logs a warning and silently drops a term on a field that is
+    neither grouped nor aggregated, so a ``limit`` then cuts an UNSORTED
+    list ("top 10" that is not the top 10). Odoo 17+ raises a ValueError.
+
+    Call after :func:`validate_groupby` and :func:`validate_aggregate_fields`:
+    every name accepted here has already cleared the redaction policy there,
+    and the count reveals nothing the result does not already return.
+
+    Returns the normalized order string (whitespace-collapsed) or ``None``.
+    """
+    if orderby is None:
+        return None
+    if not isinstance(orderby, str):
+        raise FieldPolicyError(f"orderby must be a string, got {type(orderby).__name__}.")
+    stripped = orderby.strip()
+    if not stripped:
+        return None
+    count_names = {"__count"}
+    if groupby:
+        count_names.add(f"{groupby[0].split(':')[0]}_count")
+    allowed = set(groupby)
+    allowed.update(spec.split(":")[0] for spec in groupby)
+    allowed.update(spec.split(":")[0] for spec in fields)
+    # An aggregate spec ("amount_total:sum") is sent as its field name: Odoo
+    # 16 only knows the name, and Odoo 17+ maps the name back to the spec.
+    aggregate_names = {spec: spec.split(":")[0] for spec in fields if ":" in spec}
+    terms: list[str] = []
+    for raw_term in stripped.split(","):
+        term = raw_term.strip()
+        if not term:
+            raise FieldPolicyError(f"Empty orderby term in {orderby!r}.")
+        parts = term.split()
+        if len(parts) == 1:
+            name, direction = parts[0], None
+        elif len(parts) == 2:
+            name, direction = parts[0], parts[1].lower()
+            if direction not in _ORDER_DIRECTIONS:
+                raise FieldPolicyError(
+                    f"orderby direction {parts[1]!r} not allowed. Use 'asc' or 'desc'."
+                )
+        else:
+            raise FieldPolicyError(
+                f"orderby term {term!r} not supported — use 'field' or 'field asc|desc'."
+            )
+        if name in count_names:
+            name = "__count"
+        elif name in aggregate_names:
+            name = aggregate_names[name]
+        elif name not in allowed:
+            raise FieldPolicyError(
+                f"orderby term {name!r} is neither grouped nor aggregated, so the groups "
+                f"cannot be sorted by it. Use one of {sorted(allowed | {'__count'})}, or "
+                f"add it to fields as '{name}:sum' (or another aggregate)."
+            )
+        terms.append(f"{name} {direction}" if direction else name)
+    return ", ".join(terms)
+
+
 def redact_response(
     model: str,
     records: list[dict[str, Any]],

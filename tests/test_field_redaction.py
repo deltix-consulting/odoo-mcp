@@ -15,6 +15,7 @@ from odoo_mcp.security.fields import (
     redact_response,
     restrict_fields_meta,
     validate_aggregate_fields,
+    validate_group_order,
     validate_groupby,
     validate_order,
     validate_requested_fields,
@@ -687,3 +688,53 @@ def test_validate_order_default_hidden_requires_optin() -> None:
 def test_validate_order_rejects_bad_terms(bad: str) -> None:
     with pytest.raises(FieldPolicyError):
         validate_order("res.partner", bad, _ORDER_FIELDS, allow_sensitive=frozenset())
+
+
+# --- validate_group_order (read_group orderby) -----------------------------
+
+
+def test_validate_group_order_passthrough_none_and_empty() -> None:
+    assert validate_group_order(None, ["stage_id"], ["id:count"]) is None
+    assert validate_group_order("  ", ["stage_id"], ["id:count"]) is None
+
+
+@pytest.mark.parametrize(
+    ("orderby", "expected"),
+    [
+        ("amount_total desc", "amount_total desc"),
+        ("amount_total:sum desc", "amount_total desc"),
+        ("partner_id", "partner_id"),
+        ("date_order:month desc", "date_order:month desc"),
+        ("date_order asc, amount_total DESC", "date_order asc, amount_total desc"),
+        ("__count desc", "__count desc"),
+        ("partner_id_count desc", "__count desc"),
+    ],
+)
+def test_validate_group_order_accepts_grouped_aggregated_and_count(
+    orderby: str, expected: str
+) -> None:
+    groupby = ["partner_id", "date_order:month"]
+    fields = ["amount_total:sum", "id:count"]
+    assert validate_group_order(orderby, groupby, fields) == expected
+
+
+def test_validate_group_order_refuses_a_field_neither_grouped_nor_aggregated() -> None:
+    # Odoo 16 would drop this term with a log warning and return the groups
+    # unsorted, so a limit would cut the wrong rows.
+    with pytest.raises(FieldPolicyError, match="neither grouped nor aggregated") as exc:
+        validate_group_order("amount_untaxed desc", ["partner_id"], ["amount_total:sum"])
+    assert "amount_untaxed:sum" in str(exc.value)
+    assert "__count" in str(exc.value)
+
+
+def test_validate_group_order_count_name_follows_the_first_groupby() -> None:
+    with pytest.raises(FieldPolicyError, match="neither grouped nor aggregated"):
+        validate_group_order("stage_id_count desc", ["partner_id", "stage_id"], ["id:count"])
+
+
+@pytest.mark.parametrize(
+    "bad", ["partner_id sideways", "partner_id desc nulls", "partner_id,", "partner_id.name"]
+)
+def test_validate_group_order_rejects_bad_terms(bad: str) -> None:
+    with pytest.raises(FieldPolicyError):
+        validate_group_order(bad, ["partner_id"], ["amount_total:sum"])

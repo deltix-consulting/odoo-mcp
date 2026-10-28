@@ -220,7 +220,10 @@ _TOOL_READ_GROUP = Tool(
             "offset": {"type": "integer", "minimum": 0, "default": 0},
             "orderby": {
                 "type": "string",
-                "description": "Order string, e.g. 'amount_total desc'.",
+                "description": (
+                    "Order string, e.g. 'amount_total desc' or '__count desc'. Each term "
+                    "must be a groupby field or an aggregated field, or __count."
+                ),
             },
             "lazy": {
                 "type": "boolean",
