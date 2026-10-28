@@ -51,6 +51,7 @@ class _FakeClient:
         offset: int,
         orderby: str | None,
         lazy: bool,
+        **_: Any,  # e.g. tz from PR #81
     ) -> list[dict[str, Any]]:
         self.orderby_sent.append(orderby)
         return [{"partner_id": [7, "Azure"], "partner_id_count": 3, "amount_total_signed": 9.0}]
