@@ -71,6 +71,7 @@ from .security.fields import (
     redact_response,
     restrict_fields_meta,
     validate_aggregate_fields,
+    validate_group_order,
     validate_groupby,
     validate_order,
     validate_requested_fields,
@@ -724,14 +725,7 @@ class Dispatcher:
         # Clamp group count to the hard cap regardless of caller input.
         cap = rt.config.max_records_hard_cap
         limit = clamp_limit(args.get("limit"), cap, cap)
-        orderby = validate_order(
-            model,
-            _optional_str(args, "orderby"),
-            known,
-            allow_sensitive=allow_sensitive,
-            instance_overrides=overrides,
-            extra_redacted=rt.extra_redacted,
-        )
+        orderby = validate_group_order(_optional_str(args, "orderby"), groupby, fields)
 
         rows = rt.client.read_group(
             model,

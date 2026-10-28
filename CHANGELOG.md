@@ -10,6 +10,18 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_read_group` `orderby` is checked against what a group row
+  carries.** Each term must now be a groupby dimension, an aggregated
+  field (`amount_total` or `amount_total:sum`) or the group count
+  (`__count`, or the lazy `<first_groupby>_count`, sent as `__count`).
+  Before, any field of the model passed: Odoo 16 drops a term on a field
+  that is neither grouped nor aggregated with only a server log warning,
+  so `limit=10` returned ten unsorted groups as if they were the top ten.
+  And `__count desc` ("largest groups first"), which Odoo 17+ accepts, was
+  refused as an unknown field.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
