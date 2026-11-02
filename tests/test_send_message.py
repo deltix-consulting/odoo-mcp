@@ -33,12 +33,18 @@ class _FakeClient:
         self.username = "u"
         self.uid = 1
         self.message_post_calls: list[dict[str, Any]] = []
+        self.record_exists = True
+        self.search_count_calls: list[tuple[str, list[Any]]] = []
 
     def ensure_authenticated(self) -> None:
         return None
 
     def fields_get(self, model: str, *, use_cache: bool = True) -> dict[str, dict[str, Any]]:
         return {"id": {"type": "integer"}, "name": {"type": "char"}}
+
+    def search_count(self, model: str, domain: list[Any]) -> int:
+        self.search_count_calls.append((model, domain))
+        return 1 if self.record_exists else 0
 
     def message_post(
         self,

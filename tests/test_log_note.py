@@ -51,6 +51,8 @@ class _LogNoteFake:
     def __init__(self, *, message_id: int = 4242) -> None:
         self.message_id = message_id
         self.message_post_calls: list[dict[str, Any]] = []
+        self.record_exists = True
+        self.search_count_calls: list[tuple[str, list[Any]]] = []
         self.is_admin: bool | None = False
         self.admin_reason: str | None = None
         self.username = "u"
@@ -61,6 +63,10 @@ class _LogNoteFake:
 
     def fields_get(self, model: str, *, use_cache: bool = True) -> dict[str, dict[str, Any]]:
         return {}
+
+    def search_count(self, model: str, domain: list[Any]) -> int:
+        self.search_count_calls.append((model, domain))
+        return 1 if self.record_exists else 0
 
     def message_post(
         self,

@@ -10,6 +10,24 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_send_message` and `odoo_log_note` refuse a record Odoo cannot
+  find, before the preview.** Odoo's `message_post` does not check the
+  id; it fails late, on whatever first reads the record (`display_name`
+  on 16.0-18.0, the company field or `mail.message`'s document access
+  check on 19.0, which raises an AccessError that reads like a
+  permission problem). So the preview approved a post on a stale or
+  mistyped id, the commit spent the confirmation token, and only then
+  did Odoo refuse. One `search_count` now runs after the prod-guard
+  check and before the dry-run / commit split, the same check
+  `odoo_create_attachment` already had.
+- **`odoo_create_attachment` accepts an archived target record.** Its
+  existence check ran under Odoo's implicit `active = True` filter, so
+  attaching a file to an archived record was refused as "does not
+  exist". The shared check names `active` explicitly on models that
+  have it.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
