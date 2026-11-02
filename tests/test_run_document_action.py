@@ -19,6 +19,7 @@ from odoo_mcp.client import OdooClient
 from odoo_mcp.config import AppConfig, Defaults, InstanceConfig
 from odoo_mcp.credentials import Credentials
 from odoo_mcp.dispatcher import Dispatcher, InstanceRuntime, OdooMcpApp
+from odoo_mcp.errors import OdooRemoteError
 from odoo_mcp.security.allowlist import ALLOWLIST_WILDCARD
 from odoo_mcp.security.document_actions import (
     DOCUMENT_ACTION_VERBS,
@@ -467,6 +468,132 @@ def test_wizard_chained_wizard_marks_still_pending(tmp_path: Path) -> None:
     assert payload["needs_manual_completion"] is True
     step = payload["wizard"]["steps"][0]
     assert step["wizard_returned_wizard"] is True
+
+
+# ---------------------------------------------------------------------------
+# A failed wizard step is not a completed record
+# ---------------------------------------------------------------------------
+#
+# Each record's wizard is its own create + call, so a batch is not
+# all-or-nothing: a step that fails leaves the steps before it saved.
+# The response must neither call a failed step "committed" nor drop the
+# records already done behind one error.
+
+
+class _FailingWizardFakeClient(_CancelWizardFakeClient):
+    """The SO cancel returns the wizard; the wizard step fails for
+    ``fail_create`` (its create raises) and ``fail_action`` (the
+    wizard's action_cancel raises)."""
+
+    def __init__(
+        self,
+        *,
+        fail_create: frozenset[int] = frozenset(),
+        fail_action: frozenset[int] = frozenset(),
+    ) -> None:
+        super().__init__()
+        self._next_action_returns = [
+            {"type": "ir.actions.act_window", "res_model": "sale.order.cancel"}
+        ]
+        self._fail_create = set(fail_create)
+        self._fail_action = set(fail_action)
+        self._origin_of: dict[int, int] = {}
+
+    def create(self, model: str, values: dict[str, Any]) -> int:
+        origin = values["order_id"]
+        if origin in self._fail_create:
+            raise OdooRemoteError(
+                f"Odoo fault on {model}.create: You cannot cancel order {origin}.",
+                server_text=True,
+            )
+        new_id = super().create(model, values)
+        self._origin_of[new_id] = origin
+        return new_id
+
+    def call_document_action(self, model: str, method: str, record_ids: list[int]) -> Any:
+        if model == "sale.order.cancel" and self._origin_of.get(record_ids[0]) in self._fail_action:
+            self.action_calls.append((model, method, list(record_ids)))
+            raise OdooRemoteError(
+                f"Odoo fault on {model}.{method}: The order is locked.", server_text=True
+            )
+        return super().call_document_action(model, method, record_ids)
+
+
+def _cancel(tmp_path: Path, fake: _FakeClient, ids: list[int]) -> dict[str, Any]:
+    app = _build_with_client(tmp_path, fake)
+    return _call(
+        Dispatcher(app),
+        {
+            "instance": "dev",
+            "model": "sale.order",
+            "record_ids": ids,
+            "action": "cancel",
+            "dry_run": False,
+        },
+    )
+
+
+def _audit_rows(tmp_path: Path) -> list[dict[str, Any]]:
+    path = tmp_path / "audit.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_wizard_action_failure_is_not_committed(tmp_path: Path) -> None:
+    """The wizard's action_cancel raised: the order was NOT cancelled."""
+    fake = _FailingWizardFakeClient(fail_action=frozenset({7}))
+    payload = _cancel(tmp_path, fake, [7])
+    assert payload["ok"] is True
+    assert payload["committed"] is False
+    assert payload["needs_manual_completion"] is True
+    step = payload["wizard"]["steps"][0]
+    assert step["ok"] is False
+    assert "locked" in step["error"]
+    assert "[7]" in payload["note"]
+    assert "do NOT" not in payload["note"]
+
+
+def test_wizard_action_failure_audits_wizard_not_completed(tmp_path: Path) -> None:
+    fake = _FailingWizardFakeClient(fail_action=frozenset({7}))
+    _cancel(tmp_path, fake, [7])
+    row = _audit_rows(tmp_path)[-1]
+    assert row["details"]["wizard_completed"] is False
+
+
+def test_wizard_create_failure_is_a_failed_step_not_a_raised_call(tmp_path: Path) -> None:
+    """The wizard create raising used to escape the loop: the whole call
+    errored with no word about orders already cancelled before it."""
+    fake = _FailingWizardFakeClient(fail_create=frozenset({2}))
+    payload = _cancel(tmp_path, fake, [1, 2])
+    assert payload["ok"] is True
+    assert payload["committed"] is False
+    steps = {step["origin_id"]: step for step in payload["wizard"]["steps"]}
+    assert steps[1]["ok"] is True
+    assert steps[2]["ok"] is False
+    assert steps[2]["wizard_id"] is None
+    assert "cannot cancel" in steps[2]["error"]
+
+
+def test_wizard_partial_failure_names_the_records_already_done(tmp_path: Path) -> None:
+    fake = _FailingWizardFakeClient(fail_create=frozenset({2}))
+    payload = _cancel(tmp_path, fake, [1, 2, 3])
+    note = payload["note"]
+    assert "failed for ids [2]" in note
+    assert "completed for ids [1, 3]" in note
+    assert "do NOT run the action on them again" in note
+
+
+def test_wizard_failure_after_others_keeps_running_the_rest(tmp_path: Path) -> None:
+    fake = _FailingWizardFakeClient(fail_action=frozenset({1}))
+    payload = _cancel(tmp_path, fake, [1, 2])
+    assert [step["ok"] for step in payload["wizard"]["steps"]] == [False, True]
+    assert ("sale.order.cancel", "action_cancel", [556]) in fake.action_calls
+
+
+def test_wizard_all_steps_ok_keeps_the_old_answer(tmp_path: Path) -> None:
+    fake = _FailingWizardFakeClient()
+    payload = _cancel(tmp_path, fake, [1, 2])
+    assert payload["committed"] is True
+    assert "note" not in payload
 
 
 # ---------------------------------------------------------------------------

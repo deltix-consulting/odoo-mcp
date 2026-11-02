@@ -1648,7 +1648,8 @@ class Dispatcher:
             # If every record's wizard completed without itself
             # returning another wizard, the logical action succeeded.
             still_pending = any(
-                step.get("wizard_returned_wizard") for step in wizard_completion["steps"]
+                not step["ok"] or step.get("wizard_returned_wizard")
+                for step in wizard_completion["steps"]
             )
             needs_manual = still_pending
         else:
@@ -1673,9 +1674,14 @@ class Dispatcher:
         if needs_manual:
             out["needs_manual_completion"] = True
             out["note"] = (
-                "Odoo returned a follow-up wizard (e.g. backorder or "
-                "immediate-transfer confirmation) we don't auto-complete. "
-                "The action did NOT fully complete — finish it in the Odoo UI."
+                _wizard_failure_note(wizard_completion)
+                if wizard_completion is not None
+                and any(not step["ok"] for step in wizard_completion["steps"])
+                else (
+                    "Odoo returned a follow-up wizard (e.g. backorder or "
+                    "immediate-transfer confirmation) we don't auto-complete. "
+                    "The action did NOT fully complete — finish it in the Odoo UI."
+                )
             )
         self._add_commits_remaining(out, ctx)
         return out
@@ -1704,8 +1710,12 @@ class Dispatcher:
         """
         steps: list[dict[str, Any]] = []
         for rid in record_ids:
-            wizard_id = rt.client.create(spec.wizard_model, {spec.origin_field: rid})
+            # The create is inside the try too: raising here after an
+            # earlier record's wizard ran would report the whole call as
+            # failed while those records are already done.
+            wizard_id: int | None = None
             try:
+                wizard_id = rt.client.create(spec.wizard_model, {spec.origin_field: rid})
                 wresult = rt.client.call_document_action(
                     spec.wizard_model, spec.wizard_method, [wizard_id]
                 )
@@ -2482,6 +2492,27 @@ _TOKEN_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
     # preview and commit.
     Operation.LOG_NOTE.value: ("record_id", "body"),
 }
+
+
+def _wizard_failure_note(wizard_completion: dict[str, Any]) -> str:
+    """Say which records a completed wizard step changed and which it did not.
+
+    A batch is not all-or-nothing: each record's wizard is a separate
+    Odoo call, so the steps before a failure are already saved.
+    """
+    steps = wizard_completion["steps"]
+    failed = [step["origin_id"] for step in steps if not step["ok"]]
+    done = [
+        step["origin_id"] for step in steps if step["ok"] and not step.get("wizard_returned_wizard")
+    ]
+    note = (
+        f"The {wizard_completion['wizard_model']} wizard failed for ids {failed} "
+        "(see each step's error). Check those records before running the action "
+        "on them again."
+    )
+    if done:
+        note += f" It completed for ids {done}: do NOT run the action on them again."
+    return note
 
 
 def _token_payload(op_value: str, args: dict[str, Any]) -> dict[str, Any]:
