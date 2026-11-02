@@ -409,6 +409,33 @@ class Dispatcher:
         """
         return restrict_fields_meta(model, rt.client.fields_get(model))
 
+    def _refuse_missing_record(self, rt: InstanceRuntime, model: str, record_id: int) -> None:
+        """Refuse a message, log note or attachment on a record Odoo cannot find.
+
+        Odoo does not check the id before posting: ``message_post`` fails
+        late, on whatever first reads the record (``display_name`` on
+        16.0-18.0, the company field or ``mail.message``'s document access
+        check on 19.0, which raises an AccessError that reads like a
+        permission problem). Without this check the preview approved a
+        post on ``res.partner(99999)``, the commit spent the confirmation
+        token, and only then did Odoo refuse it.
+
+        One ``search_count`` before the dry-run / commit split, so the dev
+        commit path (no preview) is covered too. On a model with ``active``
+        the domain names ``active`` explicitly, which turns off Odoo's
+        implicit ``active = True`` filter: posting on or attaching to an
+        archived record is ordinary Odoo use.
+        """
+        domain: list[Any] = [("id", "=", record_id)]
+        if "active" in self._fields_meta(rt, model):
+            domain.append(("active", "in", [True, False]))
+        if rt.client.search_count(model, domain) == 0:
+            raise OdooMcpError(
+                f"Record {model}({record_id}) does not exist or is not visible to "
+                f"this user. Nothing was posted or attached. Check the id (e.g. with "
+                f"odoo_search_read) and call again."
+            )
+
     # ---- Handlers ---------------------------------------------------------
 
     def _help(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -1193,6 +1220,7 @@ class Dispatcher:
             partner_ids.append(pid)
 
         self.app.prod_guard.check_write(ctx.instance, rt.config.production)
+        self._refuse_missing_record(rt, model, record_id)
 
         # Outbound communications always default to dry-run, on prod AND
         # on dev. The cost of an accidentally-sent email is the same in
@@ -1304,6 +1332,7 @@ class Dispatcher:
         body = _require_str(args, "body")
 
         self.app.prod_guard.check_write(ctx.instance, rt.config.production)
+        self._refuse_missing_record(rt, model, record_id)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
             preview_body = body if len(body) <= 2000 else body[:2000] + "...[truncated]"
@@ -1477,12 +1506,8 @@ class Dispatcher:
         # being attached to (and which res_model the operator approved
         # in the dry-run preview), and refuses orphan attachments which
         # would silently slip past Odoo's per-model record-rules.
-        if rt.client.search_count(model, [("id", "=", res_id)]) == 0:
-            raise OdooMcpError(
-                f"Target record {model}({res_id}) does not exist or is not "
-                "visible to the authenticated user — refusing to create an "
-                "orphan attachment."
-            )
+        # Archived records count as existing.
+        self._refuse_missing_record(rt, model, res_id)
 
         self.app.prod_guard.check_write(ctx.instance, rt.config.production)
 
