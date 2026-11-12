@@ -2199,7 +2199,7 @@ def _instance_summary(name: str, rt: InstanceRuntime, writes_unlocked: bool) -> 
     open_mode = ALLOWLIST_WILDCARD in rt.config.allowed_models
     summary: dict[str, Any] = {
         "name": name,
-        "url": rt.config.url,
+        "url": rt.config.display_url,
         "database": rt.config.database,
         "production": rt.config.production,
         "writes_unlocked": writes_unlocked,

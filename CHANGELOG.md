@@ -10,6 +10,19 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **HTTP Basic credentials in an instance URL no longer reach the model or
+  the audit log.** `url = "https://user:pass@host"` (an Odoo behind a
+  basic-auth reverse proxy) works, because the XML-RPC transport honours
+  it, but the same text was returned by `odoo_list_instances` and printed
+  by `status` and `config show`, and any non-200 reply from the proxy
+  (401, 502, 504) put `user:pass@host/xmlrpc/2/...` in the tool error and
+  in `audit.jsonl`, since `xmlrpc.client.ProtocolError` names the full
+  host. Loading the config now registers the pair for redaction, and
+  every place that shows the URL uses the new `InstanceConfig.display_url`.
+  The connection itself is unchanged.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

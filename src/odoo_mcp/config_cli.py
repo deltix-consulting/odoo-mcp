@@ -91,7 +91,7 @@ def _render_instance(
     check_keychain: bool,
 ) -> list[str]:
     lines: list[str] = []
-    lines.append(f"url:                     {inst.url}")
+    lines.append(f"url:                     {inst.display_url}")
     lines.append(f"database:                {inst.database}")
     lines.append(f"production:              {_bool(inst.production)}")
     lines.append(f"credentials_env_prefix:  {inst.credentials_env_prefix}")
