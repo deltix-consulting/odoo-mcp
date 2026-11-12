@@ -26,8 +26,9 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import unquote, urlsplit, urlunsplit
 
-from .errors import ConfigError
+from .errors import ConfigError, register_secret
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,15 @@ class InstanceConfig:
     #     ]
     attachment_source_paths: tuple[str, ...] = ()
 
+    @property
+    def display_url(self) -> str:
+        """``url`` without any ``user:pass@`` part — the form safe to show.
+
+        Use this wherever the URL is echoed (tool responses, ``status``,
+        ``config show``); ``url`` itself is for opening the connection.
+        """
+        return split_url_userinfo(self.url)[0]
+
 
 @dataclass(frozen=True, slots=True)
 class AppConfig:
@@ -274,6 +284,50 @@ def _parse_instances(raw: dict[str, Any], defaults: Defaults) -> dict[str, Insta
     return out
 
 
+# A bare password shorter than this is not registered for redaction on its
+# own: substituting every occurrence of a 4-letter word would mangle unrelated
+# error text. The ``user:password`` pair is always registered, and that is the
+# form the stdlib echoes (see :func:`_register_url_credentials`).
+_MIN_BARE_PASSWORD_LEN: Final[int] = 8
+
+
+def split_url_userinfo(url: str) -> tuple[str, str | None]:
+    """Split ``https://user:pass@host/path`` into (URL without userinfo, userinfo).
+
+    The second element is the raw ``user:pass`` (or bare ``user``) text exactly
+    as written in the URL, or ``None`` when the URL carries none. A URL that
+    cannot be parsed is returned unchanged with ``None``.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url, None
+    userinfo, at, hostport = parts.netloc.rpartition("@")
+    if not at:
+        return url, None
+    return urlunsplit(parts._replace(netloc=hostport)), userinfo
+
+
+def _register_url_credentials(url: str) -> None:
+    """Register HTTP Basic credentials embedded in an instance URL as secrets.
+
+    ``https://user:pass@odoo.example.com`` is how an Odoo behind a
+    basic-auth reverse proxy is reached, and the XML-RPC transport honours it.
+    That makes the URL a credential: ``xmlrpc.client.ProtocolError`` puts
+    ``user:pass@host/xmlrpc/2/object`` in its message on any non-200 reply,
+    which would otherwise reach the model and the audit log verbatim.
+    """
+    _, userinfo = split_url_userinfo(url)
+    if not userinfo:
+        return
+    register_secret(userinfo)
+    _, colon, password = userinfo.partition(":")
+    if colon:
+        for candidate in (password, unquote(password)):
+            if len(candidate) >= _MIN_BARE_PASSWORD_LEN:
+                register_secret(candidate)
+
+
 def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) -> InstanceConfig:
     _reject_unknown_keys(entry, _VALID_INSTANCE_KEYS, f"instances.{name}")
 
@@ -288,6 +342,7 @@ def _parse_one_instance(name: str, entry: dict[str, Any], defaults: Defaults) ->
         raise ConfigError(
             f"[instances.{name}] is marked production but url is not HTTPS. Refusing."
         )
+    _register_url_credentials(url)
 
     # Credentials: database + env prefix.
     database = _require_str(entry, "database", f"instances.{name}")

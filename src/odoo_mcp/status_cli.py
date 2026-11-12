@@ -71,7 +71,7 @@ def _render(app: OdooMcpApp) -> str:
             last_by_instance[inst] = e
 
     for name, rt in app.instances.items():
-        url = rt.config.url
+        url = rt.config.display_url
         db = rt.config.database
         env = "production" if rt.config.production else "dev"
         lines.append(f"[{name}] {url} / {db} ({env})")
@@ -171,7 +171,7 @@ def _status_payload(app: OdooMcpApp) -> dict[str, Any]:
         instances.append(
             {
                 "name": name,
-                "url": rt.config.url,
+                "url": rt.config.display_url,
                 "database": rt.config.database,
                 "production": rt.config.production,
                 "uid": uid,
