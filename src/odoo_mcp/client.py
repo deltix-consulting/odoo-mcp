@@ -31,7 +31,7 @@ import xmlrpc.client
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from typing import Any, Final
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 from xml.parsers import expat
 
 from .config import InstanceConfig
@@ -102,6 +102,50 @@ _POST_COMMIT_FAULT_MARKER: Final[str] = "cannot marshal"
 def _is_post_commit_fault(fault_string: str) -> bool:
     """Whether an Odoo fault was raised while marshalling the response."""
     return _POST_COMMIT_FAULT_MARKER in fault_string
+
+
+def _describe_bad_reply(exc: BaseException) -> str:
+    """Say what a non-XML-RPC reply was, without echoing the request URL.
+
+    ``str(ProtocolError)`` embeds ``host + handler`` — the raw netloc of the
+    configured URL — so the status line is rebuilt from ``errcode`` /
+    ``errmsg`` instead. For a redirect only the scheme and host of the
+    ``Location`` target are named: its path and query can hold a session or
+    SSO parameter, and the host is all the operator needs to fix the URL.
+    """
+    if isinstance(exc, xmlrpc.client.ProtocolError):
+        status = f"HTTP {exc.errcode} {exc.errmsg}".strip()
+        if 300 <= exc.errcode < 400:
+            target = ""
+            try:
+                location = urlsplit(str(exc.headers.get("Location") or ""))
+                if location.scheme and location.hostname:
+                    port = f":{location.port}" if location.port else ""
+                    target = f" to {location.scheme}://{location.hostname}{port}"
+            except (AttributeError, ValueError):
+                target = ""
+            return (
+                f"{status}: the server redirects{target}. XML-RPC does not follow "
+                f"redirects — set this instance's url to the address the server "
+                f"redirects to (usually https:// instead of http://, or the "
+                f"final host name)"
+            )
+        if exc.errcode == 404:
+            return (
+                f"{status}: nothing answers at /xmlrpc/2/common. The url must be "
+                f"the base address of the Odoo server, without a path such as "
+                f"/web or /odoo"
+            )
+        return (
+            f"{status}: a proxy or firewall in front of Odoo answered instead of "
+            f"Odoo, or Odoo is restarting"
+        )
+    if isinstance(exc, (xmlrpc.client.ResponseError, expat.ExpatError)):
+        return (
+            "the reply is not XML-RPC. Something answers at this url, but not as "
+            "an Odoo server (a login portal, a proxy error page or another site)"
+        )
+    return f"{type(exc).__name__}: {exc}"
 
 
 class _TimeoutHTTPConnection(http.client.HTTPConnection):
@@ -508,7 +552,8 @@ class OdooClient:
         """Perform the Odoo authenticate call and cache the resulting uid.
 
         Raises :class:`OdooAuthError` on bad credentials and
-        :class:`OdooTransportError` on network / TLS / timeout errors.
+        :class:`OdooTransportError` on network / TLS / timeout errors and on
+        a reply that is not XML-RPC (redirect, proxy error status, HTML page).
         """
         creds = self._get_credentials()
         logger.debug("authenticate start: instance=%s", self._instance.name)
@@ -527,6 +572,18 @@ class OdooClient:
         except (OSError, ssl.SSLError, TimeoutError) as exc:
             raise OdooTransportError(
                 f"Transport error authenticating against {self._instance.name!r}: {exc}"
+            ) from exc
+        except _RESPONSE_ERRORS as exc:
+            # Same class ``_execute`` maps, and this is where it shows up
+            # first: ``authenticate`` is the first request of every session,
+            # of ``odoo-mcp doctor`` and of the setup wizard, so a URL that
+            # redirects (http:// on a server that only serves https://), a
+            # 404 on a URL with a path, or a portal's HTML page lands here.
+            # Unmapped, it crashed ``doctor`` with a traceback and reached
+            # the agent as ``internal_error`` with no hint.
+            raise OdooTransportError(
+                f"Bad response authenticating against {self._instance.name!r}: "
+                f"{_describe_bad_reply(exc)}"
             ) from exc
 
         if not uid:

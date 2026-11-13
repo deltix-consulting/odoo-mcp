@@ -12,6 +12,24 @@ breaking change explicitly in this file.
 
 ### Fixed
 
+- **A redirect, a proxy error status or an HTML page at `authenticate`
+  is now an `odoo_transport` error that says what to change.**
+  `authenticate` is the first request of every session, of
+  `odoo-mcp doctor` and of the setup wizard, and it caught only
+  `OSError` / TLS / timeout. The stdlib XML-RPC client does not follow
+  redirects, so an instance configured as `http://` on a server that
+  only serves `https://` (the wizard accepts both) answered `301` and
+  raised `xmlrpc.client.ProtocolError`; a URL with a path gave `404`, a
+  restarting Odoo.sh build `502`, and an SSO portal or another site an
+  HTML page (`ExpatError`). None is an `OSError`: `odoo-mcp doctor` —
+  the command every transport hint points to — died with a traceback,
+  and a tool call returned `internal_error` with no hint. They now map
+  to `OdooTransportError` with the cause spelled out: for a redirect the
+  scheme and host it points to (never the path or query), for a 404
+  that the url must be the base address, for an HTML page that
+  something other than Odoo answers there. The message is built from
+  the status code and reason, not from `str(ProtocolError)`, so the
+  configured netloc is not echoed.
 - **A write that fails after the request reached Odoo now says the
   change may already be committed.** The transport already refused to
   re-send a `create` / `write` / `unlink` / `message_post` / workflow
