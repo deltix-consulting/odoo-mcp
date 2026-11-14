@@ -66,7 +66,9 @@ _TOOL_LOOKUP = Tool(
         "records by name. Domain sandbox does not apply (the search is "
         "fixed to a `name ilike` filter). Sensitive-field policy still "
         "applies: if `display_name` resolves to a sensitive field (e.g. "
-        "for some custom HR models), the result is redacted. "
+        "for some custom HR models), the result is redacted, and a model "
+        "whose `name` is sensitive or missing is refused (use "
+        "odoo_search_read on another field). "
         "Example: model='res.partner', query='Acme' returns up to limit "
         "matching companies / contacts."
     ),

@@ -10,6 +10,24 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_lookup` now answers to the field policy for the one field it
+  filters on.** The lookup skips the domain sandbox because its domain
+  is fixed to `name ilike <query>`, and so it also skipped the two
+  checks the sandbox makes on a filter field. (1) When an instance
+  hides `name` on a model (`sensitive_fields`, or a
+  `custom_sensitive_field_patterns` entry that matches it),
+  `odoo_search_read` refuses to filter on it and drops it from results,
+  while `odoo_lookup` ran the filter and returned `display_name` —
+  which Odoo builds from `name`. The lookup is now refused on such a
+  model. (2) A model without a `name` field (`mrp.bom`, `stock.quant`,
+  `res.partner.bank`, `mail.activity`) used to come back as an Odoo
+  "Invalid field" fault after a round trip; it is now refused up front
+  with the model's searchable text fields named, so the agent knows
+  where to look with `odoo_search_read`. No change for models whose
+  `name` is an ordinary field.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed

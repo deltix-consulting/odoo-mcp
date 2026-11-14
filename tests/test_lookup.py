@@ -230,3 +230,135 @@ def test_lookup_in_help_patterns(tmp_path: Path) -> None:
     payload = json.loads(contents[0].text)
     patterns = payload["common_patterns"]
     assert any("odoo_lookup" in (p.get("use") or "") for p in patterns)
+
+
+# -- The fixed `name` filter still answers to the field policy -----------------
+
+
+def _build_app_with(
+    tmp_path: Path,
+    *,
+    fields: dict[str, dict[str, Any]] | None = None,
+    sensitive_fields: dict[str, frozenset[str]] | None = None,
+    patterns: tuple[str, ...] = (),
+) -> tuple[OdooMcpApp, _FakeClient]:
+    import dataclasses
+
+    from odoo_mcp.security.fields import compile_extra_patterns
+
+    app, fake = _build_app(tmp_path, fields=fields)
+    rt = app.instances["dev"]
+    rt.config = dataclasses.replace(rt.config, sensitive_fields=sensitive_fields or {})
+    rt.extra_redacted = compile_extra_patterns(list(patterns))
+    return app, fake
+
+
+_BOM_FIELDS: dict[str, dict[str, Any]] = {
+    "id": {"type": "integer"},
+    "display_name": {"type": "char", "store": False},
+    "code": {"type": "char", "store": True},
+    "x_api_token": {"type": "char", "store": True},
+    "x_iban": {"type": "char", "store": True},
+    "x_label": {"type": "char", "store": False},
+    "product_qty": {"type": "float", "store": True},
+}
+
+
+def test_lookup_on_model_without_name_is_refused_before_odoo(tmp_path: Path) -> None:
+    """mrp.bom / stock.quant / res.partner.bank have no ``name``: Odoo answers
+    the fixed filter with an 'Invalid field' fault. Refuse first, and say where
+    to search instead."""
+    app, fake = _build_app_with(tmp_path, fields=_BOM_FIELDS)
+    payload = _call(Dispatcher(app), {"instance": "dev", "model": "mrp.bom", "query": "desk"})
+    assert payload["ok"] is False
+    assert fake.lookup_calls == []
+    message = payload["error"]
+    assert "no 'name' field" in message
+    assert "odoo_search_read" in message
+    assert "code" in message
+
+
+def test_lookup_no_name_refusal_names_only_searchable_unredacted_fields(
+    tmp_path: Path,
+) -> None:
+    app, _fake = _build_app_with(
+        tmp_path,
+        fields=_BOM_FIELDS,
+        sensitive_fields={"mrp.bom": frozenset({"x_iban"})},
+    )
+    payload = _call(Dispatcher(app), {"instance": "dev", "model": "mrp.bom", "query": "desk"})
+    message = payload["error"]
+    assert "x_api_token" not in message  # always redacted
+    assert "x_iban" not in message  # hidden on this instance
+    assert "x_label" not in message  # not stored: cannot be filtered on
+    assert "display_name" not in message
+    assert "product_qty" not in message
+
+
+def test_lookup_no_name_and_no_text_field_points_at_describe_model(tmp_path: Path) -> None:
+    app, _fake = _build_app_with(
+        tmp_path, fields={"id": {"type": "integer"}, "display_name": {"type": "char"}}
+    )
+    payload = _call(Dispatcher(app), {"instance": "dev", "model": "stock.quant", "query": "x"})
+    assert payload["ok"] is False
+    assert "odoo_describe_model" in payload["error"]
+
+
+def test_lookup_refused_when_name_is_hidden_on_the_model(tmp_path: Path) -> None:
+    """The operator hid ``name`` on this model. odoo_search_read refuses to
+    filter on it and drops it from results; the lookup must not do both."""
+    app, fake = _build_app_with(
+        tmp_path, sensitive_fields={"x_patient.record": frozenset({"name"})}
+    )
+    fake.next_results = [{"id": 7, "display_name": "Jan Peeters"}]
+    payload = _call(
+        Dispatcher(app), {"instance": "dev", "model": "x_patient.record", "query": "Peeters"}
+    )
+    assert payload["ok"] is False
+    assert fake.lookup_calls == []
+    assert "Jan Peeters" not in json.dumps(payload)
+    assert "sensitive" in payload["error"]
+    assert "odoo_search_read" in payload["error"]
+
+
+def test_lookup_refused_when_name_matches_an_instance_pattern(tmp_path: Path) -> None:
+    app, fake = _build_app_with(tmp_path, patterns=("name",))
+    payload = _call(Dispatcher(app), {"instance": "dev", "model": "res.partner", "query": "A"})
+    assert payload["ok"] is False
+    assert fake.lookup_calls == []
+
+
+def test_lookup_hidden_name_on_another_model_does_not_refuse(tmp_path: Path) -> None:
+    app, fake = _build_app_with(
+        tmp_path, sensitive_fields={"x_patient.record": frozenset({"name"})}
+    )
+    fake.next_results = [{"id": 1, "display_name": "Acme"}]
+    payload = _call(Dispatcher(app), {"instance": "dev", "model": "res.partner", "query": "Acme"})
+    assert payload["ok"] is True
+    assert fake.lookup_calls == [("res.partner", "Acme", 10)]
+
+
+def test_lookup_same_policy_as_search_read_filter(tmp_path: Path) -> None:
+    """The anchor: whatever the sandbox says about a ``name`` filter on this
+    model, the lookup says too."""
+    from odoo_mcp.security.domain import sandbox_domain
+
+    app, fake = _build_app_with(
+        tmp_path, sensitive_fields={"x_patient.record": frozenset({"name"})}
+    )
+    rt = app.instances["dev"]
+    for model, expect_refusal in (("x_patient.record", True), ("res.partner", False)):
+        try:
+            sandbox_domain(
+                [("name", "ilike", "a")],
+                frozenset({"id", "name", "display_name"}),
+                model=model,
+                instance_overrides=rt.config.sensitive_fields,
+                extra_redacted=rt.extra_redacted,
+            )
+            sandbox_refused = False
+        except Exception:
+            sandbox_refused = True
+        payload = _call(Dispatcher(app), {"instance": "dev", "model": model, "query": "a"})
+        assert sandbox_refused is expect_refusal
+        assert (payload["ok"] is False) is expect_refusal
