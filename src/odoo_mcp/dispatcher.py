@@ -67,6 +67,8 @@ from .security.document_actions import (
 )
 from .security.domain import sandbox_domain
 from .security.fields import (
+    is_always_redacted_with_extra,
+    is_default_hidden,
     redact_fields_get,
     redact_response,
     restrict_fields_meta,
@@ -153,6 +155,11 @@ _RELATIONAL_TYPES: Final[frozenset[str]] = frozenset({"many2one", "one2many", "m
 # single write. A sale order with lines is depth 1; deeper is rare and mostly
 # a sign of an abusive payload, so we bound it.
 _MAX_RELATIONAL_WRITE_DEPTH: Final[int] = 4
+
+# The one field ``odoo_lookup`` filters on, and how many of a model's other
+# text fields the "no such field" refusal names as places to search instead.
+_LOOKUP_FIELD: Final[str] = "name"
+_LOOKUP_ALTERNATIVES_SHOWN: Final[int] = 6
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +554,7 @@ class Dispatcher:
         effective_limit = min(raw_limit, rt.config.max_records_hard_cap)
 
         fields_meta = self._fields_meta(rt, model)
+        self._refuse_unusable_lookup_field(rt, model, fields_meta)
         results = rt.client.lookup(model, query, effective_limit)
         # Even though we only requested id + display_name, run the result
         # through the redactor so a model whose display_name is sensitive
@@ -575,6 +583,56 @@ class Dispatcher:
             "results": redacted,
             "count": len(redacted),
         }
+
+    @staticmethod
+    def _refuse_unusable_lookup_field(
+        rt: InstanceRuntime, model: str, fields_meta: dict[str, dict[str, Any]]
+    ) -> None:
+        """Refuse a lookup whose fixed ``name ilike`` filter cannot or may not run.
+
+        ``odoo_lookup`` skips the domain sandbox because its domain is fixed,
+        but the two checks the sandbox makes on a filter field still apply to
+        that one field:
+
+        * **It must exist.** Not every model has ``name`` (``mrp.bom``,
+          ``stock.quant``, ``res.partner.bank``, ``mail.activity``). Odoo
+          answers the filter with an "Invalid field" fault; say so before the
+          round trip, and say where to go instead.
+        * **It must not be redacted.** When the instance's policy hides
+          ``name`` on this model, ``odoo_search_read`` refuses to filter on it
+          (a match is a disclosure) and drops it from results. The lookup would
+          do both things the policy forbids: run the filter and hand back
+          ``display_name``, which Odoo computes from ``name``.
+        """
+        if _LOOKUP_FIELD not in fields_meta:
+            alternatives = sorted(
+                n
+                for n, meta in fields_meta.items()
+                if meta.get("type") == "char"
+                and meta.get("store") is not False
+                and n != "display_name"
+                and not is_always_redacted_with_extra(n, rt.extra_redacted)
+                and not is_default_hidden(model, n, instance_overrides=rt.config.sensitive_fields)
+            )[:_LOOKUP_ALTERNATIVES_SHOWN]
+            hint = (
+                f" Its text fields include: {', '.join(alternatives)}."
+                if alternatives
+                else " odoo_describe_model lists its fields."
+            )
+            raise FieldPolicyError(
+                f"Model {model!r} has no {_LOOKUP_FIELD!r} field, and odoo_lookup only "
+                f"searches {_LOOKUP_FIELD!r}. Use odoo_search_read with a filter on one of "
+                f"the model's own fields instead.{hint}"
+            )
+        if is_always_redacted_with_extra(_LOOKUP_FIELD, rt.extra_redacted) or is_default_hidden(
+            model, _LOOKUP_FIELD, instance_overrides=rt.config.sensitive_fields
+        ):
+            raise FieldPolicyError(
+                f"Field {_LOOKUP_FIELD!r} on {model!r} is sensitive on this instance, so "
+                f"odoo_lookup cannot search it: a match would reveal the value, and the "
+                f"display_name it returns is built from it. Find the record by another "
+                f"field with odoo_search_read."
+            )
 
     def _search_read(self, args: dict[str, Any]) -> dict[str, Any]:
         ctx = self._begin("odoo_search_read", args, Operation.SEARCH_READ)
