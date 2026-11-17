@@ -394,6 +394,9 @@ class OdooClient:
         self._uid: int | None = None
         self._is_admin: bool | None = None  # set after authenticate()
         self._admin_reason: str | None = None  # human-readable why it's admin
+        # (default company [id, name], ids of all the user's companies); set
+        # by user_default_company().
+        self._default_company: tuple[list[Any], list[int]] | None = None
         self._auth_lock = threading.Lock()
 
     # --- Construction / auth ------------------------------------------------
@@ -606,6 +609,41 @@ class OdooClient:
     def admin_reason(self) -> str | None:
         """Short human-readable explanation of why :attr:`is_admin` is True."""
         return self._admin_reason
+
+    def user_default_company(self) -> tuple[list[Any], list[int]] | None:
+        """The user's default company ``[id, name]`` and all their company ids.
+
+        The client never sends ``allowed_company_ids``, and without it
+        ``env.company`` is ``user.company_id`` (``Environment.company``, 16.0
+        through 20.0). That is the company whose value a company_dependent
+        field reads and writes (``ir.property`` up to 17.0, the jsonb column
+        keyed on ``env.company.id`` from 18.0), whatever company the record
+        itself belongs to. Callers use this to say so on a write.
+
+        Read once per client and cached. Returns ``None`` when the read fails
+        or the reply is odd: it is a disclosure, never a gate, and a failure
+        is not cached.
+        """
+        if self._default_company is not None:
+            return self._default_company
+        try:
+            rows = self.read("res.users", [self.uid], ["company_id", "company_ids"])
+        except (OdooRemoteError, OdooTransportError):
+            return None
+        row = rows[0] if rows and isinstance(rows[0], dict) else {}
+        default = row.get("company_id")
+        ids = row.get("company_ids")
+        if not (
+            isinstance(default, list)
+            and len(default) == 2
+            and isinstance(default[0], int)
+            and not isinstance(default[0], bool)
+            and isinstance(ids, list)
+            and all(isinstance(i, int) and not isinstance(i, bool) for i in ids)
+        ):
+            return None
+        self._default_company = ([default[0], str(default[1])], list(ids))
+        return self._default_company
 
     def ensure_authenticated(self) -> None:
         """Authenticate lazily on first use. Thread-safe and idempotent.

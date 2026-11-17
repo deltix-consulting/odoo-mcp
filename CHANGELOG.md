@@ -10,6 +10,22 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_write` and `odoo_create` did not say which company's value a
+  company_dependent field received.** Odoo stores such a field once per
+  company and writes the value of `env.company`. The client sends no
+  `allowed_company_ids`, so that is the API user's default company, not the
+  company of the record (`ir.property` up to 17.0, the jsonb column keyed on
+  `env.company.id` from 18.0). For a user in several companies, a write on a
+  record of another company changed the default company's value and left
+  the record's own company unchanged, with `committed: true`. When the
+  values name a company_dependent field and the user has two or more
+  companies, the dry run and the commit now return `company_scope`: the
+  fields, the company that gets the value, and the ids of the records that
+  belong to another company. Nothing is refused and the write itself is
+  unchanged. Users in one company get no extra key.
+
 ### Added
 
 - **`odoo_describe_model` marks fields Odoo stores per language or per

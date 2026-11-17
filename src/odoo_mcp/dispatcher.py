@@ -47,6 +47,8 @@ from .errors import (
     InstanceNotFoundError,
     ModelNotAllowedError,
     OdooMcpError,
+    OdooRemoteError,
+    OdooTransportError,
     OperationNotAllowedError,
     ProdGuardError,
 )
@@ -241,6 +243,25 @@ def _scoped_value_notes(fields: dict[str, dict[str, Any]]) -> list[str]:
     if any(meta.get("company_dependent") for meta in fields.values()):
         notes.append(_COMPANY_DEPENDENT_NOTE)
     return notes
+
+
+# A write to a company_dependent field stores the value for ``env.company``,
+# and without ``allowed_company_ids`` (which this client never sends) that is
+# the API user's default company, not the company of the record. Odoo's own
+# form writes in the company picked in the switcher, so the two differ for a
+# user in several companies. Wording is pinned by tests.
+_COMPANY_VALUE_NOTE = (
+    "{fields} hold{s} one value per company. This write sets the value of "
+    "company {company}, the API user's default company; the user's other "
+    "companies keep their own value."
+)
+_COMPANY_VALUE_MISMATCH_NOTE = (
+    " {count} record(s) belong to another company (see other_company_ids): "
+    "their own company will NOT see the new value. To change it for that "
+    "company, use Odoo with that company selected, or an API user whose "
+    "default company it is."
+)
+_COMPANY_VALUE_ID_PREVIEW: Final = 20
 
 
 class Dispatcher:
@@ -980,6 +1001,85 @@ class Dispatcher:
                     f"4 (link), 5 (clear), 6 (set)."
                 )
 
+    def _company_value_scope(
+        self,
+        rt: InstanceRuntime,
+        model: str,
+        validated: dict[str, Any],
+        fields_meta: dict[str, dict[str, Any]],
+        *,
+        ids: list[int] | None,
+    ) -> dict[str, Any] | None:
+        """Say which company's value a write to a company_dependent field sets.
+
+        Returns ``None`` (and makes no call) unless ``validated`` names a
+        field Odoo flags ``company_dependent``. For a user in one company
+        there is nothing to tell apart, so that returns ``None`` as well,
+        after one cached read. ``ids`` are the records of an ``odoo_write``;
+        ``None`` means ``odoo_create``, where the record's company is the
+        ``company_id`` in the values, if any.
+
+        A disclosure, never a gate: every lookup failure degrades to less
+        detail, and the write itself is left to Odoo.
+        """
+        scoped = sorted(f for f in validated if fields_meta.get(f, {}).get("company_dependent"))
+        if not scoped:
+            return None
+        companies = rt.client.user_default_company()
+        if companies is None:
+            return None
+        default, company_ids = companies
+        if len(company_ids) < 2:
+            return None
+
+        other: list[int] | None = None
+        company_meta = fields_meta.get("company_id", {})
+        has_company = (
+            company_meta.get("type") == "many2one" and company_meta.get("relation") == "res.company"
+        )
+        if ids is None:
+            target = validated.get("company_id") if has_company else None
+            if isinstance(target, int) and not isinstance(target, bool) and target != default[0]:
+                other = [target]
+        elif has_company:
+            try:
+                rows = rt.client.read(model, ids, ["company_id"])
+            except (OdooRemoteError, OdooTransportError):
+                rows = []
+            other = sorted(
+                row["id"]
+                for row in rows
+                if isinstance(row, dict)
+                and isinstance(row.get("id"), int)
+                and isinstance(row.get("company_id"), list)
+                and row["company_id"]
+                and row["company_id"][0] != default[0]
+            )
+
+        note = _COMPANY_VALUE_NOTE.format(
+            fields=", ".join(scoped),
+            s="s" if len(scoped) == 1 else "",
+            company=f"{default[1]!r} (id {default[0]})",
+        )
+        scope: dict[str, Any] = {
+            "company_dependent_fields": scoped,
+            "value_company": default,
+        }
+        if other:
+            if ids is None:
+                scope["record_company_id"] = other[0]
+                note += (
+                    f" The new record is for company id {other[0]}: that company "
+                    "will NOT see the value. Set it afterwards in Odoo with that "
+                    "company selected, or with an API user whose default company it is."
+                )
+            else:
+                scope["other_company_id_count"] = len(other)
+                scope["other_company_ids"] = other[:_COMPANY_VALUE_ID_PREVIEW]
+                note += _COMPANY_VALUE_MISMATCH_NOTE.format(count=len(other))
+        scope["note"] = note
+        return scope
+
     def _create(self, args: dict[str, Any]) -> dict[str, Any]:
         _refuse_if_read_only_session()
         ctx = self._begin("odoo_create", args, Operation.CREATE)
@@ -994,6 +1094,7 @@ class Dispatcher:
         validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
         self._validate_relational_writes(rt, model, validated, fields_meta)
         n = len(validated)
+        company_scope = self._company_value_scope(rt, model, validated, fields_meta, ids=None)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
             token = self.app.prod_guard.create_pending(
@@ -1012,6 +1113,8 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_create"),
             }
+            if company_scope is not None:
+                preview["company_scope"] = company_scope
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
@@ -1024,6 +1127,8 @@ class Dispatcher:
             "id": new_id,
             "committed": True,
         }
+        if company_scope is not None:
+            result["company_scope"] = company_scope
         self._add_commits_remaining(result, ctx)
         return result
 
@@ -1046,6 +1151,7 @@ class Dispatcher:
         validated = validate_write_values(model, values, known, extra_redacted=rt.extra_redacted)
         self._validate_relational_writes(rt, model, validated, fields_meta)
         n = len(validated)
+        company_scope = self._company_value_scope(rt, model, validated, fields_meta, ids=ids)
 
         if self.app.prod_guard.effective_dry_run(args.get("dry_run"), rt.config.production):
             id_preview = f"ids={ids[:5]}{'...' if len(ids) > 5 else ''}"
@@ -1066,6 +1172,8 @@ class Dispatcher:
                 "confirmation_token": token,
                 "note": _DRY_RUN_NOTE.format(tool="odoo_write"),
             }
+            if company_scope is not None:
+                preview["company_scope"] = company_scope
             self._add_commits_remaining(preview, ctx, dry_run=True)
             return preview
 
@@ -1078,6 +1186,8 @@ class Dispatcher:
             "ids": ids,
             "committed": ok,
         }
+        if company_scope is not None:
+            result["company_scope"] = company_scope
         self._add_commits_remaining(result, ctx)
         return result
 
