@@ -674,6 +674,9 @@ class OdooClient:
                     "help",
                     "relation",
                     "store",
+                    # Odoo <=16: readonly=True + states={'draft': [('readonly',
+                    # False)]} on document fields. 17+ ignores the name.
+                    "states",
                 ],
             },
         )
