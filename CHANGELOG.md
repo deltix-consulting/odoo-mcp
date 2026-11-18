@@ -12,6 +12,22 @@ breaking change explicitly in this file.
 
 ### Fixed
 
+- **A readonly field that Odoo 16 unlocks per state is no longer reported
+  as a computed field on writes.** Odoo ≤16 declares document fields as
+  `readonly=True, states={'draft': [('readonly', False)]}`
+  (`account.move.partner_id` / `invoice_date` / `invoice_line_ids`,
+  `hr.expense.employee_id`, `mrp.production.product_id`,
+  `stock.picking.picking_type_id`, `sale.order.name`). `fields_get`
+  reports `readonly: true` for them, so every edit of a draft vendor bill
+  on 16.0 came back with `readonly_fields_written` and a note that the
+  value may be recomputed and lost — for an ordinary, persisted write.
+  `fields_get` now also requests `states` (Odoo 17+ dropped the attribute
+  and ignores the name), and a field whose `states` lifts `readonly` —
+  Odoo's own `Field.is_editable` test — is left out of
+  `readonly_fields_written` and never refused as "computed and not
+  stored". The persistent fields cache moves to payload version 3, so old
+  rows are re-fetched once.
+
 - **`odoo_create` / `odoo_write` no longer report success for a write
   Odoo silently discards.** `validate_write_values` checked that a
   field exists and is not redacted, but never that it can receive a

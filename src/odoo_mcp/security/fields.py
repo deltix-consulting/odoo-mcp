@@ -336,6 +336,39 @@ def validate_requested_fields(
     return list(requested)
 
 
+def _states_unlock_readonly(meta: dict[str, Any]) -> bool:
+    """True when ``states`` makes a ``readonly=True`` field editable in some state.
+
+    Odoo 16 and earlier declare document fields as ``readonly=True,
+    states={'draft': [('readonly', False)]}`` (``account.move.partner_id`` /
+    ``invoice_date`` / ``invoice_line_ids``, ``hr.expense.employee_id``,
+    ``mrp.production.product_id``, ``stock.picking.picking_type_id``,
+    ``sale.order.name``). ``fields_get`` then reports ``readonly: true`` for a
+    plain column that a draft record accepts like any other. Odoo's own test
+    is ``Field.is_editable`` (``odoo/fields.py`` 16.0): not readonly, or a
+    ``states`` entry that touches ``readonly``. Odoo 17 dropped ``states``
+    (a field that still sets it only gets a warning) and ``fields_get``
+    ignores an attribute name it does not know, so the key is simply absent.
+
+    Over XML-RPC the tuples arrive as lists: ``{"draft": [["readonly", False]]}``.
+    """
+    states = meta.get("states")
+    if not isinstance(states, dict):
+        return False
+    for items in states.values():
+        if not isinstance(items, (list, tuple)):
+            continue
+        for item in items:
+            if (
+                isinstance(item, (list, tuple))
+                and len(item) == 2
+                and item[0] == "readonly"
+                and not item[1]
+            ):
+                return True
+    return False
+
+
 def _is_never_persisted(meta: dict[str, Any] | None) -> bool:
     """True when Odoo will accept a write to this field and silently drop it.
 
@@ -355,10 +388,18 @@ def _is_never_persisted(meta: dict[str, Any] | None) -> bool:
     A missing ``store`` key is read as stored — we only refuse when Odoo
     positively told us the field has no column, so an unusual or trimmed
     ``fields_get`` can never manufacture a false refusal.
+
+    A ``states`` entry that lifts ``readonly`` (Odoo ≤16, see
+    :func:`_states_unlock_readonly`) also fails open: Odoo itself calls such a
+    field editable, so ``readonly`` alone is not proof the write is a no-op.
     """
     if not meta:
         return False
-    return bool(meta.get("readonly")) and meta.get("store", True) is False
+    return (
+        bool(meta.get("readonly"))
+        and meta.get("store", True) is False
+        and not _states_unlock_readonly(meta)
+    )
 
 
 def recomputed_write_fields(
@@ -374,6 +415,11 @@ def recomputed_write_fields(
     ``readonly`` flag also covers ``id`` / ``create_date`` / ``write_uid``
     and explicitly-readonly stored columns, where a write is unusual but is
     the caller's business. Odoo's own ACLs remain the authority.
+
+    A field whose ``states`` lifts ``readonly`` (Odoo ≤16 draft documents,
+    see :func:`_states_unlock_readonly`) is a plain column, not a computed
+    one, and is left out: otherwise every draft vendor bill or expense edit
+    on 16.0 comes back with a "the value may be lost" note it does not earn.
     """
     if not fields_meta:
         return []
@@ -383,6 +429,7 @@ def recomputed_write_fields(
         if (meta := fields_meta.get(name))
         and bool(meta.get("readonly"))
         and meta.get("store", True) is not False
+        and not _states_unlock_readonly(meta)
     )
 
 
