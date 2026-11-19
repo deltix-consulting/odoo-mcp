@@ -263,6 +263,22 @@ _COMPANY_VALUE_MISMATCH_NOTE = (
 )
 _COMPANY_VALUE_ID_PREVIEW: Final = 20
 
+# The read side of the same fact: a read of a company_dependent field returns
+# the value of ``env.company`` (the API user's default company, since this
+# client sends no ``allowed_company_ids``), not the value the record's own
+# company sees. Wording is pinned by tests.
+_COMPANY_READ_NOTE = (
+    "{fields} hold{s} one value per company. The values shown are those of "
+    "company {company}, the API user's default company, whatever company a "
+    "record belongs to."
+)
+_COMPANY_READ_MISMATCH_NOTE = (
+    " {count} record(s) belong to another company (see other_company_ids): "
+    "that company may see a different value. To read it, use Odoo with that "
+    "company selected, or an API user whose default company it is."
+)
+_COMPANY_READ_HINT = " Add company_id to fields to see which records belong to another company."
+
 
 class Dispatcher:
     """Wires MCP tool names to handlers.
@@ -713,6 +729,9 @@ class Dispatcher:
             result["has_more"] = False
         if smart:
             result["smart_fields_used"] = fields
+        company_scope = self._company_read_scope(rt, fields, fields_meta, redacted)
+        if company_scope is not None:
+            result["company_scope"] = company_scope
         return result
 
     def _search_count(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -864,6 +883,9 @@ class Dispatcher:
         }
         if smart:
             result["smart_fields_used"] = fields
+        company_scope = self._company_read_scope(rt, fields, fields_meta, redacted)
+        if company_scope is not None:
+            result["company_scope"] = company_scope
         return result
 
     def _validate_relational_writes(
@@ -1077,6 +1099,66 @@ class Dispatcher:
                 scope["other_company_id_count"] = len(other)
                 scope["other_company_ids"] = other[:_COMPANY_VALUE_ID_PREVIEW]
                 note += _COMPANY_VALUE_MISMATCH_NOTE.format(count=len(other))
+        scope["note"] = note
+        return scope
+
+    def _company_read_scope(
+        self,
+        rt: InstanceRuntime,
+        fields: list[str],
+        fields_meta: dict[str, dict[str, Any]],
+        records: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Say which company's value a read of a company_dependent field shows.
+
+        Returns ``None`` (and makes no call) unless a record came back and
+        ``fields`` names a field Odoo flags ``company_dependent``. For a
+        user in one company there is nothing to tell apart. Records of
+        another company are named only when ``company_id`` was read anyway:
+        a disclosure never costs an extra round trip on a read. The one
+        cached ``res.users`` read is shared with the write side.
+        """
+        if not records:
+            return None
+        scoped = sorted({f for f in fields if fields_meta.get(f, {}).get("company_dependent")})
+        if not scoped:
+            return None
+        companies = rt.client.user_default_company()
+        if companies is None:
+            return None
+        default, company_ids = companies
+        if len(company_ids) < 2:
+            return None
+
+        note = _COMPANY_READ_NOTE.format(
+            fields=", ".join(scoped),
+            s="s" if len(scoped) == 1 else "",
+            company=f"{default[1]!r} (id {default[0]})",
+        )
+        scope: dict[str, Any] = {
+            "company_dependent_fields": scoped,
+            "value_company": default,
+        }
+        company_meta = fields_meta.get("company_id", {})
+        has_company = (
+            company_meta.get("type") == "many2one" and company_meta.get("relation") == "res.company"
+        )
+        if has_company and "company_id" in fields:
+            other = sorted(
+                row["id"]
+                for row in records
+                if isinstance(row, dict)
+                and isinstance(row.get("id"), int)
+                and isinstance(row.get("company_id"), list)
+                and row["company_id"]
+                and row["company_id"][0] != default[0]
+            )
+            if other:
+                scope["other_company_id_count"] = len(other)
+                scope["other_company_ids"] = other[:_COMPANY_VALUE_ID_PREVIEW]
+                note += _COMPANY_READ_MISMATCH_NOTE.format(count=len(other))
+        elif has_company:
+            note += _COMPANY_READ_HINT
         scope["note"] = note
         return scope
 

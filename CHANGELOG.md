@@ -12,6 +12,18 @@ breaking change explicitly in this file.
 
 ### Fixed
 
+- **`odoo_search_read` and `odoo_read` did not say which company's value a
+  company_dependent field shows.** The read side of the write fix below: a
+  read returns the value of `env.company`, the API user's default company,
+  whatever company the record belongs to. For a user in several companies,
+  an NL product read by a user whose default company is BE showed the BE
+  cost price as if it were the product's own. When the fields read include
+  a company_dependent field and the user has two or more companies, the
+  response now carries `company_scope`: the fields, the company whose value
+  is shown and, when `company_id` was read too, the ids of the records of
+  another company. No extra round trip: the user's companies are the one
+  cached read the write side already makes, and records are never re-read
+  for their company.
 - **`odoo_write` and `odoo_create` did not say which company's value a
   company_dependent field received.** Odoo stores such a field once per
   company and writes the value of `env.company`. The client sends no
