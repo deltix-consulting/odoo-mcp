@@ -979,6 +979,7 @@ class Dispatcher:
                 "note": _DRY_RUN_NOTE.format(tool="odoo_create"),
             }
             self._add_commits_remaining(preview, ctx, dry_run=True)
+            _add_menu_defaults(preview, model, validated, fields_meta, committed=False)
             return preview
 
         self._consume_token_on_prod(ctx, args)
@@ -991,6 +992,7 @@ class Dispatcher:
             "committed": True,
         }
         self._add_commits_remaining(result, ctx)
+        _add_menu_defaults(result, model, validated, fields_meta, committed=True)
         return result
 
     def _write(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2233,6 +2235,96 @@ def _text(payload: dict[str, Any], *, default: Callable[[Any], Any] | None = Non
     )
 
 
+# Fields that decide WHAT KIND of record a create makes, where Odoo's field
+# default is not what a person gets from the web client. The web menus open
+# the form with a ``default_<field>`` context key (Invoicing > Invoices sends
+# ``default_move_type: 'out_invoice'``); deltix sends a frozen context
+# (``client._FROZEN_CONTEXT``) with no ``default_*`` key, so an RPC create
+# without the field gets the field default. Odoo accepts the record, so the
+# result says ``committed: true`` for a record of the wrong kind.
+#
+# Verified against odoo/odoo 16.0, 17.0, 18.0 and 19.0:
+# * account.move.move_type: ``default="entry"`` (account_move.py); the journal
+#   is then picked for an entry (a general / Miscellaneous journal).
+# * account.payment.payment_type ``default='inbound'`` and partner_type
+#   ``default='customer'`` (account_payment.py); the vendor payment menus
+#   send outbound / supplier.
+# * crm.lead.type: ``'lead' if user has crm.group_use_lead else
+#   'opportunity'`` (crm_lead.py); the Pipeline action sends
+#   ``default_type: 'opportunity'``.
+#
+# model -> ((field, what Odoo defaults to, what the web menus send), ...).
+# A row only fires when the field exists on the instance (fields_get) and the
+# caller left it out of ``values``.
+_MENU_CONTEXT_DEFAULTS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "account.move": (
+        (
+            "move_type",
+            "'entry' (a Journal Entry, not an invoice or bill)",
+            "'out_invoice' (customer invoice), 'out_refund' (customer credit note), "
+            "'in_invoice' (vendor bill), 'in_refund' (vendor credit note)",
+        ),
+    ),
+    "account.payment": (
+        (
+            "payment_type",
+            "'inbound' (money received)",
+            "'outbound' for a payment you make, e.g. to a vendor",
+        ),
+        (
+            "partner_type",
+            "'customer'",
+            "'supplier' for a vendor payment",
+        ),
+    ),
+    "crm.lead": (
+        (
+            "type",
+            "'lead' when the Leads setting is on, else 'opportunity'",
+            "'opportunity' (the Pipeline; a lead does not show there)",
+        ),
+    ),
+}
+
+
+def _add_menu_defaults(
+    payload: dict[str, Any],
+    model: str,
+    values: dict[str, Any],
+    fields_meta: dict[str, dict[str, Any]],
+    *,
+    committed: bool,
+) -> None:
+    """Say which record-kind fields fall back to Odoo's default on this create.
+
+    Disclosure only: a Journal Entry or an inbound payment is a legitimate
+    record, so nothing is refused. No extra RPC — the table is static and
+    ``fields_meta`` is the cached ``fields_get`` the handler already has.
+    """
+    rows = [
+        {"field": field, "odoo_default": default, "web_menus_send": menus}
+        for field, default, menus in _MENU_CONTEXT_DEFAULTS.get(model, ())
+        if field in fields_meta and field not in values
+    ]
+    if not rows:
+        return
+    names = ", ".join(row["field"] for row in rows)
+    payload["menu_defaults"] = rows
+    if committed:
+        payload["menu_defaults_note"] = (
+            f"{model} was created without {names}, so Odoo used its field default "
+            "(the web menus set it for you; an API call does not). Check the new "
+            "record is the kind you meant before it is confirmed or posted, and "
+            "set the field in values next time."
+        )
+    else:
+        payload["menu_defaults_note"] = (
+            f"values has no {names}, so Odoo will use its field default, not what "
+            "the web menu for this kind of record sets. Add the field to values "
+            "if you mean another kind of record, and dry-run again."
+        )
+
+
 def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
@@ -2657,6 +2749,9 @@ _HELP_GOTCHAS: list[str] = [
     "reports why a specific model is blocked.",
     "res.users is readable for resolving user_id values (name, login, email "
     "and a few identity fields only) but never writable through the MCP.",
+    "odoo_create gets no web-menu defaults: set move_type on account.move "
+    "(else a Journal Entry), payment_type/partner_type on account.payment "
+    "(else inbound/customer), type on crm.lead (else maybe a lead).",
     "On production, writes default to dry_run=true. Pass dry_run=false AND a "
     "confirmation_token from a prior dry run to commit.",
     "To remove records, use odoo_archive_or_delete. Always offer archive "
