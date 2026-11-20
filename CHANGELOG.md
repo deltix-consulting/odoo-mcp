@@ -10,6 +10,19 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`odoo_create` says when a record-kind field falls back to Odoo's
+  default.** The web menus open a form with a `default_<field>` context
+  key; deltix's context is frozen, so an API create gets the field
+  default instead. An `account.move` without `move_type` became a Journal
+  Entry, an `account.payment` without `payment_type` / `partner_type` an
+  inbound customer payment, and a `crm.lead` without `type` a lead (not in
+  the Pipeline) when the Leads setting is on, all with `committed: true`.
+  The dry run and the commit now return `menu_defaults` (field, Odoo's
+  default, what the menus send) and `menu_defaults_note`. Disclosure only,
+  no extra RPC; verified against Odoo 16.0-19.0.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
