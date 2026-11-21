@@ -52,6 +52,7 @@ from .errors import (
 )
 from .security.allowlist import (
     ALLOWLIST_WILDCARD,
+    DELEGATED_WRITE_BLOCKLIST,
     MODEL_DENYLIST,
     MODEL_WRITE_BLOCKLIST,
     Operation,
@@ -59,6 +60,7 @@ from .security.allowlist import (
     check_operation,
     classify_model_block,
     is_write,
+    is_write_blocklisted,
 )
 from .security.document_actions import (
     WizardCompletion,
@@ -1845,7 +1847,7 @@ class Dispatcher:
             # Models like res.users / mail.message are readable but the MCP
             # refuses every write path regardless of Odoo ACLs — surface
             # that so a "can_write: true" from Odoo isn't misread.
-            "write_blocked_via_mcp": model in MODEL_WRITE_BLOCKLIST,
+            "write_blocked_via_mcp": is_write_blocklisted(model),
             "uid": rt.client.uid,
             "login": rt.client.username,
             "is_admin": rt.client.is_admin,
@@ -2254,7 +2256,8 @@ def _refuse_if_read_only_session() -> None:
 
 
 def _refuse_write_blocklisted(model: str) -> None:
-    """Refuse any write-path call against a model in :data:`MODEL_WRITE_BLOCKLIST`.
+    """Refuse any write-path call against a model in :data:`MODEL_WRITE_BLOCKLIST`
+    or :data:`DELEGATED_WRITE_BLOCKLIST`.
 
     Runs BEFORE prod-guard / dry-run logic so the refusal is the same on
     dev and prod, and so an unlocked prod-write window cannot be used to
@@ -2266,6 +2269,14 @@ def _refuse_write_blocklisted(model: str) -> None:
             f"Model {model!r} is read-only via the MCP. "
             f"This model is exposed for reading but writes (create / update / "
             f"archive / delete) are refused as a hard safety invariant."
+        )
+    parent = DELEGATED_WRITE_BLOCKLIST.get(model)
+    if parent is not None:
+        raise ModelNotAllowedError(
+            f"Model {model!r} is read-only via the MCP. Its records hold the "
+            f"fields of {parent!r} (Odoo delegation inheritance), which the MCP "
+            f"blocks, so writes (create / update / archive / delete) are "
+            f"refused as a hard safety invariant."
         )
 
 

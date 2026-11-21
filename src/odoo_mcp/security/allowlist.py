@@ -187,6 +187,43 @@ MODEL_WRITE_BLOCKLIST: Final[frozenset[str]] = frozenset(
 )
 
 
+# Models that hold another model's fields through Odoo's ``_inherits``
+# (delegation inheritance), where that other model is blocked above. A
+# create or write on the child writes the parent's fields, and can point
+# the child's delegation many2one at an existing parent row, so blocking
+# only the parent's own name leaves the parent writable under another
+# name. Each child maps to the blocked parent it delegates to; writes on
+# the child are refused like writes on a MODEL_WRITE_BLOCKLIST model.
+# Reads stay open: field redaction (tokens, binaries) runs on them as on
+# any other model.
+#
+# * ``website.page`` / ``website.controller.page`` (17.0+) delegate to
+#   ``ir.ui.view``: ``arch``, ``inherit_id``, ``mode``, ``key`` and the
+#   view's groups are fields of the page. A page whose view inherits
+#   ``web.layout`` puts its QWeb on every page of the backend.
+# * ``product.document`` (17.0+) and ``quotation.document``
+#   (``sale_pdf_quote_builder``, 18.0+) delegate to ``ir.attachment``:
+#   ``public``, ``res_model``, ``res_id``, ``datas``, ``url`` are fields
+#   of the document, and its ``ir_attachment_id`` can name any
+#   attachment the API user may write.
+#
+# Odoo's other ``_inherits`` onto a blocked parent are already blocked
+# themselves (``ir.cron`` onto ``ir.actions.server``) or are the parent
+# being exposed on purpose (``res.users`` onto ``res.partner``).
+# Swept on 16.0 / 19.0 / master.
+DELEGATED_WRITE_BLOCKLIST: Final[dict[str, str]] = {
+    "website.page": "ir.ui.view",
+    "website.controller.page": "ir.ui.view",
+    "product.document": "ir.attachment",
+    "quotation.document": "ir.attachment",
+}
+
+
+def is_write_blocklisted(model: str) -> bool:
+    """True when every write path on ``model`` is refused by the MCP."""
+    return model in MODEL_WRITE_BLOCKLIST or model in DELEGATED_WRITE_BLOCKLIST
+
+
 class Operation(StrEnum):
     """The only operations the MCP is allowed to execute against Odoo."""
 

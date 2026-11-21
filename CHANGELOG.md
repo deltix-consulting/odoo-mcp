@@ -10,6 +10,20 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **Writes on a model that holds a blocked model's fields are refused.**
+  `website.page` and `website.controller.page` hold every `ir.ui.view`
+  field (`arch`, `inherit_id`, `key`) through Odoo's `_inherits`, and
+  `product.document` / `quotation.document` hold every `ir.attachment`
+  field (`public`, `res_model`, `datas`). `ir.ui.view` and
+  `ir.attachment` are on the denylist, but `odoo_create` / `odoo_write` on
+  the child wrote them anyway: QWeb on a page whose view inherits
+  `web.layout`, or `public: true` on any attachment named by
+  `ir_attachment_id`. All write paths on the four models, nested x2many
+  commands included, are now refused like `MODEL_WRITE_BLOCKLIST`; reads
+  stay open. Swept against Odoo 16.0 / 19.0 / master.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
