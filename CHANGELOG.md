@@ -10,6 +10,18 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Integers above 2,147,483,647 reach Odoo instead of failing before the
+  call.** The stdlib XML-RPC marshaller only writes 32-bit `<int>`, so a
+  domain or a write with an amount such as `5000000000` (everyday in IDR,
+  VND, KRW) raised `OverflowError` locally and every tool answered
+  `internal_error`; on production the dry run still issued a token, because
+  the preview never sends the values. Such integers now go out as `<i8>`,
+  which Odoo's request parser (`xmlrpc.client.loads`) reads on 16.0 through
+  master. Past the signed 64-bit range the call is refused as
+  `limit_exceeded` with a hint, without echoing the value.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
