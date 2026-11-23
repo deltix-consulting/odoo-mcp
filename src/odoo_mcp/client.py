@@ -33,6 +33,7 @@ from collections.abc import Callable, Iterator
 from typing import Any, Final
 from urllib.parse import urlparse
 
+from ._xmlrpc_int8 import OdooServerProxy
 from .config import InstanceConfig
 from .credentials import Credentials
 from .errors import OdooAuthError, OdooRemoteError, OdooTransportError
@@ -440,7 +441,9 @@ class OdooClient:
             )
         else:
             transport = _TimeoutTransport(timeout=float(self._instance.timeout_seconds))
-        proxy = xmlrpc.client.ServerProxy(url, transport=transport, allow_none=True)
+        # OdooServerProxy: integers above 2**31 - 1 go out as <i8> instead of
+        # failing in the stdlib marshaller (see odoo_mcp._xmlrpc_int8).
+        proxy = OdooServerProxy(url, transport=transport, allow_none=True)
         assert isinstance(transport, _ConnectionRecyclingMixin)  # noqa: S101 — MRO invariant
         return proxy, transport
 
