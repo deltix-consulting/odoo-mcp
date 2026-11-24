@@ -10,6 +10,18 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **The production admin refusal now holds on every call, not only the
+  first.** `authenticate()` stored the uid before the admin check ran,
+  and `ensure_authenticated()` skips sign-in whenever a uid is cached.
+  The client lives for the whole MCP session, so after the first tool
+  call was refused with "Refusing to use admin credentials", the next
+  call (an agent's ordinary retry) ran against production with the
+  refused superuser / `base.group_system` key. A refused sign-in now
+  forgets the uid, so each retry signs in again and is refused again.
+  Dev instances and `refuse_admin_on_production = false` are unchanged.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
