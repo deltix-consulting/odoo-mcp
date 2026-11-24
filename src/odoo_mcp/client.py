@@ -480,6 +480,8 @@ class OdooClient:
             )
         if not isinstance(uid, int):
             raise OdooAuthError(f"Unexpected authenticate() return type: {type(uid).__name__}")
+        # The admin check below calls ``has_group`` through ``_execute``, which
+        # needs ``self.uid``, so the uid is stored before the checks run.
         self._uid = uid
         logger.debug("authenticate ok: instance=%s uid=%d", self._instance.name, uid)
 
@@ -488,11 +490,18 @@ class OdooClient:
         # rights — can bypass most record rules and access nearly everything.
         # Using such credentials via the MCP is a security red flag because it
         # collapses the per-user Odoo ACL that the MCP relies on for scoping.
-        # We detect and flag; we don't refuse, so existing working setups are
-        # not broken. Consultants should create a dedicated non-admin Odoo user
-        # for MCP use instead.
-        self._detect_admin_privileges(uid)
-        self._enforce_admin_refusal()
+        # Flagged everywhere, refused on production (see _enforce_admin_refusal).
+        #
+        # A refusal must also forget the uid. ``ensure_authenticated`` skips
+        # authenticate() whenever a uid is cached, and the client lives for the
+        # whole MCP session, so a uid left behind here would let the NEXT tool
+        # call (an agent's ordinary retry) run with the refused admin key.
+        try:
+            self._detect_admin_privileges(uid)
+            self._enforce_admin_refusal()
+        except BaseException:
+            self._uid = None
+            raise
 
         return uid
 
