@@ -22,6 +22,14 @@ breaking change explicitly in this file.
   (`ll` / `ll_CC` with an optional `@variant`); a malformed value fails
   loudly at config-load time. Default stays `en_US`, so existing
   installs are unchanged.
+- **Sign-in refuses a `language` the database has not activated.** The
+  config check is shape-only, so `nl_NL` on a `nl_BE` database used to
+  load fine: Odoo 16/17 then answered every call in English without a
+  word, and 18+ failed every call with `Invalid language code`. Sign-in
+  now asks `res.lang.get_installed` once (no extra call for `en_US`) and
+  raises a `config_error` naming the active languages. The refusal does
+  not leave a cached uid, so the next call refuses again. A probe that
+  fails for another reason (access, timeout) is logged and sign-in goes on.
 
   The locale remains **operator config, never caller input** — the Odoo
   call context is still built once per client and never accepts a

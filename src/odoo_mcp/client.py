@@ -35,7 +35,7 @@ from urllib.parse import urlparse
 
 from .config import InstanceConfig
 from .credentials import Credentials
-from .errors import OdooAuthError, OdooRemoteError, OdooTransportError
+from .errors import ConfigError, OdooAuthError, OdooRemoteError, OdooTransportError
 from .fields_cache import PersistentFieldsCache
 
 logger = logging.getLogger(__name__)
@@ -497,8 +497,64 @@ class OdooClient:
         # for MCP use instead.
         self._detect_admin_privileges(uid)
         self._enforce_admin_refusal()
+        try:
+            self._enforce_language_installed()
+        except BaseException:
+            # The uid is cached above; a refusal that left it set would be
+            # skipped by ensure_authenticated() on the very next call.
+            self._uid = None
+            raise
 
         return uid
+
+    def _enforce_language_installed(self) -> None:
+        """Refuse a configured ``language`` that this database has not installed.
+
+        ``config.py`` only checks the code's *shape*. Odoo itself is not loud
+        about an inactive code: 16.0 / 17.0 silently fall back to English for
+        every label and translatable field, and 18.0+ raise ``Invalid language
+        code`` from ``Environment.lang`` on every call that touches it. Either
+        way the operator's typo (``nl_NL`` on a ``nl_BE`` database) surfaces
+        far from its cause, so check once here, at sign-in.
+
+        ``en_US`` is always valid (Odoo exempts it) and costs no round trip.
+        Only positive evidence refuses: a probe that fails for another reason
+        is logged and sign-in continues, like the admin check above.
+        """
+        lang = self._frozen_context.get("lang")
+        if not lang or lang == "en_US":
+            return
+        try:
+            installed = self._execute("res.lang", "get_installed", [], {})
+        except OdooRemoteError as exc:
+            if "Invalid language code" not in str(exc):
+                logger.warning(
+                    "Could not list installed languages on %r; language %r not checked.",
+                    self._instance.name,
+                    lang,
+                )
+                return
+            installed = None
+        except OdooTransportError:
+            logger.warning(
+                "Could not list installed languages on %r; language %r not checked.",
+                self._instance.name,
+                lang,
+            )
+            return
+        codes: list[str] = []
+        if isinstance(installed, list):
+            codes = [str(row[0]) for row in installed if isinstance(row, (list, tuple)) and row]
+            if lang in codes:
+                return
+        available = ", ".join(sorted(codes)) if codes else "unknown"
+        raise ConfigError(
+            f"Instance {self._instance.name!r} is configured with language {lang!r}, "
+            f"but that language is not active in the Odoo database. Active "
+            f"languages: {available}. Set 'language' in config.toml to one of "
+            f"them (or remove it for en_US), or ask the Odoo admin to activate "
+            f"{lang!r} under Settings > Languages."
+        )
 
     def _enforce_admin_refusal(self) -> None:
         """Refuse admin credentials on production unless explicitly opted out.
