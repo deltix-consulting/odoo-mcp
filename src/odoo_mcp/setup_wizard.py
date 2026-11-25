@@ -1160,7 +1160,7 @@ def _acknowledge_admin_or_abort(name: str) -> bool:
         from .client import OdooClient
         from .config import load_config
         from .credentials import load_credentials
-        from .errors import OdooAuthError
+        from .errors import OdooMcpError
 
         cfg = load_config(DEFAULT_CONFIG_PATH)
         instance = cfg.instances.get(name)
@@ -1179,7 +1179,7 @@ def _acknowledge_admin_or_abort(name: str) -> bool:
         # raise. We're in the wizard precisely to handle this gracefully.
         try:
             client.authenticate()
-        except OdooAuthError as exc:
+        except OdooMcpError as exc:
             if "Refusing to use admin credentials" not in exc.user_message:
                 # Some other auth problem — let the wizard's normal flow
                 # surface it via doctor.
