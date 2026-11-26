@@ -45,6 +45,7 @@ _ALLOWED_OPS: Final[frozenset[str]] = frozenset(
         "<=",
         "=?",
         "=like",
+        "=ilike",
         "like",
         "not like",
         "ilike",
@@ -55,6 +56,29 @@ _ALLOWED_OPS: Final[frozenset[str]] = frozenset(
         "parent_of",
     }
 )
+
+# Operators Odoo accepts on some versions only, or that would reach past the
+# target model. They stay refused; the refusal names the spelling that works
+# on every supported version (16.0 to master), so the agent does not fall back
+# to a looser operator such as ``ilike`` and get more rows than it asked for.
+_OPERATOR_HINTS: Final[dict[str, str]] = {
+    "not =like": (
+        "Odoo 16-18 do not know it. Put '!' before a '=like' leaf: ['!', (field, '=like', value)]."
+    ),
+    "not =ilike": (
+        "Odoo 16-18 do not know it. Put '!' before a '=ilike' leaf: "
+        "['!', (field, '=ilike', value)]."
+    ),
+    "<>": "Use '!=' instead.",
+    "any": (
+        "It filters on fields of the related model, like a dotted path. Do it in two "
+        "calls: find the ids on the related model, then filter with (field, 'in', ids)."
+    ),
+    "not any": (
+        "It filters on fields of the related model, like a dotted path. Do it in two "
+        "calls: find the ids on the related model, then filter with (field, 'not in', ids)."
+    ),
+}
 
 _LOGICAL_OPS: Final[frozenset[str]] = frozenset({"&", "|", "!"})
 _MAX_LEAVES: Final[int] = 32
@@ -186,8 +210,11 @@ def _validate_leaf(
             )
 
     if not isinstance(operator, str) or operator not in _ALLOWED_OPS:
+        hint = _OPERATOR_HINTS.get(operator) if isinstance(operator, str) else None
         raise DomainSandboxError(
-            f"Operator {operator!r} is not allowed. Allowed: {sorted(_ALLOWED_OPS)}"
+            f"Operator {operator!r} is not allowed."
+            + (f" {hint}" if hint else "")
+            + f" Allowed: {sorted(_ALLOWED_OPS)}"
         )
 
     _validate_value(value)

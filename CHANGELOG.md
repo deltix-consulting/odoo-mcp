@@ -10,6 +10,21 @@ breaking change explicitly in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Domains accept `=ilike`.** Odoo has accepted `=ilike` (a
+  case-insensitive match with no implicit `%...%`) on every version from
+  16.0 to master, and the domain sandbox refused it. An agent that wanted a
+  case-insensitive exact match (an email, a reference) fell back to
+  `ilike`, which also matches longer values and can return the wrong
+  record. The field redaction policy runs before the operator check, so
+  `=ilike` on a hidden field is refused like `=like`.
+- **A refused operator names the spelling that works.** `not =like` and
+  `not =ilike` exist only from Odoo 19; the refusal now says to put `'!'`
+  before a `=like` / `=ilike` leaf. `<>` points to `!=`, and `any` /
+  `not any` (a filter on the related model, like a dotted path) point to
+  the two-call pattern.
+
 ## [0.27.0] - 2026-08-20
 
 ### Changed
