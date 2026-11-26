@@ -208,3 +208,57 @@ def test_trailing_underfed_operator_still_rejected() -> None:
 def test_dotted_rejection_suggests_two_call_pattern() -> None:
     with pytest.raises(DomainSandboxError, match="two calls"):
         sandbox_domain([("partner_id.name", "=", "Acme")], FIELDS)
+
+
+# --- operators Odoo accepts on every supported version ----------------------
+
+
+def test_eq_ilike_is_allowed() -> None:
+    # '=ilike' is a term operator on 16.0 through master: a case-insensitive
+    # match without the implicit '%...%' that 'ilike' adds. Refusing it pushed
+    # agents to 'ilike', which matches more rows (e.g. a@b.com also matches
+    # xa@b.com.au).
+    assert sandbox_domain([("email", "=ilike", "A@B.com")], FIELDS) == [
+        ("email", "=ilike", "A@B.com")
+    ]
+
+
+def test_eq_ilike_inside_negation() -> None:
+    out = sandbox_domain(["!", ("email", "=ilike", "a@b.com")], FIELDS)
+    assert out == ["!", ("email", "=ilike", "a@b.com")]
+
+
+def test_eq_ilike_on_hidden_field_still_needs_optin() -> None:
+    # The redaction policy runs on the field before the operator: a new
+    # operator is not a new oracle.
+    with pytest.raises(DomainSandboxError, match="permanently redacted"):
+        sandbox_domain([("access_token", "=ilike", "ABC%")], _PII_FIELDS, model="account.move")
+    with pytest.raises(DomainSandboxError, match="sensitive"):
+        sandbox_domain([("vat", "=ilike", "be0477%")], _PII_FIELDS, model="res.partner")
+
+
+@pytest.mark.parametrize(
+    ("op", "hint"),
+    [
+        ("not =like", "['!', (field, '=like', value)]"),
+        ("not =ilike", "['!', (field, '=ilike', value)]"),
+        ("<>", "'!='"),
+        ("any", "two calls"),
+        ("not any", "two calls"),
+    ],
+)
+def test_refused_operator_names_the_portable_spelling(op: str, hint: str) -> None:
+    with pytest.raises(DomainSandboxError, match="not allowed") as exc:
+        sandbox_domain([("name", op, "x")], FIELDS)
+    assert hint in str(exc.value)
+
+
+def test_unhinted_operator_message_unchanged() -> None:
+    with pytest.raises(DomainSandboxError) as exc:
+        sandbox_domain([("name", "between", "x")], FIELDS)
+    assert str(exc.value).startswith("Operator 'between' is not allowed. Allowed: [")
+
+
+def test_non_string_operator_still_refused() -> None:
+    with pytest.raises(DomainSandboxError, match="not allowed"):
+        sandbox_domain([("name", ["="], "x")], FIELDS)
